@@ -48,6 +48,7 @@ from gateway.session import build_session_key
 from ._transport import (
     BACKGROUND_REVIEW_PREFIX,
     BASE,
+    CREDENTIAL_REFUSED,
     _ACTIVE_TURN,
     _DIAGNOSTIC_PREFIXES,
     _NEVER_GUESS,
@@ -468,8 +469,11 @@ def _goal_parse_command(body):
     """(action, argument) for a `/goal` message, else None.
 
     Every inbound `/...` is already routed away from the roster prefix and into
-    the gateway's slash router, which has never heard of `/goal` -- so the
-    plugin has to claim it before hand-off or it lands as an unknown command.
+    the gateway's slash router, which registers a `/goal` of its own
+    (`hermes_cli/commands.py:113`, dispatched to its `goal` busy handler). That
+    one is turn-budgeted; ours is a time-budgeted standing objective with paced
+    wakes, so the plugin claims the name before hand-off -- see #152, which owns
+    the unmade product call about which model wins.
     """
     head, _, rest = (body or "").strip().partition(" ")
     if head.lower() != "/goal":
@@ -2245,6 +2249,19 @@ class PlowChatAdapter(BasePlatformAdapter):
                                  "trusted": body["trusted"]}
         return {"trusted": body["trusted"]}
 
+    async def send_clarify(self, chat_id, question, choices, clarify_id, session_key, metadata=None):
+        """Mark the question, then let base render it.
+
+        Base's fallback ends in a plain `send()` carrying only the turn's thread
+        metadata (`base.py:2566`) -- no `notify` -- so the quiet gate read the
+        question as the model thinking out loud and withheld it everywhere but
+        the owner's solo DM. `clarify_id` is what tells the two apart; the
+        wording, the numbered choices and the text intercept stay upstream's.
+        """
+        return await super().send_clarify(
+            chat_id=chat_id, question=question, choices=choices, clarify_id=clarify_id,
+            session_key=session_key, metadata={**(metadata or {}), "clarify_id": clarify_id})
+
     async def send_or_update_status(self, chat_id, status_key, content, metadata=None):
         """Absorb the gateway's agent status frames instead of texting them.
 
@@ -2842,11 +2859,18 @@ class PlowChatAdapter(BasePlatformAdapter):
                     self._goal_pause_wakes()
 
         await _serve(session, self._mark_disconnected, PLATFORM_NAME)
+        self._set_fatal_error(*CREDENTIAL_REFUSED, retryable=False)
         # Terminal. State first (`_serve` marked us disconnected), then the
         # tool handle: a confirmed group send against a retired credential
         # must refuse, not invoke this adapter. (Re-port of #17.)
         if _live is not None and _live[0] is self:
             _live = None
+        # Recording the stop is not reporting it. `_notify_fatal_error` is the
+        # separate call that reaches the handler the runner installed
+        # (`run_adapters.py:1036`), which pops this adapter and queues a
+        # reconnect (`:302-330`); without it the listen task simply ends -- the
+        # line permanently deaf, the gateway up and believing it is healthy.
+        await self._notify_fatal_error()
 
     async def _on_frame(self, frame, http=None):
         if frame.get("type") == "connected":
@@ -2974,7 +2998,9 @@ class PlowChatAdapter(BasePlatformAdapter):
         # our own name would read every peer message as addressed to us.
         spoken = text
         # `/goal` is ours to claim before the hand-off: every `/...` routes to
-        # hermes' own slash router, which has never heard of it.
+        # hermes' own slash router, which registers a `/goal` of its own
+        # (`hermes_cli/commands.py:113`). This intercept is the only thing
+        # keeping ours -- see `_goal_parse_command` and #152.
         if burst[0].starts_slash_command and _goal_parse_command(text):
             await self._goal_command(chat_uid, text, authority, goal, burst[-1].uid, sender)
             self._checkpoint(burst[-1].uid, chat_uid)

@@ -134,7 +134,11 @@ The model's own **mid-turn prose** is gated by the same setting, but only
 where someone else is listening. What counts as mid-turn is a metadata test,
 not a prefix one: Hermes marks the turn-final reply `notify` and a cron
 delivery `job_id`, and anything carrying neither, sent while a turn is open, is
-the model working out loud.
+the model working out loud. Two markers are read as questions rather than
+prose: `clarify_id` and `is_approval_prompt`. A blocking question is not
+working-out -- the turn stops until the room answers it -- and base's text
+fallback sends one carrying neither `notify` nor `job_id`, so without that
+carve-out it was withheld everywhere but the owner's own DM.
 
 **The answer goes last, and that is still a prompt rule, because the delivery
 seam can withhold prose but cannot recognise an answer.** Hermes reads whatever

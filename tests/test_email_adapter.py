@@ -20,6 +20,7 @@ import pytest
 
 from test_adapter import (
     _HTTP,
+    _Session,
     _SEND_ARGV,
     _attachment,
     _capture_events,
@@ -188,6 +189,9 @@ async def test_an_email_turn_confines_the_chat_tools_and_never_sends_from_the_ow
         pytest.param("cht_m", ("cht_m", True), {"notify": True}, "Attached below.", True, True, id="the-answer"),
         pytest.param("cht_m", None, {"job_id": "j1"}, "Weekly digest", True, True, id="cron"),
         pytest.param("cht_m", ("cht_m", True), None, "Looking that up now.", False, True, id="mid-turn-prose"),
+        # The one mid-turn send that is not working-out: the turn blocks on it.
+        pytest.param("cht_m", ("cht_m", True), {"is_approval_prompt": True},
+                     "Run `rm -rf build`?", True, True, id="approval-prompt"),
         pytest.param("cht_m", None, {"notify": True}, "⏳ Working — still on it", False, True, id="diagnostic"),
         pytest.param("cht_m", ("cht_m", False), {"notify": True}, "Here it is.", True, True, id="member-reply"),
         pytest.param("cht_n", ("cht_m", False), {"notify": True}, "Here it is.", False, False, id="member-cross-thread"),
@@ -221,6 +225,55 @@ async def test_a_reply_goes_to_the_chat_send_endpoint_and_only_the_answer_goes(
     assert http.posts == ([(f"{module.BASE}/v1/chats/{target}/messages", {"body": body})] if posted else [])
     assert result.message_id == ("msg_sent" if posted and success else None)
     assert success or result.error.startswith("Plow Email")
+
+
+async def test_a_revoked_credential_on_the_mail_line_reaches_the_gateway(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
+) -> None:
+    """This line stops on a 401 exactly as the phone line does, and the gateway
+    has to hear about it: writing the status file is not calling the handler
+    the runner installed, and without that call the mail line goes permanently
+    deaf inside a gateway that still believes it is connected."""
+    module, _entry = _load_email(monkeypatch, tmp_path)
+    mail = _adapter(module)
+    notified: list[Any] = []
+
+    async def handler(failed: Any) -> None:
+        notified.append(failed)
+
+    mail.set_fatal_error_handler(handler)
+    session = _Session()
+    session.ticket_status = 401
+    monkeypatch.setattr(module.aiohttp, "ClientSession", lambda *a, **k: session)
+
+    with mock.patch.object(module.asyncio, "sleep", side_effect=AssertionError("must not retry")):
+        await mail._listen()
+
+    assert notified == [mail]
+    assert mail._fatal_error_code == "credential_refused"
+
+
+async def test_a_clarify_question_leaves_the_mail_line(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
+) -> None:
+    """The `mid-turn-prose` row above is withheld unconditionally here -- this
+    line has no owner-DM carve-out at all -- so a clarify question was dropped
+    in every thread and the agent waited forever. Base's fallback forwards only
+    the turn's thread metadata (base.py:2566); the `clarify_id` stamp is what
+    separates a question the turn blocks on from the prose around it."""
+    module, _entry = _load_email(monkeypatch, tmp_path)
+    mail = _adapter(module)
+    mail._set_reach([_mail_chat("cht_m")])
+    http = _HTTP()
+    monkeypatch.setattr(module.plow_email.aiohttp, "ClientSession", lambda *a, **k: http)
+    module._ACTIVE_TURN.set({"chat_uid": "cht_m", "owner": True, "dm": False,
+                             "authority": True, "email": True})
+
+    asked = await mail.send_clarify(chat_id="cht_m", question="Which invoice?", choices=None,
+                                    clarify_id="clr1", session_key="s1", metadata=None)
+
+    assert asked.success
+    assert http.posts == [(f"{module.BASE}/v1/chats/cht_m/messages", {"body": "\u2753 Which invoice?"})]
 
 
 def test_register_declares_both_platforms_on_one_transport(

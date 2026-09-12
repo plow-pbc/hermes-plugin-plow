@@ -87,6 +87,31 @@ def _load(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, *, deferred_q
         def _mark_connected(self) -> None: ...
         def _mark_disconnected(self) -> None: ...
 
+        # The fatal seam exactly as base splits it: `_set_fatal_error`
+        # (base.py:2069) records, `_notify_fatal_error` (base.py:2092) tells
+        # the runner, and they are separate calls. The runner's handler is
+        # async (`run_adapters.py:1036` installs `_handle_adapter_fatal_error`),
+        # which is the only shape modelled here.
+        _fatal_error_handler: Any = None
+        _fatal_error_code: str | None = None
+
+        def set_fatal_error_handler(self, handler: Any) -> None:
+            self._fatal_error_handler = handler
+
+        def _set_fatal_error(self, code: str, message: str, *, retryable: bool) -> None:
+            self._fatal_error_code = code
+
+        async def _notify_fatal_error(self) -> None:
+            if self._fatal_error_handler is not None:
+                await self._fatal_error_handler(self)
+
+        async def send_clarify(self, *, chat_id: str, question: str, choices: Any,
+                               clarify_id: str, session_key: str, metadata: Any = None) -> Any:
+            """Base's text fallback, reduced to the line the carve-out is about:
+            it ends in a plain `send()` forwarding whatever metadata it was
+            given (base.py:2566), which is why the question needs a marker."""
+            return await self.send(chat_id=chat_id, content=f"\u2753 {question}", metadata=metadata)
+
         # base.py:3015 / :3009 -- pause the turn-long refresh loop, then clear
         # the platform's own indicator, swallowing adapter errors.
         def pause_typing_for_chat(self, chat_id: str) -> None:
@@ -4120,6 +4145,14 @@ async def test_ticket_mint_status_decides_terminal_vs_retry(
     warn-and-retry."""
     module = _load(monkeypatch, tmp_path)
     adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
+    # The runner installs this at run_adapters.py:1036; it is what pops the
+    # adapter and queues the reconnect (:302-330). Writing the status file is
+    # not calling it -- an uninformed gateway stays up believing the line works.
+    notified: list[Any] = []
+    async def handler(failed: Any) -> None:
+        notified.append(failed)
+
+    adapter.set_fatal_error_handler(handler)
     calls: list[str] = []
     session = _Session(calls=calls)
     session.ticket_status = status
@@ -4134,6 +4167,9 @@ async def test_ticket_mint_status_decides_terminal_vs_retry(
             await adapter._listen()  # returns; raising into the sleep would fail
         assert module._live is None, "a terminal stop must retire the tool handle"
     assert "ws_connect" not in calls, calls
+    assert notified == ([] if retries else [adapter]), (
+        "a retryable drop must leave the gateway alone; a dead credential must reach its handler")
+    assert adapter._fatal_error_code == (None if retries else "credential_refused")
 
 
 # ---------------------------------------------------------------------------
@@ -4448,11 +4484,15 @@ async def test_the_goal_judge_runs_with_the_indicator_already_stopped(
     [
         ({"notify": True}, True),            # the turn-final reply
         ({"job_id": "abc123"}, True),        # a cron delivery
+        # The approval prompt, carrying the marker the gateway's own text
+        # fallback stamps on it (run_turn_runner.py:1374). A question the
+        # room has to answer is not the model thinking out loud.
+        ({"is_approval_prompt": True}, True),
         ({"thread_id": "t1"}, False),        # interim prose
         ({}, False),                         # a gateway notice
         (None, False),                       # heartbeat with no metadata at all
     ],
-    ids=["final", "cron", "interim", "notice", "no-metadata"],
+    ids=["final", "cron", "approval", "interim", "notice", "no-metadata"],
 )
 async def test_quiet_withholds_the_working_out_only_where_someone_else_is_listening(
     monkeypatch: pytest.MonkeyPatch,
@@ -4485,6 +4525,38 @@ async def test_quiet_withholds_the_working_out_only_where_someone_else_is_listen
     )
     dm = await adapter.send("cht_a", "the body", metadata=metadata)
     assert dm.success and http.posts, "the owner's own 1:1 withholds nothing"
+
+
+async def test_a_clarify_question_reaches_the_room_it_is_asked_of(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """The agent blocks until this is answered, so withholding it hangs the turn.
+
+    Base's clarify fallback ends in a plain `send()` forwarding the turn's
+    thread metadata (base.py:2566) -- which carries no `notify` -- so the quiet
+    gate read the question as mid-turn working-out and dropped it in every room
+    but the owner's 1:1, leaving the agent waiting on an answer nobody was asked
+    for.
+
+    The second half is the whole point of keying the carve-out on metadata:
+    ordinary prose in that same room, on that same turn, is still withheld."""
+    module = _load(monkeypatch, tmp_path)
+    http = _SettingsHTTP(_me(verbose=False))
+    adapter = _verbose_adapter(module, http, monkeypatch)
+    adapter._active_turn.set(
+        {"chat_uid": "cht_g", "owner": True, "dm": False, "authority": True, "no_reply_ok": False}
+    )
+
+    asked = await adapter.send_clarify(
+        chat_id="cht_g", question="Which address should I ship to?", choices=None,
+        clarify_id="clr1", session_key="s1", metadata={"thread_id": "t1"},
+    )
+    assert asked.success
+    assert [body for _url, body in http.posts] == [{"body": "\u2753 Which address should I ship to?"}]
+
+    http.posts.clear()
+    chatter = await adapter.send("cht_g", "let me check the order", metadata={"thread_id": "t1"})
+    assert chatter.success and http.posts == [], "the carve-out is the question, not the room"
 
 
 @pytest.mark.parametrize(

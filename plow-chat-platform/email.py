@@ -20,6 +20,7 @@ from gateway.platforms.base import BasePlatformAdapter, MessageEvent, SendResult
 
 from ._transport import (
     BASE,
+    CREDENTIAL_REFUSED,
     _ACTIVE_TURN,
     _DIAGNOSTIC_PREFIXES,
     _bearer,
@@ -124,6 +125,18 @@ class PlowEmailAdapter(BasePlatformAdapter):
                         await self._on_frame(frame.json(), http)
 
         await _serve(session, self._mark_disconnected, PLATFORM_NAME)
+        self._set_fatal_error(*CREDENTIAL_REFUSED, retryable=False)
+        # The gateway learns this line is dead only here -- see `_serve` for
+        # why the notify belongs to the task that owns the loop.
+        await self._notify_fatal_error()
+
+    async def send_clarify(self, chat_id, question, choices, clarify_id, session_key, metadata=None):
+        """Stamp the question so `_is_chatter` does not read it as prose. This
+        line withholds chatter in EVERY thread, so see PlowChatAdapter for the
+        reasoning -- the consequence here is simply unconditional."""
+        return await super().send_clarify(
+            chat_id=chat_id, question=question, choices=choices, clarify_id=clarify_id,
+            session_key=session_key, metadata={**(metadata or {}), "clarify_id": clarify_id})
 
     async def _on_frame(self, frame, http):
         if frame.get("type") == "connected":

@@ -22,6 +22,12 @@ class _PlowAuthError(Exception):
     the same revoked token, so the caller must stop, not sleep."""
 
 
+# The terminal stop both platforms report, as `_set_fatal_error` takes it. The
+# message reaches the operator through `hermes status`, so it says what to do.
+CREDENTIAL_REFUSED = ("credential_refused",
+                      "Plow rejected the agent token (401); re-credential this agent")
+
+
 def _auth_raise_for_status(resp):
     """The one status seam for every request that presents the credential.
 
@@ -89,6 +95,11 @@ async def _serve(session, on_drop, tag):
     (observed on the str agent 2026-08-27 -- one WARNING a minute, the line
     dead, the adapter reporting itself connected). `on_drop` marks the
     adapter disconnected on either exit.
+
+    Returning IS the signal: a revoked credential is the only way out, so the
+    caller records the fatal state and tells the gateway itself. Doing that
+    from in here would run the runner's handler -- which cancels this very
+    task -- inside the loop it is cancelling.
     """
     while True:
         try:
@@ -256,6 +267,16 @@ _DIAGNOSTIC_PREFIXES = (BACKGROUND_REVIEW_PREFIX, _WORKING_PREFIX, _NO_REPLY_PRE
 _ACTIVE_TURN = contextvars.ContextVar("plow_chat_active_turn", default=None)
 
 
+# A question the turn BLOCKS on: the one mid-turn send that is not working-out,
+# because withholding it hangs the turn awaiting an answer nobody was asked for.
+# `is_approval_prompt` is the gateway's own marker (`run_turn_runner.py:1374`,
+# `slash_commands.py:271`); `clarify_id` is stamped by each platform's
+# `send_clarify`, since base's fallback forwards only the turn's thread metadata
+# (`base.py:2566`). Metadata only, never text: the wording of a question is the
+# model's to write, and matching on it would hand the model this gate.
+_ASKS_THE_ROOM = ("clarify_id", "is_approval_prompt")
+
+
 def _is_chatter(turn, chat_id, metadata):
     """Is this outbound text the model working out loud, or the turn's answer?
 
@@ -270,4 +291,5 @@ def _is_chatter(turn, chat_id, metadata):
     """
     meta = metadata or {}
     return (turn is not None and chat_id == turn["chat_uid"]
-            and not meta.get("notify") and "job_id" not in meta)
+            and not meta.get("notify") and "job_id" not in meta
+            and not any(meta.get(key) for key in _ASKS_THE_ROOM))
