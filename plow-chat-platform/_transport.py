@@ -58,18 +58,32 @@ async def _granted_chats(http, auth):
 
 
 async def _read_identity(http, auth):
-    """`GET /v1/agents/cloud/me`: the signup block and this agent's number.
+    """`GET /v1/agents/me`: signup, this agent's number, and its persona name.
 
     200 answers. 404 is the documented "this token is not one agent" -- a
     wildcard or multi-line grant -- and answers None so the caller keeps what
     it holds. Anything else is not an answer about identity: through the
     credential seam (a 401 is terminal), then fail like the grant read so the
     caller retries rather than silently running without the offer.
+
+    `name` is `_one_line`-guarded like every other person-supplied value that
+    reaches system authority: unlike the ops-seeded `line.display_name`
+    fallback, this one is owner-set (`PATCH /v1/agents/{uid}`). Creation
+    stores the resource default `"cloud agent"` when the owner omitted a
+    name; that is not a chosen persona, so it is stored unset and
+    `_agent_name` falls through to the line display_name (Elm, Willow).
+    The whole dict is replaced by the caller, not patched -- a 200 is the
+    answer for THIS read, so a cleared name must clear the cache too.
+    The legacy `/v1/agents/cloud/me` alias serves neither `agent` nor the
+    persona, and its 404 would read as "not one agent".
     """
-    async with http.get(f"{BASE}/v1/agents/cloud/me", headers=auth) as resp:
+    async with http.get(f"{BASE}/v1/agents/me", headers=auth) as resp:
         if resp.status == 200:
             me = await resp.json(content_type=None)
-            return {"signup": me.get("signup"), "number": (me.get("line") or {}).get("provider_key")}
+            name = _one_line((me.get("agent") or {}).get("name")) or None
+            return {"signup": me.get("signup"),
+                    "number": (me.get("line") or {}).get("provider_key"),
+                    "name": None if name == "cloud agent" else name}
         if resp.status == 404:
             return None
         _auth_raise_for_status(resp)
@@ -159,25 +173,42 @@ def _participant_identity(participant):
     return display if display and display != handle else handle
 
 
+def _self_agent(chat):
+    """The self agent participant, {} when the roster lacks one."""
+    return next((p for p in chat.get("participants") or []
+                 if p.get("type") == "agent"
+                 and p.get("relationship") in (None, "self")), {})
+
+
 def _self_agent_line(chat):
     """The self agent participant's line dict, {} when the roster lacks one."""
-    agent = next((p for p in chat.get("participants") or []
-                  if p.get("type") == "agent"
-                  and p.get("relationship") in (None, "self")), {})
-    return agent.get("line") or {}
+    return _self_agent(chat).get("line") or {}
 
 
-def _agent_name(chat):
+def _agent_name(chat, override=None):
     """The line's persona name ("Elm"), or None for an unnamed line.
 
-    Read from the chat's own agent participant, so the DB stays the single
-    identity source and a rename needs no reprovision — it lands at the next
-    reach refresh (reconnect or group-send adoption), which is deliberate: a
-    rename is a rare coordinated ops event (it ships a new vCard too), not
-    worth an HTTP fetch per delivered message. `.get`-tolerant like the rest
-    of the listing readers: a pre-persona server omits `line`, and an unnamed
-    line omits `display_name`.
+    `override`, if a non-empty value, takes priority in every text surface
+    this function feeds — the collaboration prompt and (via the mapping loop
+    in `_collaboration_turn_context`) the roster line. Callers pass
+    `self._identity["name"]`: `agent.name` from `GET /v1/agents/me`, set by
+    the owner with `PATCH /v1/agents/{uid}` and read back at reach refresh, no
+    reprovision or dotenv access needed. The API's creation default
+    `"cloud agent"` is stored as unset, so this falls through to the line's
+    `display_name`. It does not change `line.display_name` itself, and it does
+    not reach the iMessage contact card, which the server delivers directly to
+    the phone before this plugin's gateway ever connects.
+
+    With no override, read from the chat's own agent participant, so the DB
+    stays the single identity source and a rename needs no reprovision — it
+    lands at the next reach refresh (reconnect or group-send adoption), which
+    is deliberate: a rename is a rare coordinated ops event (it ships a new
+    vCard too), not worth an HTTP fetch per delivered message. `.get`-tolerant
+    like the rest of the listing readers: a pre-persona server omits `line`,
+    and an unnamed line omits `display_name`.
     """
+    if override:
+        return override
     return _self_agent_line(chat).get("display_name") or None
 
 
