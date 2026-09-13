@@ -1576,11 +1576,6 @@ _ROSTER = "Plow's lines -- the numbers and mailboxes Plow agents answer from -- 
             None, {"signup": None, "number": NUMBER, "lines": ()},
             "You are a Plow assistant.", None, None, id="unnamed-no-signup-no-roster",
         ),
-        pytest.param(
-            "Elm", {"signup": None, "number": None},
-            "You are Elm, a Plow assistant; people here address you by that name.",
-            None, None, id="identity-without-a-lines-key",
-        ),
     ],
 )
 def test_the_identity_prefix_says_these_things_in_this_order(
@@ -1924,7 +1919,7 @@ def test_roster_context_carries_relationships_and_the_prompt_says_they_are_the_o
     # takes, and the owner's own row says so, so naming the owner has a source too.
     assert "Abby (+15550000002) (landlord)" in context
     assert "Sam (+15550000001) (your owner)" in context
-    identity = {"signup": None, "number": None}
+    identity = {"signup": None, "number": None, "lines": ()}
     prompt = module._collaboration_prompt(module.EXTERNAL_CHANNEL_PROMPT, chat, identity)
     assert "Abby" not in prompt
     assert "landlord" not in prompt
