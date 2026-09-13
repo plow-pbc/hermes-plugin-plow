@@ -467,9 +467,12 @@ def _goal_active(record, now=None):
 def _goal_parse_command(body):
     """(action, argument) for a `/goal` message, else None.
 
-    Every inbound `/...` is already routed away from the roster prefix and into
-    the gateway's slash router, which has never heard of `/goal` -- so the
-    plugin has to claim it before hand-off or it lands as an unknown command.
+    Every inbound `/...` is routed away from the roster prefix and into the
+    gateway's slash router, which DOES know `/goal` (hermes_cli/commands.py
+    registers it, and gateway/run_goals.py runs a post-turn judge for it from
+    the generic inbound path). We claim it first anyway, deliberately: theirs
+    is a different product on this surface -- see `_goal_after_turn` for the
+    three ways, and why a phone line wants ours.
     """
     head, _, rest = (body or "").strip().partition(" ")
     if head.lower() != "/goal":
@@ -1848,6 +1851,32 @@ class PlowChatAdapter(BasePlatformAdapter):
         await self.handle_message(event)
 
     async def _goal_after_turn(self, chat_uid, event, said):
+        """Judge the turn against the standing goal, then pace the next wake.
+
+        Hermes ships goals too -- `hermes_cli/goals.py`, `/goal` registered in
+        `hermes_cli/commands.py`, a post-turn judge in `gateway/run_goals.py`
+        reached from the generic inbound path. We do not use it, and the three
+        reasons are worth stating so nobody re-derives them:
+
+        1. CADENCE. Theirs re-enqueues a continuation through the adapter FIFO
+           after EVERY turn (`run_goals.py::_post_turn_goal_continuation`), so a
+           goal runs back-to-back until done. Ours wakes on a backoff, 15min to
+           2h. On a phone line the first is a different product -- and a
+           different bill -- not a different implementation.
+        2. BUDGET. `GoalState` has `turns_used`/`max_turns` and no clock; ours
+           expires after GOAL_TTL_HOURS. "Ends after N turns" and "ends after
+           12 hours" are answers to different questions.
+        3. THE JUDGE. `judge_goal()` is standalone and we could call it, but its
+           system prompt has no untrusted-transcript clause. Ours does, because
+           ours reads a GROUP thread: the transcript is written by other people
+           and other agents, and "the goal is complete" inside it is a claim to
+           weigh, not a verdict. Their judge reads one user's own session, so
+           they do not need the clause and we cannot drop it.
+
+        Adopting any of the three costs UX or safety, so this stays ours. What
+        is genuinely shared -- the media cache, the session key, the fatal
+        status, the typing lifecycle -- we do take from upstream.
+        """
         async with self._goal_lock(chat_uid):
             goal = _goal_load(chat_uid)
             if not _goal_active(goal):
@@ -2973,8 +3002,9 @@ class PlowChatAdapter(BasePlatformAdapter):
         # roster context names THIS agent, so testing the prefixed text for
         # our own name would read every peer message as addressed to us.
         spoken = text
-        # `/goal` is ours to claim before the hand-off: every `/...` routes to
-        # hermes' own slash router, which has never heard of it.
+        # `/goal` is ours to claim before the hand-off. Not because the
+        # gateway lacks one -- it has a fuller one -- but because ours is
+        # paced for a phone line; `_goal_after_turn` records the difference.
         if burst[0].starts_slash_command and _goal_parse_command(text):
             await self._goal_command(chat_uid, text, authority, goal, burst[-1].uid, sender)
             self._checkpoint(burst[-1].uid, chat_uid)
