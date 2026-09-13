@@ -21,6 +21,7 @@ import pytest
 from test_adapter import (
     LINES,
     _HTTP,
+    _Resp,
     _SEND_ARGV,
     _attachment,
     _capture_events,
@@ -160,6 +161,29 @@ async def test_a_mail_thread_is_plow_emails_turn_and_never_plow_chats(
     # `_serve` logs the TYPE only -- an aiohttp handshake error stringifies a
     # live ticket -- so an unnamed raise reads exactly like a network blip.
     assert "cht_x has no owner participant" in caplog.text
+
+
+async def test_an_unknown_thread_is_delivered_even_when_the_roster_read_is_down(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
+) -> None:
+    """The refresh an unknown thread triggers reads the grant alone. The roster
+    is read once per connect, so a /v1/lines outage cannot cost the thread its
+    first email (the mail line has no backfill)."""
+    module, _entry = _load_email(monkeypatch, tmp_path)
+    mail = _adapter(module)
+    mail._set_reach([_chat("cht_a")])                    # cht_m is not known yet
+    events = _capture_events(monkeypatch, mail)
+
+    class _GrantOnlyHTTP:
+        def get(self, url: str, **kwargs: Any) -> _Resp:
+            if url.endswith("/v1/lines"):
+                return _Resp({}, status=503)
+            return _Resp({"object": "list", "data": [_chat("cht_a"), _mail_chat("cht_m")], "has_more": False})
+
+    await mail._on_frame(_envelope("evt_1", "cht_m", "msg_1"), _GrantOnlyHTTP())
+
+    [event] = events
+    assert event["source"].chat_id == "cht_m" and event["message_id"] == "msg_1"
 
 
 @pytest.mark.parametrize("role", ["owner", "member"])
