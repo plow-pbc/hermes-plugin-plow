@@ -1165,22 +1165,22 @@ EXTERNAL_CHANNEL_PROMPT = (
 def _lines_fact(lines, number):
     """The roster of Plow's lines, as one sentence, or None when none is named.
 
-    Grouped by persona: the API serves the number and the mailbox as two rows
-    that share a display_name. An unnamed line has no persona to name and is
+    Grouped by persona: the API serves a number and a mailbox as rows that
+    share a display_name, listed in its own order, so the handles read in
+    that order. An unnamed line has no persona to name and is
     skipped. `number` is this agent's own, so the model can tell its own
     thread from its siblings'. All of it is ops-seeded, never sender text.
     """
     personas = {}
     for line in lines:
         if line.get("display_name"):
-            personas.setdefault(line["display_name"], {})[line.get("provider_type")] = line.get("provider_key")
+            personas.setdefault(line["display_name"], []).append(line["provider_key"])
     if not personas:
         return None
     entries = []
     for name, handles in sorted(personas.items()):
-        addresses = ", ".join(h for h in (handles.get("imessage"), handles.get("email")) if h)
-        you = "; that is you" if number and handles.get("imessage") == number else ""
-        entries.append(f"{name} ({addresses}{you})")
+        you = "; that is you" if number and number in handles else ""
+        entries.append(f"{name} ({', '.join(handles)}{you})")
     return ("Plow's lines -- the numbers and mailboxes Plow agents answer from -- are "
             f"{', '.join(entries)}. A thread with any of them in your owner's Messages or mail is your "
             "owner using Plow, whichever agent answered there. 'How do I use Plow', 'what has Plow done "
