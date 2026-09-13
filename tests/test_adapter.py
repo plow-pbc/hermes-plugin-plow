@@ -36,6 +36,15 @@ PLUGIN = pathlib.Path(__file__).resolve().parents[1] / "plow-chat-platform" / "_
 SIGNUP = {"name": "Life Assistant", "phrase": "Set this up for me: aiworthusing.com/agent-index/life"}
 NUMBER = "+16505550100"
 
+# What `GET /v1/lines` serves: the pool, as personas with a number and a
+# mailbox each. One unnamed row, which the roster must skip.
+LINES = [
+    {"uid": "ln_e", "provider_type": "imessage", "provider_key": NUMBER, "display_name": "Elm"},
+    {"uid": "ln_em", "provider_type": "email", "provider_key": "elm@plow.co", "display_name": "Elm"},
+    {"uid": "ln_s", "provider_type": "imessage", "provider_key": "+16505550101", "display_name": "Spruce"},
+    {"uid": "ln_u", "provider_type": "imessage", "provider_key": "+16505550199", "display_name": None},
+]
+
 # The four turn shapes every action gate is keyed on, plus no turn at all
 # (a cron run), as `_authority` derives them -- see the prompt matrix. The
 # trusted-group member is the one shape where `owner` and `authority` diverge;
@@ -1150,6 +1159,8 @@ class _AnchorLifecycleHTTP:
     def get(self, url: str, *, headers: dict[str, str]) -> _Resp:
         if url.endswith("/v1/agents/cloud/me"):
             return _Resp({"line": {"uid": "ln_x", "provider_key": NUMBER}, "signup": SIGNUP})
+        if url.endswith("/v1/lines"):
+            return _Resp({"object": "list", "data": LINES, "has_more": False})
         if url.endswith("/v1/chats"):
             return _Resp({"object": "list", "data": self.chats, "has_more": False})
         chat_uid = url.split("/v1/chats/")[1].split("/")[0]
@@ -2024,24 +2035,26 @@ async def test_a_grant_that_drops_the_configured_home_is_refused(
 
 
 @pytest.mark.parametrize(
-    ("me_status", "held", "refreshes"),
+    ("me_status", "lines_status", "held", "refreshes"),
     [
-        pytest.param(200, {"signup": None, "number": None}, True, id="200-sets-it"),
-        pytest.param(404, {"signup": SIGNUP, "number": NUMBER}, True, id="404-keeps-what-we-hold"),
-        pytest.param(503, {"signup": SIGNUP, "number": NUMBER}, False, id="503-fails-the-refresh"),
+        pytest.param(200, 200, {"signup": None, "number": None, "lines": ()}, True, id="200-sets-it"),
+        pytest.param(404, 200, {"signup": SIGNUP, "number": NUMBER, "lines": ()}, True, id="404-keeps-what-we-hold"),
+        pytest.param(503, 200, {"signup": SIGNUP, "number": NUMBER, "lines": ()}, False, id="503-fails-the-refresh"),
         # Below 400, so raise_for_status stays quiet -- a proxy bouncing us to a
         # login page is still not an answer about identity, and must fail loudly.
-        pytest.param(302, {"signup": SIGNUP, "number": NUMBER}, False, id="302-fails-the-refresh"),
+        pytest.param(302, 200, {"signup": SIGNUP, "number": NUMBER, "lines": ()}, False, id="302-fails-the-refresh"),
+        # The roster read has no 404 rule: any non-200 fails the refresh.
+        pytest.param(200, 503, {"signup": SIGNUP, "number": NUMBER, "lines": ()}, False, id="lines-503-fails-the-refresh"),
     ],
 )
 async def test_reach_refresh_reads_the_signup_facts_and_only_a_200_speaks(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
-    me_status: int, held: dict[str, Any], refreshes: bool
+    me_status: int, lines_status: int, held: dict[str, Any], refreshes: bool
 ) -> None:
-    """The facts come from /me on the same refresh that reads the grant. Only a
-    200 sets them; a 404 (a token /me cannot identify as one agent) keeps what
-    we hold and the phone line up; anything else is not an answer about
-    identity and fails the refresh, so _listen retries rather than running on
+    """The facts come from /me and /v1/lines on the same refresh that reads the
+    grant. Only a 200 sets them; a 404 on /me (a token /me cannot identify as
+    one agent) keeps what we hold and the phone line up; anything else is not
+    an answer and fails the refresh, so _listen retries rather than running on
     silently. Refresh has no timer, so an overwrite on failure would strip the
     offer for the life of a healthy socket."""
     module = _load(monkeypatch, tmp_path)
@@ -2053,16 +2066,18 @@ async def test_reach_refresh_reads_the_signup_facts_and_only_a_200_speaks(
             if url.endswith("/v1/agents/cloud/me"):
                 return _Resp({"line": {"uid": "ln_x", "provider_key": NUMBER}, "chats": [], "mcp_url": None,
                               "signup": SIGNUP}, status=me_status)
+            if url.endswith("/v1/lines"):
+                return _Resp({"object": "list", "data": LINES, "has_more": False}, status=lines_status)
             return _Resp({"object": "list", "data": [_chat("cht_a")], "has_more": False})
 
     if refreshes:
         await adapter._refresh_reach(_ReachAndMeHTTP())
         assert adapter.chat_uids == frozenset({"cht_a"})
+        assert adapter._identity == {"signup": SIGNUP, "number": NUMBER, "lines": LINES}
     else:
         with pytest.raises(RuntimeError):
             await adapter._refresh_reach(_ReachAndMeHTTP())
-
-    assert adapter._identity == {"signup": SIGNUP, "number": NUMBER}
+        assert adapter._identity == held
 
 
 async def test_reach_serves_only_the_phone_line_and_ignores_email_frames(
@@ -2086,6 +2101,8 @@ async def test_reach_serves_only_the_phone_line_and_ignores_email_frames(
 
         def get(self, url: str, **kwargs: Any) -> _Resp:
             self.gets += 1
+            if url.endswith("/v1/lines"):
+                return _Resp({"object": "list", "data": [], "has_more": False})
             return _Resp(listing if url.endswith("/v1/chats") else {}, status=200 if url.endswith("/v1/chats") else 404)
 
     http = _GrantHTTP()
@@ -3924,6 +3941,8 @@ async def test_connect_reads_who_invited_the_owner_once_and_comes_up_without_it(
                 return _Resp(payload, status=status)
             if url.endswith("/v1/agents/cloud/me"):
                 return _Resp({"line": {"uid": "ln_x", "provider_key": NUMBER}, "signup": SIGNUP})
+            if url.endswith("/v1/lines"):
+                return _Resp({"object": "list", "data": LINES, "has_more": False})
             return _Resp({"object": "list", "data": [_chat("cht_a")], "has_more": False})
 
     monkeypatch.setattr(module.aiohttp, "ClientSession", lambda *a, **k: _ProfileHTTP())

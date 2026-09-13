@@ -67,6 +67,7 @@ from ._transport import (
     _owner_identity,
     _participant_identity,
     _read_identity,
+    _read_lines,
     _represented_member,
     _self_agent_line,
     _serve,
@@ -1268,7 +1269,7 @@ class PlowChatAdapter(BasePlatformAdapter):
         self._configured_home_chat_uid = os.environ["PLOW_HOME_CHANNEL"]
         self.home_chat_uid = self._configured_home_chat_uid
         self.auth = _bearer()
-        self._identity = {"signup": None, "number": None}   # read at reach refresh, see _refresh_reach
+        self._identity = {"signup": None, "number": None, "lines": ()}   # read at reach refresh, see _refresh_reach
         self._referred_by = None            # (name, product) of whoever invited the owner, see _read_referrer
         config.extra["group_sessions_per_user"] = False
         self.chat_uids = frozenset({self.home_chat_uid})
@@ -1392,8 +1393,10 @@ class PlowChatAdapter(BasePlatformAdapter):
             # so overwriting on a failure would let one blip strip the offer
             # for the life of a healthy socket.
             me = await _read_identity(http, self.auth)
-            if me is not None:
-                self._identity = me
+            # The roster is a fact about Plow, not this token, so it has no
+            # 404 case: a 200 sets it and anything else fails the refresh.
+            lines = await _read_lines(http, self.auth)
+            self._identity = {**self._identity, **(me or {}), "lines": lines}
         except _PlowAuthError:
             raise                              # terminal; _listen owns the stop
         except Exception as exc:              # noqa: BLE001 - the caller reconnects

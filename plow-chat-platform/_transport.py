@@ -57,6 +57,24 @@ async def _granted_chats(http, auth):
     return body["data"]
 
 
+async def _read_lines(http, auth):
+    """`GET /v1/lines`: every line Plow answers from, as the API serves it.
+
+    The pool is shared by every tenant, so this is a fact about Plow rather
+    than about this agent, and the listing is served to the `chats:use` scope
+    every agent token holds. `has_more` is always false; a true would mean
+    the roster is truncated, which the prompt must not paper over.
+    """
+    async with http.get(f"{BASE}/v1/lines", headers=auth) as resp:
+        _auth_raise_for_status(resp)
+        if resp.status != 200:
+            raise RuntimeError(f"the lines read returned HTTP {resp.status}")
+        body = await resp.json(content_type=None)
+    if body["has_more"]:
+        raise RuntimeError("the lines listing is truncated")
+    return body["data"]
+
+
 async def _read_identity(http, auth):
     """`GET /v1/agents/cloud/me`: the signup block and this agent's number.
 
