@@ -82,7 +82,6 @@ class PlowEmailAdapter(BasePlatformAdapter):
 
     async def _refresh_reach(self, http):
         self._set_reach(await _granted_chats(http, self.auth))
-        self._lines = await _read_lines(http, self.auth)
 
     def _publish_hint(self):
         """Writes the address onto the platform registry entry the gateway
@@ -104,6 +103,9 @@ class PlowEmailAdapter(BasePlatformAdapter):
                 pass
         async with aiohttp.ClientSession() as http:
             await self._refresh_reach(http)
+            # Once per connect, not per unknown-thread refresh: a roster blip
+            # must not abort delivery of the frame that triggered the refresh.
+            self._lines = await _read_lines(http, self.auth)
         self._ws_task = asyncio.create_task(self._listen())
         return True
 
