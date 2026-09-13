@@ -931,6 +931,31 @@ MAC_SKILLS_HEAD = (
     "do, before session_search, before memory, before you reply:\n"
 )
 MAC_SKILLS_TTL_S = 600
+# Hermes' budgets (hermes_cli.plugins_dispatch): a section over
+# MAX_SYSTEM_PROMPT_SECTION_CHARS is dropped whole, and so is the section
+# that carries the aggregate over MAX_SYSTEM_PROMPT_SECTIONS_TOTAL_CHARS --
+# each with a log line and nothing else. The aggregate counts the rendered
+# form (format_system_prompt_section: a heading and a char-count comment
+# around the text) plus the container markers, and renders sections sorted
+# by id, so plow-latch is charged first and plow-latch-skills gets the rest.
+HERMES_SECTION_MAX_CHARS = 4000
+HERMES_SECTIONS_TOTAL_CHARS = 8000
+
+
+def _hermes_section_chars(section_id: str, text: str) -> int:
+    return len(f"## Plugin Context: {section_id}\n<!-- hermes-plugin-section-chars:{len(text)} -->\n\n{text}")
+
+
+def _hermes_sections_overhead() -> int:
+    return len("<!-- hermes-plugin-sections:start -->") + len("<!-- hermes-plugin-sections:end -->") + 2
+
+
+MAC_SKILLS_MAX_CHARS = min(
+    HERMES_SECTION_MAX_CHARS,
+    HERMES_SECTIONS_TOTAL_CHARS - _hermes_sections_overhead()
+    - _hermes_section_chars("plow-latch", LATCH_PROMPT) - 2  # the separator between sections
+    - (_hermes_section_chars("plow-latch-skills", "x" * HERMES_SECTION_MAX_CHARS) - HERMES_SECTION_MAX_CHARS),
+)
 MAC_SKILLS_RETRY_S = 60
 _mac_skills: dict[str, Any] = {"text": "", "fetched_at": 0.0, "tried_at": 0.0, "lock": threading.Lock()}
 
@@ -996,12 +1021,12 @@ def _fetch_mac_skills(url: str, token: str, timeout: float = 8.0) -> list[dict[s
 def _render_mac_skills(skills: list[dict[str, str]]) -> str:
     if not skills:
         return ""
-    # Hermes skips a section over 4000 chars outright. Each description gets
-    # the first sentence or so -- the routing rule is always at the front --
-    # and the whole section is cut at the cap: a bounded, terminating trim.
+    # Each description gets the first sentence or so -- the routing rule is
+    # always at the front -- and the whole section is cut at what the budget
+    # leaves after the latch section: a bounded, terminating trim.
     lines = [f"- {sk['name']}: {sk['description'][:280]}" for sk in skills]
     text = MAC_SKILLS_HEAD + "\n".join(lines)
-    return text if len(text) <= 4000 else text[:4000].rsplit("\n", 1)[0]
+    return text if len(text) <= MAC_SKILLS_MAX_CHARS else text[:MAC_SKILLS_MAX_CHARS].rsplit("\n", 1)[0]
 
 
 def _refresh_mac_skills() -> None:

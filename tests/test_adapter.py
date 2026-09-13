@@ -5984,7 +5984,7 @@ def test_latch_section_renders_only_when_a_mac_is_connected(
     monkeypatch.setenv("PLOW_MCP_URL", "https://api.plow.co/v1/relay/devices/u/mcp")
     text = render({})
     assert text == module.LATCH_PROMPT
-    assert len(text) <= 4000, "Hermes skips a section over max_chars"
+    assert len(text) <= module.HERMES_SECTION_MAX_CHARS, "Hermes skips a section over max_chars"
     for must in ("Latch", "plow_list_skills", "plow_", "not connected",
                  "plow_list_chats", "plow_send_message",
                  # Outbound goes out from the agent's own line, never the Mac:
@@ -6057,10 +6057,16 @@ def test_mac_skills_section_renders_the_manifest_as_prompt_text(monkeypatch, tmp
     assert "- google-workspace:" in text
     assert "plow_read_skill" in text and "before session_search" in text
     assert module._render_mac_skills([]) == ""
-    # A manifest past Hermes' 4000-char cap is cut, never skipped whole.
+    # A manifest that would push the two sections past Hermes' aggregate
+    # budget is cut, never skipped whole: Hermes renders the sections sorted
+    # by id, latch first, and drops whichever section crosses the total.
     big = [{"name": f"skill{i}", "description": "x" * 900} for i in range(30)]
     trimmed = module._render_mac_skills(big)
-    assert len(trimmed) <= 4000 and "- skill0: " in trimmed
+    assert "- skill0: " in trimmed
+    assert (module._hermes_sections_overhead()
+            + module._hermes_section_chars("plow-latch", module.LATCH_PROMPT)
+            + module._hermes_section_chars("plow-latch-skills", trimmed)
+            <= module.HERMES_SECTIONS_TOTAL_CHARS)
 
     # The section serves the cache; a refresh that fails leaves it empty.
     monkeypatch.setenv("PLOW_MCP_URL", "https://api.plow.co/v1/relay/devices/u/mcp")
