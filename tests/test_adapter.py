@@ -2410,6 +2410,9 @@ def test_platform_declaration_carries_the_facts_hermes_reads_off_it(
     [kwargs] = [call.kwargs for call in ctx.register_platform.call_args_list if call.kwargs["name"] == "plow_chat"]
     assert kwargs["cron_deliver_env_var"] == "PLOW_HOME_CHANNEL"
     assert "your own line" in kwargs["platform_hint"]
+    # How a file reaches this chat (#156): Hermes intercepts MEDIA: tags, but a
+    # plugin platform's hint is the only place the model learns that.
+    assert "MEDIA:/absolute/path/to/file" in kwargs["platform_hint"]
     # The owner's world is on the Mac (#129): the hint is in force from the
     # first turn, before any section or skill is read -- and only when there
     # is a Mac, which plow-init signals with PLOW_MCP_URL.
@@ -6564,6 +6567,8 @@ def test_sequence_handler_registers_and_runs_on_the_adapter_loop(monkeypatch, tm
     ctx = _ToolContext(); module.register(ctx)
     tool = next(t for t in ctx.tools if t['name'] == 'plow_send_sequence')
     assert tool['schema'] is module.PLOW_SEND_SEQUENCE_SCHEMA
+    # An agent read "No file paths" here as "files cannot be sent" (#156).
+    assert 'MEDIA:/absolute/path/to/file' in tool['schema']['description']
     assert tool['schema']['parameters']['additionalProperties'] is False
     loop = asyncio.new_event_loop()
     worker = threading.Thread(target=loop.run_forever)

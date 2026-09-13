@@ -3716,7 +3716,8 @@ def _plow_send_sequence(args, **_kwargs):
 PLOW_SEND_SEQUENCE_SCHEMA = {
     "name": "plow_send_sequence",
     "description": (
-        "Deliver an ordered sequence in THIS active solo owner DM. No target or file paths. "
+        "Deliver an ordered sequence in THIS active solo owner DM. No target or file paths — "
+        "a file you have is sent with MEDIA:/absolute/path/to/file in your reply instead. "
         "All items and root-owned /srv/plow-assets/manifest.json assets are validated before sending. "
         "Text/photos have a 1-second gap; explicit pauses replace that gap. Up to 24 items, "
         "24,000 text characters, 16 photos and 60 total delay seconds. Receipt completed entries "
@@ -4270,6 +4271,7 @@ def register(ctx):
                       "thread. Keep replies short; bold, italics and headings render, "
                       "but skip code blocks and tables. This thread is your own line — "
                       "the number is yours, and here you write as yourself."
+                      " To send a photo or file, put MEDIA:/absolute/path/to/file on its own line in your reply."
                       # plow-init exports PLOW_MCP_URL exactly when the account has a
                       # Mac; without one there are no plow_ tools to point at.
                       + (" Your owner's world — their messages, mail, calendar, contacts "

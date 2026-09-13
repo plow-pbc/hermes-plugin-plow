@@ -455,6 +455,9 @@ implements as the Plow contract — declare the attachment, PUT the bytes to the
 provider's upload URL with exactly the headers Plow returned, then send the
 message with `attachment_uids`. Content types are limited to what the provider
 accepts; a `415` from the declare comes back as the send's error.
+The `plow_chat` platform hint is what tells the model this path exists
+(`MEDIA:/absolute/path/to/file`); without it an agent sees only `plow_send_sequence`
+and concludes files cannot be sent (#156).
 
 Both halves need the attachments API — `plow-pbc/plow#1435`. Against an older
 API the inbound path sees no `attachments` field (a `KeyError`, loud, per
