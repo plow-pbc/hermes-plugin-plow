@@ -19,6 +19,7 @@ from unittest import mock
 import pytest
 
 from test_adapter import (
+    LINES,
     _HTTP,
     _SEND_ARGV,
     _attachment,
@@ -32,13 +33,6 @@ from test_adapter import (
 
 ADDRESS = "elm@plow.co"
 OWNER = ("Sam", "sam@example.com")
-
-# What `GET /v1/lines` serves: this line's own persona plus a sibling on the
-# phone line, so the roster has something to mark as "you" and something not.
-LINES = [
-    {"uid": "ln_em", "provider_type": "email", "provider_key": ADDRESS, "display_name": "Elm"},
-    {"uid": "ln_s", "provider_type": "imessage", "provider_key": "+16505550101", "display_name": "Spruce"},
-]
 
 
 def _mail_chat(uid: str, *, group: bool = False) -> dict[str, Any]:
