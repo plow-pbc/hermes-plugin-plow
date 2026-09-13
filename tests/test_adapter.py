@@ -1519,7 +1519,7 @@ async def test_every_turn_prompt_opens_with_who_this_agent_is(
     addressed."""
     module = _load(monkeypatch, tmp_path)
     adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
-    adapter._identity = {"signup": SIGNUP, "number": NUMBER}
+    adapter._identity = {"signup": SIGNUP, "number": NUMBER, "lines": LINES}
     chat = _chat("cht_a", group=group, agent_name=agent_name)
     adapter._set_reach([chat])
     _mark_anchored(adapter, "cht_a")
@@ -1535,7 +1535,7 @@ async def test_every_turn_prompt_opens_with_who_this_agent_is(
         expected = _owned(module, expected, chat)
     else:
         expected = _membered(module, expected)
-        identity = {**identity, "signup": None}
+        identity = {**identity, "signup": None, "lines": ()}
     if group:
         expected = _voiced(module, expected)
     assert event["channel_prompt"] == _rendered(module, expected, agent_name, identity)
@@ -1559,38 +1559,50 @@ def _assert_in_order(text: str, *fragments: str) -> None:
         at = found
 
 
+_ROSTER = "Plow's lines -- the numbers and mailboxes Plow agents answer from -- are "
+
+
 @pytest.mark.parametrize(
-    ("name", "identity", "opening", "offer"),
+    ("name", "identity", "opening", "offer", "roster"),
     [
         pytest.param(
-            "Elm", {"signup": SIGNUP, "number": NUMBER},
+            "Elm", {"signup": SIGNUP, "number": NUMBER, "lines": LINES},
             "You are Elm, a Plow assistant; people here address you by that name.",
             f'Anyone can get their own Plow Life Assistant by texting "{SIGNUP["phrase"]}" to {NUMBER}.',
-            id="named-with-signup",
+            f"{_ROSTER}Elm ({NUMBER}, elm@plow.co; that is you), Spruce (+16505550101).",
+            id="named-with-signup-and-roster",
         ),
         pytest.param(
-            None, {"signup": None, "number": NUMBER},
-            "You are a Plow assistant.", None, id="unnamed-no-signup",
+            None, {"signup": None, "number": NUMBER, "lines": ()},
+            "You are a Plow assistant.", None, None, id="unnamed-no-signup-no-roster",
+        ),
+        pytest.param(
+            "Elm", {"signup": None, "number": None},
+            "You are Elm, a Plow assistant; people here address you by that name.",
+            None, None, id="identity-without-a-lines-key",
         ),
     ],
 )
 def test_the_identity_prefix_says_these_things_in_this_order(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
-    name: str | None, identity: dict[str, Any], opening: str, offer: str | None,
+    name: str | None, identity: dict[str, Any], opening: str, offer: str | None, roster: str | None,
 ) -> None:
     """The facts are prose the model acts on, so a dropped, reworded or
     reordered fact is a behaviour change with no other signal. The agent is a
     "Plow assistant" whatever variant it offers: the signup name says what
-    someone else can get, never what this agent is."""
+    someone else can get, never what this agent is. The roster names every
+    persona once with its number and mailbox, marks this agent's own line,
+    skips unnamed lines, and is absent until a refresh has read it."""
     module = _load(monkeypatch, tmp_path)
     prefix = module._with_identity("PROMPT", name, identity)
 
     assert prefix.startswith(opening)
     _assert_in_order(prefix, opening, *filter(None, (offer,)), "call plow_offer_invite",
+                     *filter(None, (roster, roster and "read from the Mac")),
                      "Reach for it yourself", "has to be awake with Latch running",
                      module.LATCH_URL, module.DASHBOARD_URL, *_CARDS, "PROMPT")
-    if offer is None:
-        assert "Anyone can get their own" not in prefix, "no phrase, no offer sentence"
+    assert (_ROSTER in prefix) == (roster is not None)
+    assert "+16505550199" not in prefix, "an unnamed line is not a persona"
 
 
 @pytest.mark.parametrize(

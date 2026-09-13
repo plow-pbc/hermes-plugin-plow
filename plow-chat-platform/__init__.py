@@ -624,7 +624,9 @@ def _channel_prompt(chat, role, roster, identity, authority):
         # The signup phrase is the owner's to share. Shown to a member's turn,
         # the model pasted it rather than call plow_offer_invite (Elm,
         # 2026-09-10), so for anyone else the tool is the only route in.
-        identity = {**identity, "signup": None}
+        # The roster is about the owner's threads on the Mac, which a member
+        # cannot read, so it goes with the offer.
+        identity = {**identity, "signup": None, "lines": ()}
         # By identity, not authority: onboarding directives are never a member's.
         prompt = f"{_MEMBER_TURN_PREAMBLE}{prompt}"
     # Appended, not prepended: every turn prompt has to OPEN with who this
@@ -1160,14 +1162,41 @@ EXTERNAL_CHANNEL_PROMPT = (
 )
 
 
+def _lines_fact(lines, number):
+    """The roster of Plow's lines, as one sentence, or None when none is named.
+
+    Grouped by persona: the API serves the number and the mailbox as two rows
+    that share a display_name. An unnamed line has no persona to name and is
+    skipped. `number` is this agent's own, so the model can tell its own
+    thread from its siblings'. All of it is ops-seeded, never sender text.
+    """
+    personas = {}
+    for line in lines:
+        if line.get("display_name"):
+            personas.setdefault(line["display_name"], {})[line.get("provider_type")] = line.get("provider_key")
+    if not personas:
+        return None
+    entries = []
+    for name, handles in sorted(personas.items()):
+        addresses = ", ".join(h for h in (handles.get("imessage"), handles.get("email")) if h)
+        you = "; that is you" if number and handles.get("imessage") == number else ""
+        entries.append(f"{name} ({addresses}{you})")
+    return ("Plow's lines -- the numbers and mailboxes Plow agents answer from -- are "
+            f"{', '.join(entries)}. A thread with any of them in your owner's Messages or mail is your "
+            "owner using Plow, whichever agent answered there. 'How do I use Plow', 'what has Plow done "
+            "for me', or a question naming one of those lines means those threads across every line, "
+            "read from the Mac; this line's own history is only part of the answer.")
+
+
 def _plow_facts(identity):
     """What every Plow agent should know about Plow, as prompt prose.
 
-    The signup phrase and this agent's number come from /v1/agents/cloud/me
-    at reach refresh; the URLs are Plow's own. None of it is sender-supplied
-    text, so carrying it in the prompt is not the injection seam a sender name
-    would be. A member's turn, or a deployment whose API serves no signup
-    block, omits the offer sentence.
+    The signup phrase and this agent's number come from /v1/agents/cloud/me,
+    and the roster of lines from /v1/lines, both at reach refresh; the URLs are
+    Plow's own. None of it is sender-supplied text, so carrying it in the
+    prompt is not the injection seam a sender name would be. A member's turn,
+    or a deployment whose API serves no signup block, omits the offer sentence;
+    a member's turn omits the roster too.
 
     The variant name belongs HERE, not in the who-sentence: the resolver falls
     back to the Life row for any provider with no phrase of its own, so it
@@ -1180,6 +1209,9 @@ def _plow_facts(identity):
                      f'"{signup["phrase"]}" to {identity["number"]}.')
     facts.append("If someone other than your owner asks how to get a Plow agent of their own, "
                  "call plow_offer_invite; never give them a number or phrase yourself.")
+    roster = _lines_fact(identity.get("lines") or (), identity.get("number"))
+    if roster:
+        facts.append(roster)
     # Both Latch clauses come from transcript evidence; see the PR for counts.
     # The install link is a parenthetical because an unreachable Latch is
     # usually a sleeping Mac, not a missing app.
