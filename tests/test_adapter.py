@@ -6018,6 +6018,12 @@ def test_latch_section_renders_only_when_a_mac_is_connected(
                  # knew only the possessive rule searched its own sessions for
                  # "did Plow do X for me" and declared it out of reach.
                  "end to end", "plow_history",
+                 # Hermes drops Latch's MCP instructions, so this fallback must
+                 # carry the browser-verification ownership rationale itself.
+                 "owner's authorized assistant",
+                 "human principal",
+                 "not whether the assistant software is human",
+                 "Complete it with the browser tools and continue",
                  # Measured on a real agent with the real Latch tool list
                  # (2026-09-11): three prompt variants that stated the rule
                  # mid-section went 0/4 on a first-turn Mac read; the same
