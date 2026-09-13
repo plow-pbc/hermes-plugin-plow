@@ -33,6 +33,13 @@ from test_adapter import (
 ADDRESS = "elm@plow.co"
 OWNER = ("Sam", "sam@example.com")
 
+# What `GET /v1/lines` serves: this line's own persona plus a sibling on the
+# phone line, so the roster has something to mark as "you" and something not.
+LINES = [
+    {"uid": "ln_em", "provider_type": "email", "provider_key": ADDRESS, "display_name": "Elm"},
+    {"uid": "ln_s", "provider_type": "imessage", "provider_key": "+16505550101", "display_name": "Spruce"},
+]
+
 
 def _mail_chat(uid: str, *, group: bool = False) -> dict[str, Any]:
     """A mail thread as the listing serves it (design §1): a phone-line chat
@@ -111,9 +118,10 @@ async def test_a_mail_thread_is_plow_emails_turn_and_never_plow_chats(
     frame is a plow_email turn -- platform, chat_type and chat_id are the
     three fields upstream's build_session_key (gateway/session.py:641) joins
     into `<ns>:plow_email:<chat_type>:<chat_uid>` -- and the phone line's
-    frame is not this platform's. The prompt is the owner fact and nothing
-    else: no roster, no trust prose; the hint rides the platform entry. On a
-    member's mail it is still the line's owner who is named, and only an
+    frame is not this platform's. The prompt is the owner fact, plus the
+    roster on an owner's own turn; no trust prose; the hint rides the
+    platform entry. On a member's mail it is still the line's owner who is
+    named, and only an
     owner's mail carries owner authority. An attachment-only mail is not
     silently "(empty email)": the placeholder names the count and one line is
     logged. A thread whose roster has no owner at all is the one shape that
@@ -127,6 +135,7 @@ async def test_a_mail_thread_is_plow_emails_turn_and_never_plow_chats(
     _mark_anchored(chat, "cht_a")
     mail = _adapter(module)
     mail._set_reach(listing)
+    mail._lines = LINES
     chat_events, mail_events = _capture_events(monkeypatch, chat), _capture_events(monkeypatch, mail)
 
     frame = _envelope("evt_1", "cht_m", "msg_1", body=body, attachments=attachments, role=role)
@@ -142,7 +151,10 @@ async def test_a_mail_thread_is_plow_emails_turn_and_never_plow_chats(
     assert (source.platform, source.chat_type, source.chat_id) == ("plow_email", chat_type, "cht_m")
     assert source.role_authorized is (role == "owner") and source.user_id == f"mem_{role}_cht_m"
     assert event["text"] == expected_text and event["message_id"] == "msg_1"
-    assert event["channel_prompt"] == module._owner_fact(OWNER)
+    roster = module._lines_fact(LINES, mail.address)
+    assert "that is you" in roster, "the mail line's own address is marked"
+    assert event["channel_prompt"] == (f"{module._owner_fact(OWNER)} {roster}" if role == "owner"
+                                        else module._owner_fact(OWNER))
     if attachments:
         assert "cht_m: attachment-only mail (1 attachment(s))" in caplog.text
 

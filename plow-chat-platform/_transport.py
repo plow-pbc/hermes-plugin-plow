@@ -271,6 +271,33 @@ def _owner_fact(owner):
             f"plow_name_contact(handle={handle}). {_NEVER_GUESS}")
 
 
+def _lines_fact(lines, own):
+    """The roster of Plow's lines, as one sentence, or None when none is named.
+
+    Grouped by persona: the API serves a number and a mailbox as rows that
+    share a display_name, listed in its own order, so the handles read in
+    that order. An unnamed line has no persona to name and is
+    skipped. `own` is this agent's own handle on the listing -- the phone
+    line's number or the mail line's address -- so the model can tell its own
+    thread from its siblings'. All of it is ops-seeded, never sender text.
+    """
+    personas = {}
+    for line in lines:
+        if line.get("display_name"):
+            personas.setdefault(line["display_name"], []).append(line["provider_key"])
+    if not personas:
+        return None
+    entries = []
+    for name, handles in sorted(personas.items()):
+        you = "; that is you" if own and own in handles else ""
+        entries.append(f"{name} ({', '.join(handles)}{you})")
+    return ("Plow's lines -- the numbers and mailboxes Plow agents answer from -- are "
+            f"{', '.join(entries)}. A thread with any of them in your owner's Messages or mail is your "
+            "owner using Plow, whichever agent answered there. 'How do I use Plow', 'what has Plow done "
+            "for me', or a question naming one of those lines means those threads across every line, "
+            "read from the Mac; this line's own history is only part of the answer.")
+
+
 def _provider(chat):
     # Which line this chat is, off its own agent participant.
     provider_type = _self_agent_line(chat).get("provider_type")

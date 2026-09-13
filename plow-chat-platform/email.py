@@ -26,8 +26,10 @@ from ._transport import (
     _chat_type,
     _granted_chats,
     _is_chatter,
+    _lines_fact,
     _owner_fact,
     _owner_identity,
+    _read_lines,
     _self_agent_line,
     _serve,
     _socket,
@@ -58,6 +60,7 @@ class PlowEmailAdapter(BasePlatformAdapter):
         config.typing_indicator = False  # the base's 2s typing loop is a no-op on email
         self.auth = _bearer()
         self.address = None                  # the line's address, off the first mail chat
+        self._lines = ()                     # the roster, read at reach refresh
         self._chats = {}                     # uid -> chat resource, mail only
         self._foreign = frozenset()          # the phone line's uids on the same grant
         self._seen_events = []
@@ -79,6 +82,7 @@ class PlowEmailAdapter(BasePlatformAdapter):
 
     async def _refresh_reach(self, http):
         self._set_reach(await _granted_chats(http, self.auth))
+        self._lines = await _read_lines(http, self.auth)
 
     def _publish_hint(self):
         """Writes the address onto the platform registry entry the gateway
@@ -167,6 +171,11 @@ class PlowEmailAdapter(BasePlatformAdapter):
             # this mail is already event-deduped and would otherwise vanish silently.
             log.error("[plow_email] %s", exc)
             raise
+        # The roster rides owner turns only, as it does on the phone line.
+        if sender.get("role") == "owner":
+            roster = _lines_fact(self._lines, self.address)
+            if roster:
+                channel_prompt = f"{channel_prompt} {roster}"
         body, count = msg["body"].strip(), len(msg["attachments"])
         if not body and count:
             log.info("[plow_email] %s: attachment-only mail (%d attachment(s))", chat_uid, count)
