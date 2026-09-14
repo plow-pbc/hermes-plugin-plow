@@ -229,6 +229,15 @@ def _owner_in_roster(chat):
                if p.get("type") == "member")
 
 
+def _message_delivery_unknown(status):
+    """A message POST answered with 408/424/5xx may have been accepted before the
+    error surfaced (Plow maps ProviderAcceptedPersistenceError -> 424), so a retry
+    -- or Hermes's plain-text fallback -- risks a double-send. The caller must treat
+    it as delivered-unknown, never as a clean failure that is safe to resend.
+    """
+    return status >= 500 or status in (408, 424)
+
+
 def _authority(chat, owner, human):
     """(authority, recall_everywhere) for a turn whose speaker is known; the
     one reader of `trusted`. Authority is the owner's anywhere and a human's
@@ -2442,12 +2451,18 @@ class PlowChatAdapter(BasePlatformAdapter):
                              json=payload, headers=self.auth) as resp:
             data = await resp.json(content_type=None)
             if resp.status >= 400:
-                # 408/5xx: Plow may have accepted the message before the error, so
-                # a retry could double-send. Mark it delivery-unknown, exactly as
-                # the sequence path classifies the same statuses.
-                unknown = resp.status >= 500 or resp.status == 408
-                return SendResult(success=False, error=f"Plow Chat {resp.status}: {data}",
-                                  raw_response={"delivery_unknown": True} if unknown else None)
+                if _message_delivery_unknown(resp.status):
+                    # Plow may have accepted the message before the error, so a
+                    # retry would double-send. Phrase it as a timeout so the base
+                    # _send_with_retry returns it as-is (see _is_timeout_error)
+                    # rather than re-sending the plain-text fallback, and flag the
+                    # tool path via raw_response. The provider body is dropped: a
+                    # retryable-looking token in it would flip is_network True.
+                    return SendResult(
+                        success=False,
+                        error=f"Plow Chat {resp.status} timed out (delivery unknown)",
+                        raw_response={"delivery_unknown": True})
+                return SendResult(success=False, error=f"Plow Chat {resp.status}: {data}")
         # A failed post cleared nothing, so only a delivered one re-raises.
         self._retrigger_typing(chat_id, metadata)
         return SendResult(success=True, message_id=data.get("uid"))
@@ -2463,7 +2478,7 @@ class PlowChatAdapter(BasePlatformAdapter):
         try:
             async with http.post(f"{BASE}/v1/chats/{chat_uid}/messages", json=payload, headers=self.auth) as resp:
                 if resp.status >= 400:
-                    status = "delivery_unknown" if resp.status >= 500 or resp.status == 408 else "failed"
+                    status = "delivery_unknown" if _message_delivery_unknown(resp.status) else "failed"
                     raise _SequenceFailure(status, f"message POST HTTP {resp.status}", http_status=resp.status)
                 data = await resp.json(content_type=None)
                 if not isinstance(data.get("uid"), str) or not data["uid"]:
@@ -3814,7 +3829,7 @@ def _open_person_thread(adapter, loop, handles, body, trusted_arg, turn):
         data = asyncio.run_coroutine_threadsafe(
             adapter.start_group_thread(members, body, trusted), loop).result(timeout=45)
     except _PlowSendError as exc:
-        if exc.status >= 500 or exc.status in (408, 424):
+        if _message_delivery_unknown(exc.status):
             # A 5xx, a 408 (timeout after Plow may have accepted), or a 424 (the
             # provider did not confirm — the server left a dispatch tombstone and
             # the thread may exist) all say as little about delivery as a timeout.
