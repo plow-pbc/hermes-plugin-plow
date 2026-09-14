@@ -1332,6 +1332,10 @@ class PlowChatAdapter(BasePlatformAdapter):
             }
         }
         self._ws_task = None
+        # The process's one wakeup: `connect(is_reconnect=True)` replaces
+        # `_listen`, so its label and latch cannot live there.
+        self._first_boot = None
+        self._woken = False
         self._anchor_lock = asyncio.Lock()
         self._quiet_until = 0.0              # while now is under this, the gate is quiet without a read
         self._seen = []                      # (chat uid, message uid), newest last
@@ -2938,13 +2942,11 @@ class PlowChatAdapter(BasePlatformAdapter):
         # existing on disk is what means "not the first life"; read once,
         # here, before anything below can change it.
         first_install = not self._anchored_chats.get(self.home_chat_uid)
-        # One wakeup per process: survives a session that drops before
-        # reaching it, but is spent before the attempt: a turn that raises
-        # every time must not tear down every session after it.
-        owes_prime = True
+        if self._first_boot is None:
+            self._first_boot = first_install
 
         async def session(http, connected):
-            nonlocal first_connection, owes_prime
+            nonlocal first_connection
             global _live
             if not first_connection:
                 await self._refresh_reach(http)
@@ -2984,9 +2986,12 @@ class PlowChatAdapter(BasePlatformAdapter):
                     # backlog, so it cannot run ahead of an offline `/goal
                     # clear` still sitting in the queue.
                     self._goal_arm_wakes()
-                    if owes_prime:
-                        owes_prime = False
-                        await self._prime(first_install)
+                    # Survives a session that drops before reaching it, but is
+                    # spent before the attempt: a turn that raises every time
+                    # must not tear down every session after it.
+                    if not self._woken:
+                        self._woken = True
+                        await self._prime(self._first_boot)
                     async for frame in ws:
                         if frame.type == aiohttp.WSMsgType.TEXT:
                             await self._on_frame(frame.json(), http)

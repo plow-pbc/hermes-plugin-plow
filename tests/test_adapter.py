@@ -2218,14 +2218,18 @@ async def test_every_connect_wakes_the_agent_once(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, live_group: bool,
 ) -> None:
     """Each life hands hermes one Plow-signed wakeup turn in the home chat --
-    even when its first session drops before reaching it -- and a first boot
-    reads differently from a restart. The plugin itself sends nothing:
-    whatever the owner first hears is the agent's own answer. Owner
-    authority comes from the live roster, not the one cached at connect."""
+    even when its first session drops before reaching it, and however often
+    `connect(is_reconnect=True)` replaces `_listen` -- and a first boot reads
+    differently from a restart, even when the listener that wakes it runs
+    after the first one anchored. The plugin itself sends nothing: whatever
+    the owner first hears is the agent's own answer. Owner authority comes
+    from the live roster, not the one cached at connect."""
     module = _load(monkeypatch, tmp_path)
     handed: list[list[Any]] = []
     sends = mock.AsyncMock(return_value=_SendResult(success=True))
-    for _ in range(2):  # first-ever life, then a restart over the same checkpoint
+    # First-ever life, then a restart over the same checkpoint; each life's
+    # first listener drops before its wakeup and is replaced.
+    for listeners in (3, 2):
         adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
         adapter._set_reach([_chat("cht_a")])
         monkeypatch.setattr(module.aiohttp, "ClientSession", lambda *a, **k: _SocketHTTP())
@@ -2236,11 +2240,12 @@ async def test_every_connect_wakes_the_agent_once(
             adapter._chats[chat_uid] = _chat(chat_uid, group=live_group)
 
         monkeypatch.setattr(adapter, "_refresh_current_chat", live_roster)
-        monkeypatch.setattr(adapter, "_backfill", mock.AsyncMock(side_effect=[OSError("socket dropped"), None]))
+        monkeypatch.setattr(adapter, "_backfill", mock.AsyncMock(side_effect=[OSError("socket dropped"), None, None]))
         handed.append(_capture_events(monkeypatch, adapter))
-        with mock.patch.object(module.asyncio, "sleep", side_effect=[None, StopAsyncIteration]):
-            with pytest.raises(StopAsyncIteration):
-                await adapter._listen()
+        for _ in range(listeners):
+            with mock.patch.object(module.asyncio, "sleep", side_effect=StopAsyncIteration):
+                with pytest.raises(StopAsyncIteration):
+                    await adapter._listen()
 
     assert sends.await_count == 0, "the plugin spoke at boot; first contact is the agent's own answer"
     [first_boot], [restart] = handed
