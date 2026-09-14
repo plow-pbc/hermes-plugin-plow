@@ -35,9 +35,9 @@ The directory is named for the plugin id so the install can be a directory copy:
 > `agent-mgr` SHA advance),
 > `POST /v1/email-lines/{uid}/messages` (an email address in `plow_send_message`'s `to`,
 > with a `subject`, goes out from the mailbox that shares this agent's persona; the API
-> seats the owner in `cc` from the credential, so the plugin sends none — deploy the plow
-> API change that does that seating before this plugin SHA is pinned, or a new email
-> leaves with the owner not copied), and
+> seats the owner in `cc` from the credential, so the plugin sends none — deploy
+> [`plow-pbc/plow#1959`](https://github.com/plow-pbc/plow/pull/1959), which does that
+> seating, before this plugin SHA is pinned, or every new email is refused with a 403), and
 > `PUT /v1/contacts/{handle}` (`plow_name_contact` — the handle-keyed contact
 > book, superseding the per-participant contact route of
 > [`plow-pbc/plow#1752`](https://github.com/plow-pbc/plow/pull/1752),
