@@ -229,6 +229,15 @@ def _owner_in_roster(chat):
                if p.get("type") == "member")
 
 
+def _message_delivery_unknown(status):
+    """A message POST answered with 408/424/5xx may have been accepted before the
+    error surfaced (Plow maps ProviderAcceptedPersistenceError -> 424), so a retry
+    -- or Hermes's plain-text fallback -- risks a double-send. The caller must treat
+    it as delivered-unknown, never as a clean failure that is safe to resend.
+    """
+    return status >= 500 or status in (408, 424)
+
+
 def _authority(chat, owner, human):
     """(authority, recall_everywhere) for a turn whose speaker is known; the
     one reader of `trusted`. Authority is the owner's anywhere and a human's
@@ -2069,9 +2078,9 @@ class PlowChatAdapter(BasePlatformAdapter):
         if chat_id not in self.chat_uids:
             return SendResult(success=False, error=f"Plow Chat {chat_id!r} is outside this agent's grant")
         turn = self._active_turn.get()
-        if turn is None or chat_id == turn["chat_uid"]:
+        if turn is not None and chat_id == turn["chat_uid"]:
             return None
-        if not turn["authority"]:
+        if turn is not None and not turn["authority"]:
             return SendResult(success=False,
                               error=f"Plow Chat turn without the owner's authority is confined to {turn['chat_uid']!r}")
         if not _owner_in_roster(self._chats.get(chat_id) or {}):
@@ -2087,9 +2096,15 @@ class PlowChatAdapter(BasePlatformAdapter):
         cannot be verified. Only a granted, cross-chat id: an ungranted one is
         left for _send_guard to refuse, so no out-of-grant fetch or cache write
         happens ahead of the grant check. Every outbound path calls this so the
-        owner-CC seam reads one policy on one freshness guarantee."""
+        owner-CC seam reads one policy on one freshness guarantee.
+
+        Only a present turn's own chat is exempt (a reply). A turn-less send
+        (cron) has no current chat, so it refreshes and is owner-checked too --
+        a scheduled send must not disclose to a group the owner has left."""
         turn = self._active_turn.get()
-        if turn is None or chat_id == turn["chat_uid"] or chat_id not in self.chat_uids:
+        if chat_id not in self.chat_uids:
+            return
+        if turn is not None and chat_id == turn["chat_uid"]:
             return
         try:
             await self._refresh_current_chat(chat_id)
@@ -2436,6 +2451,17 @@ class PlowChatAdapter(BasePlatformAdapter):
                              json=payload, headers=self.auth) as resp:
             data = await resp.json(content_type=None)
             if resp.status >= 400:
+                if _message_delivery_unknown(resp.status):
+                    # Plow may have accepted the message before the error, so a
+                    # retry would double-send. Phrase it as a timeout so the base
+                    # _send_with_retry returns it as-is (see _is_timeout_error)
+                    # rather than re-sending the plain-text fallback, and flag the
+                    # tool path via raw_response. The provider body is dropped: a
+                    # retryable-looking token in it would flip is_network True.
+                    return SendResult(
+                        success=False,
+                        error=f"Plow Chat {resp.status} timed out (delivery unknown)",
+                        raw_response={"delivery_unknown": True})
                 return SendResult(success=False, error=f"Plow Chat {resp.status}: {data}")
         # A failed post cleared nothing, so only a delivered one re-raises.
         self._retrigger_typing(chat_id, metadata)
@@ -2452,7 +2478,7 @@ class PlowChatAdapter(BasePlatformAdapter):
         try:
             async with http.post(f"{BASE}/v1/chats/{chat_uid}/messages", json=payload, headers=self.auth) as resp:
                 if resp.status >= 400:
-                    status = "delivery_unknown" if resp.status >= 500 or resp.status == 408 else "failed"
+                    status = "delivery_unknown" if _message_delivery_unknown(resp.status) else "failed"
                     raise _SequenceFailure(status, f"message POST HTTP {resp.status}", http_status=resp.status)
                 data = await resp.json(content_type=None)
                 if not isinstance(data.get("uid"), str) or not data["uid"]:
@@ -3817,15 +3843,16 @@ PLOW_SEND_SEQUENCE_SCHEMA = {
 
 
 def _send_error_result(exc):
-    """A `_PlowSendError` as either outbound route reports it.
+    """A `_PlowSendError` as either outbound route reports it, over
+    `_message_delivery_unknown` -- which statuses mean "may have been accepted"
+    is that helper's to say, and it says it for the socket paths too.
 
-    A 5xx, a 408 (timeout after Plow may have accepted), or a 424 (the provider
-    did not confirm -- the server left a dispatch tombstone and the thread may
-    exist) all say as little about delivery as a timeout, and neither route is
-    safe to retry blind: start_group_thread mints a fresh idempotency_key per
-    call, and a re-sent mail is a second mail. Report unknown, forbid the retry.
+    Neither route is safe to retry blind: start_group_thread mints a fresh
+    idempotency_key per call, and a re-sent mail is a second real mail. So an
+    unknown one reports unknown and forbids the retry rather than reading as a
+    clean failure.
     """
-    if exc.status >= 500 or exc.status in (408, 424):
+    if _message_delivery_unknown(exc.status):
         return json.dumps({
             "success": False, "status": exc.status, "delivery_unknown": True,
             "error": f"{exc.detail} — a {exc.status} can arrive after the message "
@@ -3996,7 +4023,11 @@ def _plow_send_message(args, **_kwargs):
     except Exception as exc:  # noqa: BLE001 - no answer is not a failure to retry
         return _lost_answer(exc)
     if not result.success:
-        return json.dumps({"success": False, "error": result.error})
+        out = {"success": False, "error": result.error}
+        if result.raw_response and result.raw_response.get("delivery_unknown"):
+            out["delivery_unknown"] = True
+            out["error"] = f"{result.error} — Plow may have accepted it; do NOT retry, check the thread."
+        return json.dumps(out)
     return json.dumps({"success": True, "chat_id": target, "message_id": result.message_id})
 
 

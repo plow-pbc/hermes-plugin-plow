@@ -72,6 +72,7 @@ class _SendResult:
     success: bool
     message_id: str | None = None
     error: str | None = None
+    raw_response: Any = None
 
 
 def _rendered(module: Any, prompt: str, name: Any, identity: Any) -> str:
@@ -6662,6 +6663,50 @@ def test_plow_send_message_reports_a_lost_answer_as_delivery_unknown(
     assert calls == []
 
 
+def test_an_existing_chat_send_reports_408_5xx_as_delivery_unknown(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """A 408/5xx on an existing-chat POST may have been accepted, so the tool
+    reports delivery unknown and forbids the retry that would double-send --
+    matching the person and sequence paths."""
+    module = _load(monkeypatch, tmp_path)
+    adapter = _live_tool(module, monkeypatch, None)
+    adapter._set_reach([_chat("cht_a")])  # owner-inclusive current chat
+    http = _HTTP(status=503)
+    monkeypatch.setattr(module.aiohttp, "ClientSession", lambda *a, **k: http)
+    module._ACTIVE_TURN.set(_OWNER_DM)  # reply to the current chat (cht_a)
+    out = json.loads(module._plow_send_message({"to": "cht_a", "body": "hi"}))
+    assert out["success"] is False and out["delivery_unknown"] is True
+    assert "do NOT retry" in out["error"]
+
+
+async def test_a_503_reply_is_classified_so_hermes_does_not_resend(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """A normal reply's 503 must reach Hermes as a delivery-unknown result its
+    _send_with_retry returns as-is -- never re-sent as the plain-text fallback,
+    whose second POST would double a message Plow may already have accepted. That
+    no-resend branch keys on the error reading as a timeout and NOT as a transient
+    network failure (gateway/platforms/base.py:3282-3290), so pin both. The tool
+    path is covered above; this pins the send() path every reply travels."""
+    module = _load(monkeypatch, tmp_path)
+    adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
+    adapter._set_reach([_chat("cht_a")])  # owner-inclusive current chat
+    http = _HTTP(status=503)
+    monkeypatch.setattr(module.aiohttp, "ClientSession", lambda *a, **k: http)
+    adapter._active_turn.set(_OWNER_DM)  # a reply to the turn's own chat
+    result = await adapter.send("cht_a", "hi")
+    assert result.success is False and result.raw_response["delivery_unknown"] is True
+    err = (result.error or "").lower()
+    assert "timed out" in err  # _is_timeout_error -> base returns it as-is
+    # base.py:1695 _RETRYABLE_ERROR_PATTERNS -- any of these would read as a
+    # transient network failure and send the fallback instead of returning as-is.
+    assert not any(t in err for t in (
+        "connecterror", "connectionerror", "connectionreset", "connectionrefused",
+        "connecttimeout", "network", "broken pipe", "remotedisconnected", "eoferror"))
+    assert len(http.posts) == 1  # send() reached Plow exactly once
+
+
 def _owner_excluding_chat(uid: str) -> dict[str, Any]:
     """A phone-line chat whose roster carries a member but not the owner -- the
     1:1 shape the Abby bug landed in, and the owner-CC guard refuses."""
@@ -6707,18 +6752,21 @@ def test_person_targeting_reuses_an_existing_group(
     assert out["success"] is True and out["created"] is False and out["chat_id"] == "cht_old"
 
 
+@pytest.mark.parametrize("turn", [_OWNER_DM, None],
+                         ids=["owner-turn-cross-chat", "cron-no-turn"])
 def test_plow_send_message_refuses_a_cht_id_that_excludes_the_owner(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, turn: Any,
 ) -> None:
-    """The Abby bug: an agent-initiated send to a 1:1 the owner is not in. A
-    cht_ id whose known roster excludes the owner is refused, and nothing
-    reaches Plow -- driven through the real send() on a real loop."""
+    """An agent-initiated send to a cht_ id whose known roster excludes the owner
+    is refused with nothing reaching Plow -- whether cross-chat from an active
+    owner turn (the Abby bug) or a turn-less cron send. Only a present turn's OWN
+    chat is exempt, so both non-exempt shapes refuse. Driven through send()."""
     module = _load(monkeypatch, tmp_path)
     adapter = _live_tool(module, monkeypatch, None)
     adapter._set_reach([_chat("cht_a"), _owner_excluding_chat("cht_solo")])
     http = _HTTP()
     monkeypatch.setattr(module.aiohttp, "ClientSession", lambda *a, **k: http)
-    module._ACTIVE_TURN.set(_OWNER_DM)  # turn in cht_a; cht_solo is cross-chat
+    module._ACTIVE_TURN.set(turn)
     out = json.loads(module._plow_send_message({"to": "cht_solo", "body": "hi"}))
     assert out["success"] is False and "does not seat your owner" in out["error"]
     assert http.posts == [], "a refusal must not reach Plow at all"
