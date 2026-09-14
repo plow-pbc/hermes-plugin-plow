@@ -2885,6 +2885,10 @@ class PlowChatAdapter(BasePlatformAdapter):
                                            self._chats[home], self._identity, authority, speak_rule=False) + _SILENCE_OPTION,
         )
         event.authority, event.recall_everywhere = authority, recall_everywhere
+        # Spent here, not before the reads above: a failed read leaves the
+        # wakeup owed to the next session, while a hand-off that raises every
+        # time still cannot tear down every session after it.
+        self._woken = True
         await self._handoff_message(event)
 
     async def _backfill(self, http, chat_uid):
@@ -2986,11 +2990,7 @@ class PlowChatAdapter(BasePlatformAdapter):
                     # backlog, so it cannot run ahead of an offline `/goal
                     # clear` still sitting in the queue.
                     self._goal_arm_wakes()
-                    # Survives a session that drops before reaching it, but is
-                    # spent before the attempt: a turn that raises every time
-                    # must not tear down every session after it.
                     if not self._woken:
-                        self._woken = True
                         await self._prime(self._first_boot)
                     async for frame in ws:
                         if frame.type == aiohttp.WSMsgType.TEXT:

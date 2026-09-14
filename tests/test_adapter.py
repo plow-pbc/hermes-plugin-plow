@@ -2257,6 +2257,32 @@ async def test_every_connect_wakes_the_agent_once(
     assert first_boot["text"] != restart["text"], "the agent cannot tell a first boot from a restart"
 
 
+async def test_a_failed_roster_read_leaves_the_wakeup_owed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
+) -> None:
+    """A transient read while building the wakeup must not spend it: the
+    next session hands it once."""
+    module = _load(monkeypatch, tmp_path)
+    adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
+    adapter._set_reach([_chat("cht_a")])
+    monkeypatch.setattr(module.aiohttp, "ClientSession", lambda *a, **k: _SocketHTTP())
+    monkeypatch.setattr(adapter, "_refresh_reach", mock.AsyncMock())
+    monkeypatch.setattr(module, "_refresh_identity", mock.AsyncMock(return_value=module._NO_IDENTITY))
+    reads = iter([OSError("roster read failed"), None, None])
+
+    async def flaky_roster(chat_uid: str) -> None:
+        if failure := next(reads):
+            raise failure
+        adapter._chats[chat_uid] = _chat(chat_uid)
+
+    monkeypatch.setattr(adapter, "_refresh_current_chat", flaky_roster)
+    handed = _capture_events(monkeypatch, adapter)
+    with mock.patch.object(module.asyncio, "sleep", side_effect=[None, None, StopAsyncIteration]):
+        with pytest.raises(StopAsyncIteration):
+            await adapter._listen()
+    assert len(handed) == 1, "a failed read spent the wakeup, or a later session handed it again"
+
+
 async def test_concurrent_discovery_of_a_new_chat_anchors_it_at_newest(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: pathlib.Path,
