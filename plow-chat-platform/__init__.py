@@ -3762,12 +3762,12 @@ def _open_person_thread(adapter, loop, handles, body, trusted_arg, turn):
         data = asyncio.run_coroutine_threadsafe(
             adapter.start_group_thread(members, body, trusted), loop).result(timeout=45)
     except _PlowSendError as exc:
-        if exc.status >= 500 or exc.status == 424:
-            # A 5xx, or a 424 (the provider did not confirm — the server left a
-            # dispatch tombstone and the thread may exist), says as little about
-            # delivery as a timeout. start_group_thread mints a fresh
-            # idempotency_key per call, so a retry would double-send; report
-            # unknown and do not retry.
+        if exc.status >= 500 or exc.status in (408, 424):
+            # A 5xx, a 408 (timeout after Plow may have accepted), or a 424 (the
+            # provider did not confirm — the server left a dispatch tombstone and
+            # the thread may exist) all say as little about delivery as a timeout.
+            # start_group_thread mints a fresh idempotency_key per call, so a
+            # retry would double-send; report unknown and do not retry.
             return json.dumps({
                 "success": False, "status": exc.status, "delivery_unknown": True,
                 "error": f"{exc.detail} — a {exc.status} can arrive after the message "
