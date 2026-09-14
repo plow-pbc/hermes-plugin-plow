@@ -2103,12 +2103,11 @@ async def test_identity_refresh_reads_me_and_the_roster_and_only_a_200_speaks(
     await adapter._refresh_reach(_ReachAndMeHTTP())
     assert adapter.chat_uids == frozenset({"cht_a"}) and adapter._identity == held, "reach alone"
     if refreshes:
-        await adapter._refresh_identity(_ReachAndMeHTTP())
-        assert adapter._identity == (IDENTITY if me_status == 200 else {**held, "lines": LINES})
+        refreshed = await module._refresh_identity(_ReachAndMeHTTP(), adapter.auth, held)
+        assert refreshed == (IDENTITY if me_status == 200 else {**held, "lines": LINES})
     else:
         with pytest.raises(RuntimeError):
-            await adapter._refresh_identity(_ReachAndMeHTTP())
-        assert adapter._identity == held
+            await module._refresh_identity(_ReachAndMeHTTP(), adapter.auth, held)
 
 
 async def test_reach_serves_only_the_phone_line_and_ignores_email_frames(
@@ -2241,7 +2240,7 @@ async def test_a_first_ever_connect_primes_the_agent_once(
         monkeypatch.setattr(module.aiohttp, "ClientSession", lambda *a, **k: _SocketHTTP())
         monkeypatch.setattr(adapter, "send", mock.AsyncMock(return_value=_SendResult(success=True)))
         monkeypatch.setattr(adapter, "_refresh_reach", mock.AsyncMock())
-        monkeypatch.setattr(adapter, "_refresh_identity", mock.AsyncMock())
+        monkeypatch.setattr(module, "_refresh_identity", mock.AsyncMock(return_value=module._NO_IDENTITY))
         async def live_roster(chat_uid: str, adapter: Any = adapter) -> None:
             adapter._chats[chat_uid] = _chat(chat_uid, group=live_group)
 
@@ -3917,7 +3916,7 @@ async def test_connect_publishes_the_live_adapter_and_disconnect_retires_it(
         {"object": "list", "data": [_chat("cht_a")], "has_more": False}
     )
     monkeypatch.setattr(module.aiohttp, "ClientSession", lambda *a, **k: http)
-    monkeypatch.setattr(adapter, "_refresh_identity", mock.AsyncMock())
+    monkeypatch.setattr(module, "_refresh_identity", mock.AsyncMock(return_value=module._NO_IDENTITY))
 
     async def listen_once() -> None:
         # Stands in for a real first anchor pass completing.

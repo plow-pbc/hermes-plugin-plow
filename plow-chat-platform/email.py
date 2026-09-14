@@ -30,7 +30,7 @@ from ._transport import (
     _NO_IDENTITY,
     _owner_fact,
     _owner_identity,
-    _read_identity,
+    _refresh_identity,
     _self_agent_line,
     _serve,
     _socket,
@@ -84,12 +84,6 @@ class PlowEmailAdapter(BasePlatformAdapter):
     async def _refresh_reach(self, http):
         self._set_reach(await _granted_chats(http, self.auth))
 
-    async def _refresh_identity(self, http):
-        """Once per socket session, never on the reach refresh an unknown
-        thread triggers: a blip here must not cost that thread its first mail
-        (this line has no backfill). See PlowChatAdapter._refresh_identity."""
-        self._identity = {**self._identity, **await _read_identity(http, self.auth)}
-
     def _publish_hint(self):
         """Writes the address onto the platform registry entry the gateway
         reads on every prompt build. Imported lazily -- `gateway.` is a
@@ -110,7 +104,7 @@ class PlowEmailAdapter(BasePlatformAdapter):
                 pass
         async with aiohttp.ClientSession() as http:
             await self._refresh_reach(http)
-            await self._refresh_identity(http)
+            self._identity = await _refresh_identity(http, self.auth, self._identity)
         self._ws_task = asyncio.create_task(self._listen())
         return True
 
@@ -132,7 +126,7 @@ class PlowEmailAdapter(BasePlatformAdapter):
             nonlocal first_connection
             if not first_connection:
                 await self._refresh_reach(http)
-                await self._refresh_identity(http)
+                self._identity = await _refresh_identity(http, self.auth, self._identity)
             first_connection = False
             async with _socket(http, await _ticket(http, self.auth)) as ws:
                 connected()

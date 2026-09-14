@@ -101,6 +101,18 @@ async def _read_identity(http, auth):
     return {**identity, "lines": body["data"]}
 
 
+async def _refresh_identity(http, auth, held):
+    """What an adapter holds after an identity read: the read merged over
+    what it held, so a 404 (a token /me cannot identify as one agent) keeps
+    the offer, and a failure raises before anything is overwritten.
+
+    Once per socket session -- connect and every reconnect -- and never on
+    the reach refresh an unknown thread triggers: a blip on either read must
+    not cost the frame that triggered it (the mail line has no backfill).
+    """
+    return {**held, **await _read_identity(http, auth)}
+
+
 async def _ticket(http, auth):
     """Mint immediately before connecting: the ticket lives 60s and is
     single-use, and revocation is re-checked at consume, so a cached one is a

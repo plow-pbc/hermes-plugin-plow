@@ -69,7 +69,7 @@ from ._transport import (
     _owner_fact,
     _owner_identity,
     _participant_identity,
-    _read_identity,
+    _refresh_identity,
     _represented_member,
     _self_agent_line,
     _serve,
@@ -1401,17 +1401,6 @@ class PlowChatAdapter(BasePlatformAdapter):
             log.error("[plow_chat] grant read failed: %s", type(exc).__name__)
             raise
 
-    async def _refresh_identity(self, http):
-        """Who this agent is and which lines Plow has, for the prompt prefix.
-
-        Once per socket session -- connect and every reconnect -- and never on
-        the reach refresh an unknown-chat frame triggers: a blip on either read
-        must not cost the frame that triggered it. Merged over what is held,
-        so a 404 (a token /me cannot identify as one agent) keeps the offer,
-        and a failure raises before anything is overwritten.
-        """
-        self._identity = {**self._identity, **await _read_identity(http, self.auth)}
-
     async def _refresh_current_chat(self, chat_uid):
         """Refresh the preference-bearing resource before the next handoff.
 
@@ -1481,7 +1470,7 @@ class PlowChatAdapter(BasePlatformAdapter):
                 pass
         async with aiohttp.ClientSession() as http:
             await self._refresh_reach(http)
-            await self._refresh_identity(http)
+            self._identity = await _refresh_identity(http, self.auth, self._identity)
             # Who invited the owner never changes, so it is read once per
             # process start rather than on every reconnect, and may not fail
             # the connect. Who the owner IS comes off the chat resource each
@@ -2875,7 +2864,7 @@ class PlowChatAdapter(BasePlatformAdapter):
             global _live
             if not first_connection:
                 await self._refresh_reach(http)
-                await self._refresh_identity(http)
+                self._identity = await _refresh_identity(http, self.auth, self._identity)
             ticket = await _ticket(http, self.auth)
             # ONE gate decides newest vs empty for every chat this agent ever
             # anchors: this process's first connect AND this agent's genuine
