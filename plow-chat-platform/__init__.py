@@ -3319,8 +3319,8 @@ def _recall(session_id, user_message, platform, **_kwargs):
     if platform != PLATFORM_NAME or turn is None:
         return None
     everywhere = turn["recall_everywhere"]
-    from hermes_state import get_shared_session_db, release_or_close
-    db = get_shared_session_db()
+    from hermes_state_registry import acquire, release_or_close
+    db = acquire()
     try:
         query = _recall_query(turn.get("recall_text") or user_message,
                               _recall_tail(db, session_id))

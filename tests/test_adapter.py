@@ -6351,14 +6351,14 @@ class _FakeDb:
 
 
 def _stub_hermes_state(monkeypatch: pytest.MonkeyPatch, db: _FakeDb) -> None:
-    mod = types.ModuleType("hermes_state")
-    mod.get_shared_session_db = lambda: db  # type: ignore[attr-defined]
+    mod = types.ModuleType("hermes_state_registry")
+    mod.acquire = lambda: db  # type: ignore[attr-defined]
 
     def release_or_close(handle: Any) -> None:
         handle.closed = True
 
     mod.release_or_close = release_or_close  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "hermes_state", mod)
+    monkeypatch.setitem(sys.modules, "hermes_state_registry", mod)
 
 
 _ROWS = [
