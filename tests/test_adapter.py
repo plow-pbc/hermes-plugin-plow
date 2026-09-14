@@ -4037,6 +4037,56 @@ async def test_start_group_thread_posts_the_v1_chats_contract_and_reports_adopti
     assert adapter._anchored_chats.get("cht_new") is True
     assert adapter._load_checkpoint("cht_new") is None
 
+def _identity_with_mailbox(adapter: Any, *, mailbox: bool = True) -> None:
+    """The roster as `/v1/lines` serves it: Elm is this agent, and the Elm
+    mailbox row rides on that persona. Without the email row this agent's
+    persona has no mailbox, which is the preflight case."""
+    adapter._identity = {**IDENTITY,
+                         "lines": [l for l in LINES if mailbox or l["provider_type"] != "email"]}
+
+
+async def test_send_mail_posts_the_email_lines_contract(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """A new email leaves from the mailbox sharing this agent's persona, through
+    POST /v1/email-lines/{uid}/messages with the agent bearer. No cc: the API
+    seats the owner from the credential."""
+    module = _load(monkeypatch, tmp_path)
+    adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
+    _identity_with_mailbox(adapter)
+    posts: list[tuple[str, dict[str, Any], dict[str, str]]] = []
+    http = _create_http(posts, resource={"status": "sent", "thread_id": "t1", "message_id": "m1",
+                                         "line": {"uid": "ln_em"}}, status=201)
+    monkeypatch.setattr(module.aiohttp, "ClientSession", lambda *a, **k: http)
+
+    data = await adapter.send_mail(["sam@odio.com"], "Transcript", "Here it is")
+
+    assert posts == [(f"{module.BASE}/v1/email-lines/ln_em/messages",
+                      {"to": ["sam@odio.com"], "subject": "Transcript", "body": "Here it is"},
+                      adapter.auth)]
+    assert data == {"status": "sent", "thread_id": "t1", "message_id": "m1", "from": "elm@plow.co"}
+
+
+@pytest.mark.parametrize("mailbox,status,exc", [
+    pytest.param(False, 201, "_PlowPreflightError", id="no-mailbox-for-this-persona"),
+    pytest.param(True, 403, "_PlowSendError", id="api-refused"),
+])
+async def test_send_mail_fails_loudly(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, mailbox: bool, status: int, exc: str
+) -> None:
+    """No mailbox is definitive and nothing was sent; a refusal carries the
+    status, exactly as the thread-creation POST does."""
+    module = _load(monkeypatch, tmp_path)
+    adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
+    _identity_with_mailbox(adapter, mailbox=mailbox)
+    posts: list[Any] = []
+    http = _create_http(posts, resource={"error": "no"}, status=status)
+    monkeypatch.setattr(module.aiohttp, "ClientSession", lambda *a, **k: http)
+    with pytest.raises(getattr(module, exc)):
+        await adapter.send_mail(["sam@odio.com"], "s", "b")
+    assert (posts == []) is (not mailbox)
+
+
 
 async def test_a_malformed_create_response_raises_instead_of_degrading(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path

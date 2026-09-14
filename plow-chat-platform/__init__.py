@@ -2679,6 +2679,25 @@ class PlowChatAdapter(BasePlatformAdapter):
                 data["adoption"] = f"adopted-unanchored: {type(exc).__name__}"
         return data
 
+    async def send_mail(self, to, subject, body):
+        """POST /v1/email-lines/{uid}/messages: a new email from this agent's own
+        mailbox. The API seats the owner in cc from the credential, so the
+        caller names only the people it was asked to reach."""
+        try:
+            mailbox = self._mailbox_line()
+        except Exception as exc:
+            raise _PlowPreflightError(f"{type(exc).__name__}: {exc}") from exc
+        async with aiohttp.ClientSession() as http:
+            async with http.post(f"{BASE}/v1/email-lines/{mailbox['uid']}/messages",
+                                 json={"to": to, "subject": subject, "body": body},
+                                 headers=self.auth) as resp:
+                text = await resp.text()
+                if resp.status >= 400:
+                    raise _PlowSendError(resp.status, text)
+                resource = json.loads(text)
+        return {"status": resource["status"], "thread_id": resource.get("thread_id"),
+                "message_id": resource.get("message_id"), "from": mailbox["provider_key"]}
+
     async def name_contact(self, handle, body):
         """PUT the owner's name/relationship for one handle in their contact book.
 
@@ -2797,6 +2816,25 @@ class PlowChatAdapter(BasePlatformAdapter):
         if not line:
             raise RuntimeError("home chat has no agent line")
         return line
+
+    def _mailbox_line(self):
+        """The email line sharing this agent's persona, off the identity roster.
+
+        The API pairs a mailbox with an agent by display_name (elm@plow.co and
+        the line named Elm), so the roster read at connect already answers it;
+        no second call, and no guessing a sibling persona's mailbox.
+        """
+        lines = self._identity.get("lines") or []
+        me = self._identity.get("agent")
+        persona = next((line.get("display_name") for line in lines
+                        if me and line.get("agent_uid") == me
+                        and line.get("provider_type") == "imessage"), None)
+        mailbox = next((line for line in lines
+                        if persona and line.get("display_name") == persona
+                        and line.get("provider_type") == "email"), None)
+        if mailbox is None:
+            raise RuntimeError("this agent's persona has no mailbox")
+        return mailbox
 
     async def _ensure_anchor(self, chat_uid, http=None):
         """Baseline a chat once, no matter who asks or how concurrently.
