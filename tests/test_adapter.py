@@ -1386,10 +1386,8 @@ async def test_unknown_chat_frame_adoption_cases(
     per-connect loop is what would empty-anchor it on the next connect (see
     `test_a_chat_discovered_after_first_connect_never_newest_anchors`). But
     a delivered message does not wait for that: `_deliver` routes a chat's
-    first-ever checkpoint through `_ensure_anchor` too, so the greeting
-    still rides the delivery itself rather than being silently dropped
-    until some future reconnect -- always with an empty `uid`, pinned
-    below, never the newest existing message."""
+    first-ever checkpoint through `_ensure_anchor` too -- always with an
+    empty `uid`, pinned below, never the newest existing message."""
     module = _load(monkeypatch, tmp_path)
     adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
     http = object()  # the listen loop's live session, opaque to a mocked refresh
@@ -1428,8 +1426,7 @@ async def test_unknown_chat_frame_adoption_cases(
     assert ("cht_new" in adapter.chat_uids) == reveals
     assert [event["message_id"] for event in handled] == (["msg_new"] if expect_delivered else [])
     assert ("outside the grant" in caplog.text) == (not reveals)
-    assert greetings == (["cht_new"] if expect_delivered else []), \
-        "the greeting rides the delivery that creates the chat's first checkpoint, not the bare frame"
+    assert greetings == [], "a revealed chat is not the home chat: it already has its opener"
     if expect_delivered:
         # The delivered message's own ack-after-handoff checkpoint (written
         # in `_deliver`) is the baseline this chat gets from this call --
@@ -2215,7 +2212,9 @@ async def test_two_chat_reach_opens_one_granted_socket(monkeypatch: pytest.Monke
 
     assert http.posts == [(f"{module.BASE}/v1/ws/ticket", {})] * 2
     assert len(http.sockets) == 2
-    assert sorted(greetings) == ["cht_a", "cht_b"], "each chat is latched before its one greeting attempt"
+    # A first install over a line's surviving chats waves once, in the home
+    # chat: cht_b already has its opener, and a second wave there is noise.
+    assert greetings == ["cht_a"], "the home chat is latched before its one greeting attempt; no other chat is waved at"
     assert {url.split("/v1/chats/")[1].split("/")[0] for url in http.gets} == {"cht_a", "cht_b"}
 
     # A NEW process over the same checkpoints must not greet again: the wave is
@@ -2227,7 +2226,7 @@ async def test_two_chat_reach_opens_one_granted_socket(monkeypatch: pytest.Monke
     with mock.patch.object(module.asyncio, "sleep", side_effect=StopAsyncIteration):
         with pytest.raises(StopAsyncIteration):
             await restarted._listen()
-    assert sorted(greetings) == ["cht_a", "cht_b"], "a restart re-greeted an already-met chat"
+    assert greetings == ["cht_a"], "a restart re-greeted an already-met chat"
 
 
 @pytest.mark.parametrize("live_group", [False, True])
@@ -4037,8 +4036,8 @@ async def test_tool_call_before_the_first_anchor_pass_finds_the_gateway_not_conn
 
 def _create_http(posts: list[Any], *, resource: dict[str, Any] | None = None,
                  status: int = 200, granted: list[dict[str, Any]] | None = None) -> Any:
-    """An HTTP stub for start_group_thread: the create POST (and the anchor
-    greeting that can follow it) plus the reach-refresh listing."""
+    """An HTTP stub for start_group_thread: the create POST plus the
+    reach-refresh listing."""
 
     class _SendHTTP(_HTTP):
         def post(self, url: str, *, json: dict[str, Any], headers: dict[str, str]) -> _Resp:
@@ -4077,9 +4076,8 @@ async def test_start_group_thread_posts_the_v1_chats_contract_and_reports_adopti
     data = await adapter.start_group_thread(
         ["+15550001111", "sam@example.com"], "hello", trusted=True)
 
-    # The create, then the first-meeting 👋 the empty-baseline anchor
-    # fires -- the greeting rides it, so a tool-created chat is disclosed
-    # even though the socket is already up.
+    # The create and nothing after it: the thread opens with the agent's own
+    # message, so the empty-baseline anchor does not wave into it.
     create_url, create_payload, create_headers = posts[0]
     key = create_payload.pop("idempotency_key")
     assert key and len(key) == 32, "every create names itself with a fresh idempotency key"
@@ -4089,11 +4087,7 @@ async def test_start_group_thread_posts_the_v1_chats_contract_and_reports_adopti
          "body": "hello", "trusted": True},
         adapter.auth,
     )
-    assert posts[1:] == [(
-        f"{module.BASE}/v1/chats/cht_new/messages",
-        {"body": "👋"},
-        adapter.auth,
-    )]
+    assert posts[1:] == []
     assert data == {"chat_id": "cht_new", "created": True, "trusted": True,
                     "adoption": "adopted"}
     assert adapter.chat_uids == frozenset({"cht_a", "cht_new"})

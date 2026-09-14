@@ -2813,8 +2813,13 @@ class PlowChatAdapter(BasePlatformAdapter):
         every granted chat on every gateway restart, a wave of noise into
         real rooms. Sent notify-marked: this is the adapter's own structural
         disclosure, not a turn's mid-turn chatter -- there may be no turn open
-        at all -- so the verbose preference must not gate it."""
-        if not first_meeting:
+        at all -- so the verbose preference must not gate it.
+
+        Home chat only: every other chat already has an opener -- the API
+        greets the chats it creates, a thread the agent starts opens with
+        its own message, and an inherited chat was already talked in -- so a
+        wave there doubles the opener."""
+        if not first_meeting or chat_uid != self.home_chat_uid:
             return
         try:
             await self.send(chat_uid, "👋")
