@@ -2048,6 +2048,20 @@ class _HTTP:
         return _Resp({"uid": "msg_sent"} if self.status < 400 else {"detail": "nope"}, self.status)
 
 
+class _NoBodyResp(_Resp):
+    """A 5xx whose body is empty/non-JSON: .json() raises, as aiohttp does on an
+    empty body with content_type=None. The plain _HTTP mock returns JSON on every
+    error and so hides the parse-order escape this stub exercises."""
+    async def json(self, content_type: Any = None) -> Any:
+        raise json.JSONDecodeError("Expecting value", "", 0)
+
+
+class _NoBodyHTTP(_HTTP):
+    def post(self, url: str, *, json: dict[str, Any], headers: dict[str, str]) -> _Resp:
+        self.posts.append((url, json))
+        return _NoBodyResp({}, self.status)
+
+
 async def test_a_grant_that_drops_the_configured_home_is_refused(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: pathlib.Path,
@@ -6685,14 +6699,17 @@ async def test_a_503_reply_is_classified_so_hermes_does_not_resend(
 ) -> None:
     """A normal reply's 503 must reach Hermes as a delivery-unknown result its
     _send_with_retry returns as-is -- never re-sent as the plain-text fallback,
-    whose second POST would double a message Plow may already have accepted. That
-    no-resend branch keys on the error reading as a timeout and NOT as a transient
-    network failure (gateway/platforms/base.py:3282-3290), so pin both. The tool
-    path is covered above; this pins the send() path every reply travels."""
+    whose second POST would double a message Plow may already have accepted. The
+    body is empty/non-JSON (_NoBodyHTTP), so this also pins that _post_message
+    classifies on status BEFORE parsing -- a parse-first order raises past the
+    classifier and escapes _send_with_retry. The no-resend branch keys on the
+    error reading as a timeout and NOT as a transient network failure
+    (gateway/platforms/base.py:3282-3290), so pin both. The tool path is covered
+    above; this pins the send() path every reply travels."""
     module = _load(monkeypatch, tmp_path)
     adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
     adapter._set_reach([_chat("cht_a")])  # owner-inclusive current chat
-    http = _HTTP(status=503)
+    http = _NoBodyHTTP(status=503)
     monkeypatch.setattr(module.aiohttp, "ClientSession", lambda *a, **k: http)
     adapter._active_turn.set(_OWNER_DM)  # a reply to the turn's own chat
     result = await adapter.send("cht_a", "hi")
