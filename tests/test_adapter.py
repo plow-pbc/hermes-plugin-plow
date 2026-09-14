@@ -1408,13 +1408,6 @@ async def test_unknown_chat_frame_adoption_cases(
 
     monkeypatch.setattr(adapter, "_ensure_anchor", spying_ensure_anchor)
     handled = _capture_events(monkeypatch, adapter)
-    greetings: list[str] = []
-
-    async def greet(chat_id: str, content: str, **kwargs: Any) -> _SendResult:
-        greetings.append(chat_id)
-        return _SendResult(success=True)
-
-    monkeypatch.setattr(adapter, "send", greet)
 
     frame = (_envelope("evt_new", "cht_new", "msg_new") if event_type == "message_received"
              else {"event_id": "evt_created", "event_type": "chat_created", "chat_id": "cht_new", "data": {}})
@@ -1427,7 +1420,6 @@ async def test_unknown_chat_frame_adoption_cases(
     assert ("cht_new" in adapter.chat_uids) == reveals
     assert [event["message_id"] for event in handled] == (["msg_new"] if expect_delivered else [])
     assert ("outside the grant" in caplog.text) == (not reveals)
-    assert greetings == [], "a revealed chat is not the home chat: it already has its opener"
     if expect_delivered:
         # The delivered message's own ack-after-handoff checkpoint (written
         # in `_deliver`) is the baseline this chat gets from this call --
@@ -2210,15 +2202,6 @@ async def test_two_chat_reach_opens_one_granted_socket(monkeypatch: pytest.Monke
     adapter._set_reach([_chat("cht_a"), _chat("cht_b")])
     http = _SocketHTTP()
     monkeypatch.setattr(module.aiohttp, "ClientSession", lambda *a, **k: http)
-    greetings: list[str] = []
-
-    async def greet(chat_id: str, content: str, **kwargs: Any) -> _SendResult:
-        greetings.append(chat_id)
-        if chat_id == "cht_a":
-            raise RuntimeError("send failed after commit")
-        return _SendResult(success=True)
-
-    monkeypatch.setattr(adapter, "send", greet)
 
     for _ in range(2):
         with mock.patch.object(module.asyncio, "sleep", side_effect=StopAsyncIteration):
@@ -2227,21 +2210,7 @@ async def test_two_chat_reach_opens_one_granted_socket(monkeypatch: pytest.Monke
 
     assert http.posts == [(f"{module.BASE}/v1/ws/ticket", {})] * 2
     assert len(http.sockets) == 2
-    # A first install over a line's surviving chats waves once, in the home
-    # chat: cht_b already has its opener, and a second wave there is noise.
-    assert greetings == ["cht_a"], "the home chat is latched before its one greeting attempt; no other chat is waved at"
     assert {url.split("/v1/chats/")[1].split("/")[0] for url in http.gets} == {"cht_a", "cht_b"}
-
-    # A NEW process over the same checkpoints must not greet again: the wave is
-    # a first-meeting disclosure, and an in-memory latch alone re-sent it to
-    # every granted chat on every gateway restart.
-    restarted = module.PlowChatAdapter(SimpleNamespace(extra={}))
-    restarted._set_reach([_chat("cht_a"), _chat("cht_b")])
-    monkeypatch.setattr(restarted, "send", greet)
-    with mock.patch.object(module.asyncio, "sleep", side_effect=StopAsyncIteration):
-        with pytest.raises(StopAsyncIteration):
-            await restarted._listen()
-    assert greetings == ["cht_a"], "a restart re-greeted an already-met chat"
 
 
 @pytest.mark.parametrize("live_group", [False, True])
@@ -2249,17 +2218,20 @@ async def test_a_first_ever_connect_primes_the_agent_once(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, live_group: bool,
 ) -> None:
     """A new agent's own stores are empty, and it read that as absence in the
-    owner's world (plow#1880). Its first-ever life hands hermes one silent,
+    owner's world (plow#1880). Its first-ever life hands hermes one
     Plow-signed setup turn in the home chat -- even when the first session
-    drops before reaching it -- and a restart hands it none. Owner authority
-    comes from the live roster, not the one cached at connect."""
+    drops before reaching it -- and a restart hands it none. The plugin
+    itself sends nothing: whatever the owner first hears is the agent's own
+    answer to that turn. Owner authority comes from the live roster, not the
+    one cached at connect."""
     module = _load(monkeypatch, tmp_path)
     handed: list[list[Any]] = []
+    sends = mock.AsyncMock(return_value=_SendResult(success=True))
     for _ in range(2):  # first-ever life, then a restart over the same checkpoint
         adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
         adapter._set_reach([_chat("cht_a")])
         monkeypatch.setattr(module.aiohttp, "ClientSession", lambda *a, **k: _SocketHTTP())
-        monkeypatch.setattr(adapter, "send", mock.AsyncMock(return_value=_SendResult(success=True)))
+        monkeypatch.setattr(adapter, "send", sends)
         monkeypatch.setattr(adapter, "_refresh_reach", mock.AsyncMock())
         monkeypatch.setattr(module, "_refresh_identity", mock.AsyncMock(return_value=module._NO_IDENTITY))
         async def live_roster(chat_uid: str, adapter: Any = adapter) -> None:
@@ -2273,6 +2245,7 @@ async def test_a_first_ever_connect_primes_the_agent_once(
                 await adapter._listen()
 
     first_life, restart = handed
+    assert sends.await_count == 0, "the plugin spoke at boot; first contact is the agent's own answer"
     assert restart == [], "a restart re-primed an agent that was already set up"
     [setup] = first_life
     assert setup["source"]["chat_id"] == "cht_a"
@@ -2282,7 +2255,7 @@ async def test_a_first_ever_connect_primes_the_agent_once(
     assert module.LATCH_URL in setup["text"]
 
 
-async def test_concurrent_discovery_of_a_new_chat_greets_it_once(
+async def test_concurrent_discovery_of_a_new_chat_anchors_it_at_newest(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: pathlib.Path,
 ) -> None:
@@ -2295,7 +2268,7 @@ async def test_concurrent_discovery_of_a_new_chat_greets_it_once(
     instead of at newest, and `_backfill` would replay its entire
     pre-existing history to hermes as new turns. The reader must win: its
     lock-held read blocks the empty racer out entirely, so the checkpoint
-    lands at the newest uid, not empty, and only one greeting ever fires."""
+    lands at the newest uid, not empty."""
     module = _load(monkeypatch, tmp_path)
     adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
     adapter._set_reach([_chat("cht_a")])
@@ -2313,19 +2286,11 @@ async def test_concurrent_discovery_of_a_new_chat_greets_it_once(
         def get(self, url: str, *, headers: dict[str, str]) -> _Resp:
             return _YieldingResp({"data": [{"uid": "msg_1"}], "has_more": False})
 
-    sends: list[str] = []
-
-    async def send(chat_id: str, content: str, **kwargs: Any) -> _SendResult:
-        sends.append(chat_id)
-        return _SendResult(success=True)
-
-    monkeypatch.setattr(adapter, "send", send)
     http = _HTTPStub()
 
     # As `_listen`'s first-install branch would call it (with `http`,
     # racing a concurrent `start_group_thread`-style call with none).
     await asyncio.gather(adapter._ensure_anchor("cht_a", http), adapter._ensure_anchor("cht_a"))
-    assert sends == ["cht_a"], "concurrent discovery double-sent the disclosure wave"
     assert adapter._load_checkpoint("cht_a") == "msg_1", \
         "the lock-held read must win over a racing empty anchor, not lose the newest baseline to it"
 
@@ -3945,8 +3910,8 @@ async def test_tool_call_before_the_first_anchor_pass_finds_the_gateway_not_conn
 ) -> None:
     """The production ordering this round's fix protects: `connect` no
     longer publishes `_live` itself, and a genuine first install's anchor
-    pass -- still inside `_ensure_anchor`'s lock through its first-meeting
-    greeting -- can take real network time. A tool call that fires in that
+    pass -- still inside `_ensure_anchor`'s lock through its newest-message
+    read -- can take real network time. A tool call that fires in that
     window must find the gateway not connected -- `_plow_start_group_
     message`'s existing contract -- rather than being able to reach
     `_ensure_anchor` at all and race the still-in-progress newest-vs-empty
@@ -3956,16 +3921,22 @@ async def test_tool_call_before_the_first_anchor_pass_finds_the_gateway_not_conn
     adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
     entered, resumed = asyncio.Event(), asyncio.Event()
 
-    async def slow_greet(chat_id: str, content: str, **kwargs: Any) -> _SendResult:
-        entered.set()
-        await resumed.wait()
-        return _SendResult(success=True)
+    class _SlowNewest(_Resp):
+        async def __aenter__(self) -> "_Resp":
+            entered.set()
+            await resumed.wait()
+            return self
 
-    monkeypatch.setattr(adapter, "send", slow_greet)
-    monkeypatch.setattr(module.aiohttp, "ClientSession", lambda *a, **k: _AnchorLifecycleHTTP([_chat("cht_a")]))
+    class _SlowNewestHTTP(_AnchorLifecycleHTTP):
+        def get(self, url: str, *, headers: dict[str, str]) -> _Resp:
+            if "limit=1" in url:
+                return _SlowNewest({"data": [], "has_more": False})
+            return super().get(url, headers=headers)
+
+    monkeypatch.setattr(module.aiohttp, "ClientSession", lambda *a, **k: _SlowNewestHTTP([_chat("cht_a")]))
 
     await adapter.connect(is_reconnect=True)
-    await entered.wait()  # `_listen` is mid first-install anchor pass (greeting cht_a), still pre-publish
+    await entered.wait()  # `_listen` is mid first-install anchor pass (reading cht_a's newest), still pre-publish
     assert module._live is None, "the tool must not see a live adapter before the first anchor pass finishes"
 
     out = json.loads(module._plow_send_message(
@@ -4655,8 +4626,7 @@ async def test_a_send_outside_the_turns_own_chat_is_never_withheld(
     turn: dict | None,
 ) -> None:
     """Only prose the model writes INTO the open turn's own chat is its
-    working-out. The adapter's own sends -- the first-meeting greeting, a goal
-    notice, the send_message tool reaching another room -- run turn-less or
+    working-out. The adapter's own sends -- a goal notice, the send_message tool reaching another room -- run turn-less or
     cross-chat, so they are never withheld and need no marker to say so. This
     is what lets those callers stay unannotated: the boundary carries it."""
     module = _load(monkeypatch, tmp_path)

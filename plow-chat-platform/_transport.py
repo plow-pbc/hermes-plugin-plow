@@ -374,8 +374,8 @@ def _is_chatter(turn, chat_id, metadata):
     is open, into that turn's own chat, is its working-out. Hermes marks the
     turn-final reply `notify` -- the key telegram, discord, mattermost and a2a
     already read for the same distinction -- and the scheduler marks a cron
-    delivery `job_id`. Everything an adapter itself sends (the greeting, a goal
-    notice, the send_message tool) runs turn-less or cross-chat, so it falls
+    delivery `job_id`. Everything an adapter itself sends (a goal notice, the
+    send_message tool) runs turn-less or cross-chat, so it falls
     out as not-chatter without needing to say so. Both platforms read an
     outbound message this way; what they do with the verdict is theirs.
     """

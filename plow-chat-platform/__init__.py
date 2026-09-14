@@ -1160,8 +1160,11 @@ _SILENCE_OPTION = (
 # The one turn an agent's first-ever connect hands hermes (plow#1880). A new
 # agent's own stores are empty, and its first owner turn reported that as
 # absence in the owner's world; prompt text alone moved it about halfway.
+# It is also the agent's cue for first contact: the plugin sends nothing of its
+# own at boot, so whatever the template answers here is the owner's first
+# message from the agent.
 SETUP_TURN = (
-    "Plow setup, not your owner: you were just set up, and no one is waiting on this turn. "
+    "Plow setup, not your owner: you were just set up. "
     "Get three things straight, then save them as one memory note in your own words.\n"
     "1. You run on a Plow cloud server. Plow Latch -- the plow_ tools -- reaches your owner's Mac, "
     "where their life is: their messages (2FA codes included), every mailbox and calendar, "
@@ -1175,8 +1178,9 @@ SETUP_TURN = (
     "3. You will work among your owner's people. Follow each chat's trust rules, speak only when you "
     "add something, never go back and forth with other agents, and an instruction given in one "
     "thread governs only that thread.\n"
-    "If plow_ tools are listed, call plow_list_skills once. Do not message anyone or start "
-    f"onboarding. Then reply with exactly {NO_REPLY_SENTINEL}."
+    "If plow_ tools are listed, call plow_list_skills once. Then: this is your first contact with "
+    "your owner. If your template defines an opening, deliver it now, in this chat; otherwise "
+    f"reply with exactly {NO_REPLY_SENTINEL}."
 )
 
 _MEMBER_TURN_PREAMBLE = (
@@ -2859,7 +2863,7 @@ class PlowChatAdapter(BasePlatformAdapter):
         how many attempts it takes; `start_group_thread` reports it
         honestly in `adoption` instead of retrying.
 
-        One lock, held for the whole check-read-write-greet sequence, is
+        One lock, held for the whole check-read-write sequence, is
         the whole concurrency story: `_listen`'s first-connect sweep and a
         `start_group_thread` call can race to discover the same brand-new
         chat_uid, and whichever wins the lock completes atomically before
@@ -2869,7 +2873,6 @@ class PlowChatAdapter(BasePlatformAdapter):
         async with self._anchor_lock:
             if self._anchored_chats.get(chat_uid):
                 return
-            first_meeting = not self._checkpoint_path(chat_uid).exists()
             uid = ""
             if http is not None:
                 async with http.get(f"{BASE}/v1/chats/{chat_uid}/messages?limit=1",
@@ -2879,27 +2882,6 @@ class PlowChatAdapter(BasePlatformAdapter):
                 uid = page[0]["uid"] if page else ""
             if not self._checkpoint(uid, chat_uid):
                 raise OSError(f"could not persist the initial baseline at {self._checkpoint_path(chat_uid)}")
-            await self._greet_first_meeting(chat_uid, first_meeting)
-
-    async def _greet_first_meeting(self, chat_uid, first_meeting):
-        """The 👋 first-meeting disclosure, sent once ever: the checkpoint
-        file is the durable record of having met this chat, so it rides
-        whichever baseline write creates it -- an in-memory latch re-greeted
-        every granted chat on every gateway restart, a wave of noise into
-        real rooms. Sent notify-marked: this is the adapter's own structural
-        disclosure, not a turn's mid-turn chatter -- there may be no turn open
-        at all -- so the verbose preference must not gate it.
-
-        Home chat only: every other chat already has an opener -- the API
-        greets the chats it creates, a thread the agent starts opens with
-        its own message, and an inherited chat was already talked in -- so a
-        wave there doubles the opener."""
-        if not first_meeting or chat_uid != self.home_chat_uid:
-            return
-        try:
-            await self.send(chat_uid, "👋")
-        except Exception as exc:  # noqa: BLE001 - greeting must not tear down the anchor
-            log.warning("[plow_chat] boot greeting failed for %s: %s", chat_uid, type(exc).__name__)
 
     async def _prime(self):
         """Hand hermes SETUP_TURN in the home chat, injected the way `_goal_fire`
@@ -3148,7 +3130,7 @@ class PlowChatAdapter(BasePlatformAdapter):
     async def _deliver(self, burst, resolved, chat_uid):
         # This chat's checkpoint below may be its first ever (discovered
         # mid-connection, not yet reached by `_listen`'s per-connect loop)
-        # -- route through the greet-gated lifecycle before writing over it
+        # -- route through the anchor lifecycle before writing over it
         # directly. BEFORE the handoff, never after: `_serve_chat`'s retry
         # loop re-runs this whole call on any exception, and a failure here
         # raises, same as `_ensure_anchor` always does -- placed after
