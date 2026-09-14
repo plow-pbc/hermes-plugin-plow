@@ -2318,13 +2318,20 @@ class PlowChatAdapter(BasePlatformAdapter):
         if status == "none":
             return {"skipped": "no_invite_opportunity"}
         if status == "ready":
-            invite_status = await self.resume_invite(
+            sent = await self.resume_invite(
                 {
                     "opportunity_id": opportunity.get("opportunity_id"),
                     "triggered_at": turn["triggered_at"],
                 }
             )
-            return {"invite_status": invite_status}
+            # Plow's bubble IS this turn's reply; anything the model adds after it
+            # narrates what the invitee can already see (plow#1974). Same
+            # suppression, and same handoff escape, as a completed sequence.
+            turn["sequence_completed"] = not turn.get("inbound_handed_off")
+            return {
+                "sent_in_thread": "\n".join(message["body"] for message in sent),
+                "note": "This message is already in the thread. Your reply for this turn is done.",
+            }
         if status != "consent_required":
             raise RuntimeError("agent invite opportunity response has an invalid shape")
         if _deferred_questions is None:
@@ -2376,16 +2383,17 @@ class PlowChatAdapter(BasePlatformAdapter):
         triggered_at = datetime.fromisoformat(context["triggered_at"])
         age = datetime.now(timezone.utc) - triggered_at
         if age.total_seconds() >= 24 * 60 * 60:
-            return False
+            return []
 
         opportunity_id = context.get("opportunity_id")
         if not opportunity_id:
             raise RuntimeError("agent invite opportunity is missing")
         result = await self._tool_json("POST", f"/v1/auth/agent-invites/opportunities/{opportunity_id}/send")
-        status = result.get("status")
-        if status != "sent":
+        sent = result.get("sent")
+        if (result.get("status") != "sent" or not isinstance(sent, list) or not sent
+                or not all(isinstance(m, dict) and isinstance(m.get("body"), str) for m in sent)):
             raise RuntimeError("agent invite response has an invalid shape")
-        return status
+        return sent
 
     async def set_conversation_trusted(self, chat_uid, trusted):
         """Write trust through Plow and update cache only from its response."""
@@ -4297,8 +4305,7 @@ async def _handle_invite_consent(question, response):
                 "Absolutely — I’ll offer Plow invites in situations like this from now on. "
                 "This older invite request cannot be sent after the upgrade, so ask me again in that thread."
             )
-        invite_status = await adapter.resume_invite(question.context)
-        if invite_status == "sent":
+        if await adapter.resume_invite(question.context):
             return DeferredQuestionResult.done(
                 "Absolutely — I sent the invite and I’ll offer them in situations like this from now on."
             )

@@ -2920,6 +2920,8 @@ def _invite_turn(**overrides: Any) -> dict[str, Any]:
 
 
 INVITE_SEND_CALL = ("POST", "/v1/auth/agent-invites/opportunities/agi_1/send", None)
+INVITE_BODY = ("Alex said I can invite you. Text 7NYJA to +1 650-555-0100 and you'll "
+               "get your own Plow agent, with $100 in credits to start.")
 
 
 def test_member_turn_can_start_fixed_invite_workflow(
@@ -3112,9 +3114,9 @@ async def test_deferred_answer_is_semantically_classified_and_persisted(
     async def persist(value: bool) -> None:
         consent.append(value)
 
-    async def resume(context: dict[str, Any]) -> str:
+    async def resume(context: dict[str, Any]) -> list[dict[str, Any]]:
         resumed.append(context)
-        return "sent"
+        return [{"message_id": "msg_invite", "body": INVITE_BODY}]
 
     monkeypatch.setattr(adapter, "set_invite_consent", persist, raising=False)
     monkeypatch.setattr(adapter, "resume_invite", resume, raising=False)
@@ -3240,16 +3242,25 @@ async def test_offer_checks_consent_and_eligibility_before_fixed_question(
     assert len(ctx.deferred_questions.enqueued) == 1
 
 
-@pytest.mark.parametrize("enabled", [True, False])
+@pytest.mark.parametrize(
+    ("enabled", "handed_off"),
+    [
+        pytest.param(True, False, id="sent-suppresses-trailing-reply"),
+        pytest.param(True, True, id="sent-but-handed-off-does-not-suppress"),
+        pytest.param(False, False, id="declined-never-suppresses"),
+    ],
+)
 async def test_resolved_consent_sends_once_or_stays_declined(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: pathlib.Path,
     enabled: bool,
+    handed_off: bool,
 ) -> None:
     module = _load(monkeypatch, tmp_path)
     ctx = _ToolContext()
     module.register(ctx)
     adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
+    adapter._set_reach([_chat("cht_a"), _chat("cht_b", group=True)])
     calls: list[tuple[str, str, Any]] = []
 
     async def api(method: str, path: str, *, body: Any = None) -> dict[str, Any]:
@@ -3263,11 +3274,12 @@ async def test_resolved_consent_sends_once_or_stays_declined(
                     "owner_name": "Alex",
                     "praise": "I love Plow. This is amazing.",
                 }
-            return {"status": "sent"}
+            return {"status": "sent", "sent": [{"message_id": "msg_invite", "body": INVITE_BODY}]}
         return {"status": "disabled"}
 
     monkeypatch.setattr(adapter, "_tool_json", api)
-    result = await adapter.offer_invite(_invite_turn())
+    turn = _invite_turn(inbound_handed_off=handed_off)
+    result = await adapter.offer_invite(turn)
 
     assert calls[0] == (
         "POST",
@@ -3275,12 +3287,30 @@ async def test_resolved_consent_sends_once_or_stays_declined(
         {"chat_id": "cht_b", "participant_id": "cp_taylor", "message_id": "msg_delight_1"},
     )
     if enabled:
-        assert result == {"invite_status": "sent"}
+        assert result == {
+            "sent_in_thread": INVITE_BODY,
+            "note": "This message is already in the thread. Your reply for this turn is done.",
+        }
         assert calls[1] == INVITE_SEND_CALL
     else:
         assert result == {"skipped": "consent_declined"}
         assert len(calls) == 1
     assert ctx.deferred_questions.enqueued == []
+
+    # Prove the behavior, not the flag: register the turn as live, the same
+    # way on_processing_start does, then try to deliver the model's own
+    # trailing prose -- exactly the bubble plow#1974 was filed over -- as
+    # this turn's final reply (Hermes marks a turn-final reply `notify`).
+    module._ACTIVE_TURN.set(turn)
+    adapter._sequence_turns[id(turn)] = turn
+    http = _ChatResourceHTTP(_Resp({"uid": "msg_trailing"}))
+    monkeypatch.setattr(module.aiohttp, "ClientSession", lambda *a, **k: http)
+    trailing = await adapter.send("cht_b", "Sent! You should get an invite shortly 🎉",
+                                   metadata={"notify": True})
+
+    assert trailing.success
+    posts = [call for call in http.calls if call[0] == "post"]
+    assert len(posts) == (0 if (enabled and not handed_off) else 1)
 
 
 async def test_a_declined_invite_send_reaches_the_tool_as_a_decline(
@@ -3305,6 +3335,31 @@ async def test_a_declined_invite_send_reaches_the_tool_as_a_decline(
     assert "agent invites not enabled" in err.value.detail
     assert http.calls[0][0] == "post"
     assert http.calls[0][1] == f"{module.BASE}{INVITE_SEND_CALL[1]}"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        pytest.param({"status": "sent"}, id="missing-sent"),
+        pytest.param({"status": "sent", "sent": []}, id="empty-sent"),
+    ],
+)
+async def test_resume_invite_rejects_an_invalid_send_response(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, payload: dict[str, Any],
+) -> None:
+    from datetime import datetime, timezone
+
+    module = _load(monkeypatch, tmp_path)
+    adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
+
+    async def api(method: str, path: str, *, body: Any = None) -> dict[str, Any]:
+        return payload
+
+    monkeypatch.setattr(adapter, "_tool_json", api)
+
+    with pytest.raises(RuntimeError, match="agent invite response has an invalid shape"):
+        await adapter.resume_invite({"opportunity_id": "agi_1",
+                                     "triggered_at": datetime.now(timezone.utc).isoformat()})
 
 
 @pytest.mark.parametrize(
@@ -3351,7 +3406,7 @@ async def test_only_fresh_approval_resumes_original_thread(
 
     async def api(method: str, path: str, *, body: Any = None) -> dict[str, Any]:
         api_calls.append((method, path, body))
-        return {"status": "sent"}
+        return {"status": "sent", "sent": [{"message_id": "msg_invite", "body": INVITE_BODY}]}
 
     monkeypatch.setattr(adapter, "_tool_json", api)
     context = {
@@ -3363,10 +3418,10 @@ async def test_only_fresh_approval_resumes_original_thread(
     resumed = await adapter.resume_invite(context)
 
     if hours_old == 23:
-        assert resumed == "sent"
+        assert resumed == [{"message_id": "msg_invite", "body": INVITE_BODY}]
         assert api_calls == [INVITE_SEND_CALL]
     else:
-        assert resumed is False
+        assert resumed == []
         assert api_calls == []
 
 
