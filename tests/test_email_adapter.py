@@ -19,7 +19,9 @@ from unittest import mock
 import pytest
 
 from test_adapter import (
+    IDENTITY,
     _HTTP,
+    _Resp,
     _SEND_ARGV,
     _attachment,
     _capture_events,
@@ -111,9 +113,10 @@ async def test_a_mail_thread_is_plow_emails_turn_and_never_plow_chats(
     frame is a plow_email turn -- platform, chat_type and chat_id are the
     three fields upstream's build_session_key (gateway/session.py:641) joins
     into `<ns>:plow_email:<chat_type>:<chat_uid>` -- and the phone line's
-    frame is not this platform's. The prompt is the owner fact and nothing
-    else: no roster, no trust prose; the hint rides the platform entry. On a
-    member's mail it is still the line's owner who is named, and only an
+    frame is not this platform's. The prompt is the owner fact, plus the
+    roster on an owner's own turn; no trust prose; the hint rides the
+    platform entry. On a member's mail it is still the line's owner who is
+    named, and only an
     owner's mail carries owner authority. An attachment-only mail is not
     silently "(empty email)": the placeholder names the count and one line is
     logged. A thread whose roster has no owner at all is the one shape that
@@ -127,6 +130,7 @@ async def test_a_mail_thread_is_plow_emails_turn_and_never_plow_chats(
     _mark_anchored(chat, "cht_a")
     mail = _adapter(module)
     mail._set_reach(listing)
+    mail._identity = IDENTITY
     chat_events, mail_events = _capture_events(monkeypatch, chat), _capture_events(monkeypatch, mail)
 
     frame = _envelope("evt_1", "cht_m", "msg_1", body=body, attachments=attachments, role=role)
@@ -142,7 +146,10 @@ async def test_a_mail_thread_is_plow_emails_turn_and_never_plow_chats(
     assert (source.platform, source.chat_type, source.chat_id) == ("plow_email", chat_type, "cht_m")
     assert source.role_authorized is (role == "owner") and source.user_id == f"mem_{role}_cht_m"
     assert event["text"] == expected_text and event["message_id"] == "msg_1"
-    assert event["channel_prompt"] == module._owner_fact(OWNER)
+    roster = module._lines_fact(IDENTITY)
+    assert "that is you" in roster, "the mail line's own persona is marked"
+    assert event["channel_prompt"] == (f"{module._owner_fact(OWNER)} {roster}" if role == "owner"
+                                        else module._owner_fact(OWNER))
     if attachments:
         assert "cht_m: attachment-only mail (1 attachment(s))" in caplog.text
 
@@ -154,6 +161,29 @@ async def test_a_mail_thread_is_plow_emails_turn_and_never_plow_chats(
     # `_serve` logs the TYPE only -- an aiohttp handshake error stringifies a
     # live ticket -- so an unnamed raise reads exactly like a network blip.
     assert "cht_x has no owner participant" in caplog.text
+
+
+async def test_an_unknown_thread_is_delivered_even_when_the_roster_read_is_down(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
+) -> None:
+    """The refresh an unknown thread triggers reads the grant alone. The roster
+    is read once per connect, so a /v1/lines outage cannot cost the thread its
+    first email (the mail line has no backfill)."""
+    module, _entry = _load_email(monkeypatch, tmp_path)
+    mail = _adapter(module)
+    mail._set_reach([_chat("cht_a")])                    # cht_m is not known yet
+    events = _capture_events(monkeypatch, mail)
+
+    class _GrantOnlyHTTP:
+        def get(self, url: str, **kwargs: Any) -> _Resp:
+            if url.endswith("/v1/lines"):
+                return _Resp({}, status=503)
+            return _Resp({"object": "list", "data": [_chat("cht_a"), _mail_chat("cht_m")], "has_more": False})
+
+    await mail._on_frame(_envelope("evt_1", "cht_m", "msg_1"), _GrantOnlyHTTP())
+
+    [event] = events
+    assert event["source"].chat_id == "cht_m" and event["message_id"] == "msg_1"
 
 
 @pytest.mark.parametrize("role", ["owner", "member"])

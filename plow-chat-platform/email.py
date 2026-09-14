@@ -26,8 +26,11 @@ from ._transport import (
     _chat_type,
     _granted_chats,
     _is_chatter,
+    _lines_fact,
+    _NO_IDENTITY,
     _owner_fact,
     _owner_identity,
+    _refresh_identity,
     _self_agent_line,
     _serve,
     _socket,
@@ -58,6 +61,7 @@ class PlowEmailAdapter(BasePlatformAdapter):
         config.typing_indicator = False  # the base's 2s typing loop is a no-op on email
         self.auth = _bearer()
         self.address = None                  # the line's address, off the first mail chat
+        self._identity = dict(_NO_IDENTITY)   # read once per socket session, like plow_chat's
         self._chats = {}                     # uid -> chat resource, mail only
         self._foreign = frozenset()          # the phone line's uids on the same grant
         self._seen_events = []
@@ -100,6 +104,7 @@ class PlowEmailAdapter(BasePlatformAdapter):
                 pass
         async with aiohttp.ClientSession() as http:
             await self._refresh_reach(http)
+            self._identity = await _refresh_identity(http, self.auth, self._identity)
         self._ws_task = asyncio.create_task(self._listen())
         return True
 
@@ -121,6 +126,7 @@ class PlowEmailAdapter(BasePlatformAdapter):
             nonlocal first_connection
             if not first_connection:
                 await self._refresh_reach(http)
+                self._identity = await _refresh_identity(http, self.auth, self._identity)
             first_connection = False
             async with _socket(http, await _ticket(http, self.auth)) as ws:
                 connected()
@@ -167,6 +173,11 @@ class PlowEmailAdapter(BasePlatformAdapter):
             # this mail is already event-deduped and would otherwise vanish silently.
             log.error("[plow_email] %s", exc)
             raise
+        # The roster rides owner turns only, as it does on the phone line.
+        if sender.get("role") == "owner":
+            roster = _lines_fact(self._identity)
+            if roster:
+                channel_prompt = f"{channel_prompt} {roster}"
         body, count = msg["body"].strip(), len(msg["attachments"])
         if not body and count:
             log.info("[plow_email] %s: attachment-only mail (%d attachment(s))", chat_uid, count)
