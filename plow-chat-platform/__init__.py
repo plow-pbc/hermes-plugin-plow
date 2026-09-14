@@ -2028,41 +2028,44 @@ class PlowChatAdapter(BasePlatformAdapter):
         return None
 
     def _send_guard(self, chat_id):
-        """The one rule for every outbound call: within the grant, and within
-        the turn's own chat while an unauthorized one is open. None means go."""
+        """The one rule for every outbound call: within the grant, within the
+        turn's own chat while an unauthorized one is open, and -- for a
+        cross-chat target -- seating the owner. None means go.
+
+        send() refreshes a cross-chat target's roster before this runs, so the
+        owner check reads a fresh roster and fails closed on an empty one: the
+        owner may have just left the group the model hand-picked by id, and
+        outbound to a person is a group that seats the owner, never a 1:1 that
+        leaves them out (the bug: an agent texted a 1:1 the owner could not see).
+        """
         if chat_id not in self.chat_uids:
             return SendResult(success=False, error=f"Plow Chat {chat_id!r} is outside this agent's grant")
         turn = self._active_turn.get()
-        if turn is not None and not turn["authority"] and chat_id != turn["chat_uid"]:
+        if turn is None or chat_id == turn["chat_uid"]:
+            return None
+        if not turn["authority"]:
             return SendResult(success=False,
                               error=f"Plow Chat turn without the owner's authority is confined to {turn['chat_uid']!r}")
+        if not _owner_in_roster(self._chats.get(chat_id) or {}):
+            return SendResult(success=False,
+                              error=f"Plow Chat {chat_id!r} does not seat your owner; outbound to a person "
+                                    "goes to a group that includes them, never a 1:1 that leaves them out. "
+                                    "Nothing was sent.")
         return None
 
     async def send(self, chat_id, content, reply_to=None, metadata=None):
+        # A cross-chat target must currently seat the owner (checked in
+        # _send_guard). Refresh its roster first: a cached one can be stale --
+        # the owner may have just left -- and an unverifiable one fails closed.
+        cc_turn = self._active_turn.get()
+        if cc_turn is not None and chat_id != cc_turn["chat_uid"]:
+            try:
+                await self._refresh_current_chat(chat_id)
+            except Exception:  # noqa: BLE001 - can't verify owner presence -> fail closed
+                self._chats.pop(chat_id, None)
         refused = self._message_guard(chat_id)
         if refused is not None:
             return refused
-        # Owner-CC backstop: an agent-initiated send to a chat other than the
-        # turn's own must land where the owner is seated -- outbound to a person
-        # is a group the server CC's the owner into, never a 1:1 that leaves
-        # them out (the bug: an agent texted a 1:1 iMessage the owner could not
-        # see). A reply to the turn's own chat is grandfathered (that is the
-        # inbound thread the owner may not be in), and a turn-less delivery
-        # (cron) is outside this gate, exactly as `_send_guard`'s confinement
-        # is. Person-targeting never reaches here -- it routes through
-        # start_group_thread -- so this only catches a hand-picked cht_ id, and
-        # only a KNOWN roster that excludes the owner: an id the model can pick
-        # came from action=list, which caches the roster, and one in the grant
-        # is cached by construction, so an uncached target is not this case.
-        cc_turn = self._active_turn.get()
-        cc_chat = self._chats.get(chat_id)
-        if (cc_turn is not None and chat_id != cc_turn["chat_uid"]
-                and cc_chat is not None and not _owner_in_roster(cc_chat)):
-            return SendResult(
-                success=False,
-                error=f"Plow Chat {chat_id!r} does not seat your owner; outbound to a "
-                      "person goes to a group that includes them, never a 1:1 that leaves "
-                      "them out. Nothing was sent.")
         # Fresh session per call: Hermes may invoke send() from a different
         # asyncio task than the WebSocket loop, where a shared session breaks.
         body = content.strip()
@@ -3750,9 +3753,12 @@ def _open_person_thread(adapter, loop, handles, body, trusted_arg, turn):
         data = asyncio.run_coroutine_threadsafe(
             adapter.start_group_thread(members, body, trusted), loop).result(timeout=45)
     except _PlowSendError as exc:
-        if exc.status >= 500:
-            # A 5xx can arrive after Plow committed the POST — it says as little
-            # about delivery as a timeout. Only a 4xx is Plow itself declining.
+        if exc.status >= 500 or exc.status == 424:
+            # A 5xx, or a 424 (the provider did not confirm — the server left a
+            # dispatch tombstone and the thread may exist), says as little about
+            # delivery as a timeout. start_group_thread mints a fresh
+            # idempotency_key per call, so a retry would double-send; report
+            # unknown and do not retry.
             return json.dumps({
                 "success": False, "status": exc.status, "delivery_unknown": True,
                 "error": f"{exc.detail} — a {exc.status} can arrive after the message "
@@ -3827,6 +3833,10 @@ def _plow_send_message(args, **_kwargs):
 
     target = to
     if to.startswith("#"):
+        if turn is None or not turn["authority"]:
+            return json.dumps({"success": False,
+                               "error": "resolving a #title lists your owner's chats and needs their "
+                                        "authority; pass a cht_ id instead"})
         name = to[1:].strip().lower()
         try:
             listing = asyncio.run_coroutine_threadsafe(
@@ -3883,7 +3893,11 @@ PLOW_SEND_MESSAGE_SCHEMA = {
             "body": {"type": "string", "description": "Message text. Omit for action=list."},
             "trusted": {"type": "boolean",
                         "description": "Full trust for a newly opened group (default false): "
-                                       "every member acts with your owner's authority. Owner-turn only."},
+                                       "every member acts with your owner's authority. Owner-turn "
+                                       "only, and applies only when a group is created (created=true). "
+                                       "Opening onto an existing thread adopts its own trust: the "
+                                       "returned trusted value is authoritative -- report it if it "
+                                       "differs from what you asked for."},
         },
         "additionalProperties": False,
     },

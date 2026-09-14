@@ -245,9 +245,12 @@ merchant — begins with discretion, as does a group another member starts. Only
 the owner can change that later.
 
 The `plow_set_conversation_trusted` tool writes the same API preference as the
-dashboard; opening a trusted thread is owner-only too. Both only succeed on an owner-
-authored Plow Chat turn where the model passes `confirm=true` for an explicit owner
-request. Member turns and calls outside an active chat turn cannot change either.
+dashboard; it only succeeds on an owner-authored Plow Chat turn where the model
+passes `confirm=true` for an explicit owner request. Opening a trusted thread is
+owner-only too, through `plow_send_message(..., trusted=true)` on an owner turn —
+no `confirm` there. `trusted` applies only to a group being created; opening onto
+an existing thread adopts that thread's own trust, and the returned value is
+authoritative. Member turns and calls outside an active chat turn cannot change either.
 
 This plugin version requires a Plow API that publishes the required `trusted`
 chat field and `PUT /v1/chats/{uid}/trusted`. Deploy that API first: against an

@@ -6575,6 +6575,57 @@ def test_a_hash_title_resolves_to_its_chat_id(
     assert sent == [("cht_cabin", "hi")]
 
 
+async def test_a_stale_owner_inclusive_cache_is_refreshed_before_the_owner_check(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """The owner-CC guard reads a FRESH roster. If the owner has left a group
+    since it was cached, the refresh catches it and the cross-chat send is
+    refused rather than disclosing the message to the members left behind."""
+    module = _load(monkeypatch, tmp_path)
+    adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
+    adapter._set_reach([_chat("cht_a"), _chat("cht_grp", group=True)])  # cache seats the owner
+    posted = mock.AsyncMock(return_value=_SendResult(success=True))
+    monkeypatch.setattr(adapter, "_post_message", posted)
+
+    async def _owner_left(chat_uid: str) -> None:
+        adapter._chats[chat_uid] = _owner_excluding_chat(chat_uid)  # the live roster, refreshed
+
+    monkeypatch.setattr(adapter, "_refresh_current_chat", _owner_left)
+    adapter._active_turn.set({"chat_uid": "cht_a", "owner": True, "authority": True})
+    result = await adapter.send("cht_grp", "hi")
+    assert result.success is False and "does not seat your owner" in result.error
+    posted.assert_not_awaited()  # a refusal must not reach Plow
+
+
+def test_a_hash_title_needs_the_owners_authority(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """Resolving a #title lists the owner's chats, so a member turn cannot use it
+    to probe which private titles exist -- it is refused before the listing."""
+    module = _load(monkeypatch, tmp_path)
+    listed: list[Any] = []
+    _live_tool(module, monkeypatch, "list_chats", result=[], record=listed)
+    module._ACTIVE_TURN.set({"chat_uid": "cht_a", "owner": False, "authority": False})
+    out = json.loads(module._plow_send_message({"to": "#Private", "body": "hi"}))
+    assert out["success"] is False and "authority" in out["error"]
+    assert listed == [], "the listing must not run on a turn without the owner's authority"
+
+
+def test_person_targeting_reports_a_424_as_delivery_unknown(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """A 424 means the provider did not confirm; the server left a dispatch
+    tombstone and a retry with a fresh idempotency_key would double-send, so the
+    tool reports delivery unknown and tells the model not to retry."""
+    module = _load(monkeypatch, tmp_path)
+    _live_tool(module, monkeypatch, "start_group_thread",
+               raises=module._PlowSendError(424, "Provider did not confirm chat creation"))
+    module._ACTIVE_TURN.set(_OWNER_DM)
+    out = json.loads(module._plow_send_message({"to": "+15550001111", "body": "hi"}))
+    assert out["success"] is False and out["delivery_unknown"] is True and out["status"] == 424
+    assert "Do NOT retry" in out["error"]
+
+
 def test_reply_target_prompt_names_the_send_tool(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
 ) -> None:
@@ -6870,6 +6921,12 @@ async def test_completed_sequence_suppresses_final_reply_only_in_its_live_turn(m
     assert 'suppressed post-sequence reply for cht_a' in caplog.text
 
     adapter.chat_uids = adapter.chat_uids | {'cht_b'}
+    # cht_b is a cross-chat target; seat the owner there and stub the refresh
+    # so the owner-CC gate passes (no live socket in a test).
+    adapter._chats['cht_b'] = {'uid': 'cht_b', 'participants': [
+        {'type': 'member', 'uid': 'mem_sam_cht_b', 'display_name': 'Sam',
+         'role': 'owner', 'provider_key': '+15550000001'}]}
+    monkeypatch.setattr(adapter, '_refresh_current_chat', mock.AsyncMock())
     mirrored = []
     monkeypatch.setattr(module, '_mirror_sent', lambda *args: mirrored.append(args))
     assert (await adapter.send('cht_b', 'Other chat', metadata={'notify': True})).success
@@ -7138,6 +7195,12 @@ async def test_suppression_is_scoped_to_the_turns_own_chat(
     module = _load(monkeypatch, tmp_path)
     adapter = _goal_chat_with_owner_speaking(module)
     adapter.chat_uids = frozenset({"cht_a", "cht_b"})
+    # cht_b is the cross-chat target; the owner-CC gate refreshes and checks it,
+    # so seat the owner there and stub the refresh (no live socket in a test).
+    adapter._chats["cht_b"] = {"uid": "cht_b", "participants": [
+        {"type": "member", "uid": "mem_sam_cht_b", "display_name": "Sam",
+         "role": "owner", "provider_key": "+15550000001"}]}
+    monkeypatch.setattr(adapter, "_refresh_current_chat", mock.AsyncMock())
     posted = mock.AsyncMock(return_value=_SendResult(success=True))
     monkeypatch.setattr(adapter, "_post_message", posted)
     monkeypatch.setattr(adapter, "_verbose_enabled", mock.AsyncMock(return_value=True))
