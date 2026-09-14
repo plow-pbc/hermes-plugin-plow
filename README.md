@@ -30,7 +30,7 @@ The directory is named for the plugin id so the install can be a directory copy:
 > This plugin also requires a Plow API that serves agent-invite consent,
 > `/v1/auth/agent-invites/opportunities`,
 > `/v1/auth/agent-invites/opportunities/{opportunity_uid}/send`,
-> `POST /v1/chats` (outbound thread creation — `plow_start_group_message`
+> `POST /v1/chats` (outbound thread creation — `plow_send_message`'s person-targeting
 > 404s against an older API, so that API change deploys before any
 > `agent-mgr` SHA advance), and
 > `PUT /v1/contacts/{handle}` (`plow_name_contact` — the handle-keyed contact
@@ -262,7 +262,8 @@ A is invisible to chat B's next turn unless it is recorded there. The
 `plow_send_message` tool is the one sanctioned way to post cross-chat; it goes
 through the adapter's `send()` like every other outbound message (the grant,
 and the confinement of a turn without the owner's authority, apply exactly as
-for a reply). `plow_list_chats` is where its `cht_` id comes from: a live `GET
+for a reply). `plow_send_message` with `action=list` is where its `cht_` id
+comes from: a live `GET
 /v1/chats` — the same read that establishes reach, so the credential's grant
 is the whole listing — reduced to
 id, kind, title, the humans by name and handle, and trust. Only `active` rooms
@@ -284,7 +285,7 @@ for cron and `hermes send` deliveries — on the delivery's own coroutine, so a
 caller that stopped waiting cannot strand a delivered message unrecorded. A
 chat's session is born on its first inbound message, so a chat that has never
 spoken has nowhere to record to: the adapter logs a warning and that chat
-will not remember the send. A thread `plow_start_group_message` created is
+will not remember the send. A thread `plow_send_message` opened for a person is
 in that state; one it resumed is handled like any other cross-chat send,
 which records the opener only where a session already exists (a thread
 resumed before anyone replied has none, and logs the same warning). Posting

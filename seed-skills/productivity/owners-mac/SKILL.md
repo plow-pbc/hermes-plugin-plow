@@ -7,7 +7,7 @@ version: 1.0.0
 # The owner's Mac — where their world is
 
 You run on a Plow cloud server. Your own stores — `session_search`,
-`memory`, `plow_contacts`, `plow_list_chats` — hold only what has passed
+`memory`, `plow_contacts` — hold only what has passed
 through you. On a fresh agent they are empty, and an empty store about
 *yourself* says nothing about your *owner's* world. Their messages,
 mail, calendar, contacts, files, signed-in browser, and everything Plow
