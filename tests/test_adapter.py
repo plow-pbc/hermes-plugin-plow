@@ -2695,7 +2695,7 @@ def test_tools_register_with_optional_deferred_questions(
     # no dry_run/confirm friction, and nothing schema-required (action defaults
     # to send; to/body are validated per-action in the handler).
     assert set(send_message_tool["schema"]["parameters"]["properties"]) == {
-        "action", "to", "body", "trusted"}
+        "action", "to", "body", "trusted", "subject"}
     assert "required" not in send_message_tool["schema"]["parameters"]
     assert send_message_tool["requires_env"] == ["PLOW_AGENT_TOKEN"]
     assert send_message_tool["check_fn"]()
@@ -3543,6 +3543,9 @@ async def test_home_line_uid_raises_when_the_home_chat_has_no_agent_line(
     # One array element carrying two addresses would be approved as one
     # recipient and delivered to two.
     (["+15550001111,+15559999999"], "may not contain a comma"),
+    # A number and an address are different lines; one call cannot be both.
+    (["sam@odio.com", "+15550001111"], "phone numbers and email addresses"),
+    (["sam@odio.com"], "subject is required"),
 ])
 def test_person_targeting_rejects_bad_handles(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, to: list[str], message: str
@@ -3744,6 +3747,35 @@ def test_other_tools_and_non_sends_pass_untouched(
     module = _load(monkeypatch, tmp_path)
     module._ACTIVE_TURN.set(_OWNER_DM)
     assert module._pre_tool_call(tool_name, args) is None
+
+
+@pytest.mark.parametrize("turn,delivered", [
+    pytest.param(_OWNER_DM, True, id="owner-turn-sends"),
+    pytest.param(_DISCRETION_MEMBER, False, id="no-authority-refuses"),
+    pytest.param(None, False, id="outside-a-turn-refuses"),
+])
+def test_an_email_address_handle_leaves_from_the_agents_own_mailbox(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, turn: Any, delivered: bool
+) -> None:
+    """'Email Sam' is the same verb as 'text Sam': the handle picks the
+    transport. An address goes out from this agent's mailbox, never as an
+    iMessage to an Apple ID and never from the owner's Gmail -- and under the
+    same authority gate a text obeys."""
+    module = _load(monkeypatch, tmp_path)
+    sent: list[Any] = []
+    _live_tool(module, monkeypatch, "send_mail",
+               result={"status": "sent", "thread_id": "t1", "message_id": "m1", "from": "elm@plow.co"},
+               record=sent)
+    module._ACTIVE_TURN.set(turn)
+    out = json.loads(module._plow_send_message(
+        {"to": "sam@odio.com", "subject": "Transcript", "body": "Here it is"}))
+    if delivered:
+        assert out == {"success": True, "status": "sent", "thread_id": "t1", "message_id": "m1",
+                       "from": "elm@plow.co"}
+        assert sent == [(["sam@odio.com"], "Transcript", "Here it is")]
+    else:
+        assert out["success"] is False and "authority" in out["error"]
+        assert sent == []
 
 
 def test_group_message_reports_adoption_separately_from_delivery(
@@ -4037,13 +4069,6 @@ async def test_start_group_thread_posts_the_v1_chats_contract_and_reports_adopti
     assert adapter._anchored_chats.get("cht_new") is True
     assert adapter._load_checkpoint("cht_new") is None
 
-def _identity_with_mailbox(adapter: Any, *, mailbox: bool = True) -> None:
-    """The roster as `/v1/lines` serves it: Elm is this agent, and the Elm
-    mailbox row rides on that persona. Without the email row this agent's
-    persona has no mailbox, which is the preflight case."""
-    adapter._identity = {**IDENTITY,
-                         "lines": [l for l in LINES if mailbox or l["provider_type"] != "email"]}
-
 
 async def test_send_mail_posts_the_email_lines_contract(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
@@ -4053,7 +4078,7 @@ async def test_send_mail_posts_the_email_lines_contract(
     seats the owner from the credential."""
     module = _load(monkeypatch, tmp_path)
     adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
-    _identity_with_mailbox(adapter)
+    adapter._identity = IDENTITY  # Elm is this agent; its mailbox rides that persona
     posts: list[tuple[str, dict[str, Any], dict[str, str]]] = []
     http = _create_http(posts, resource={"status": "sent", "thread_id": "t1", "message_id": "m1",
                                          "line": {"uid": "ln_em"}}, status=201)
@@ -4067,25 +4092,35 @@ async def test_send_mail_posts_the_email_lines_contract(
     assert data == {"status": "sent", "thread_id": "t1", "message_id": "m1", "from": "elm@plow.co"}
 
 
-@pytest.mark.parametrize("mailbox,status,exc", [
-    pytest.param(False, 201, "_PlowPreflightError", id="no-mailbox-for-this-persona"),
-    pytest.param(True, 403, "_PlowSendError", id="api-refused"),
+@pytest.mark.parametrize("identity,status,exc", [
+    pytest.param({}, 403, "_PlowSendError", id="api-refused"),
+    pytest.param({"lines": [ln for ln in LINES if ln["provider_type"] != "email"]},
+                 201, "_PlowPreflightError", id="no-mailbox-for-this-persona"),
+    # `/v1/agents/me` 404s for a token that is not one agent, and the roster
+    # read still succeeds. With no uid to match, no other persona's mailbox may
+    # be adopted -- not even one whose rows carry `agent_uid: None` as well.
+    pytest.param({"agent": None,
+                  "lines": [*LINES, {"uid": "ln_wm", "provider_type": "email",
+                                     "provider_key": "willow@plow.co", "display_name": "Willow",
+                                     "agent_uid": None}]},
+                 201, "_PlowPreflightError", id="token-is-not-one-agent"),
 ])
 async def test_send_mail_fails_loudly(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, mailbox: bool, status: int, exc: str
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
+    identity: dict[str, Any], status: int, exc: str,
 ) -> None:
-    """No mailbox is definitive and nothing was sent; a refusal carries the
-    status, exactly as the thread-creation POST does."""
+    """Anything that stops the mail raises. A persona this agent cannot pin a
+    mailbox to is definitive and pre-POST; a refusal carries its status, the
+    same convention the thread-creation POST follows."""
     module = _load(monkeypatch, tmp_path)
     adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
-    _identity_with_mailbox(adapter, mailbox=mailbox)
+    adapter._identity = {**IDENTITY, **identity}
     posts: list[Any] = []
     http = _create_http(posts, resource={"error": "no"}, status=status)
     monkeypatch.setattr(module.aiohttp, "ClientSession", lambda *a, **k: http)
     with pytest.raises(getattr(module, exc)):
         await adapter.send_mail(["sam@odio.com"], "s", "b")
-    assert (posts == []) is (not mailbox)
-
+    assert (posts == []) is (exc == "_PlowPreflightError"), "a preflight failure sends nothing"
 
 
 async def test_a_malformed_create_response_raises_instead_of_degrading(
@@ -6601,7 +6636,9 @@ def _owner_excluding_chat(uid: str) -> dict[str, Any]:
 
 @pytest.mark.parametrize("to, members", [
     ("+15550001111", ["+15550001111"]),
-    (["+15550001111", "sam@example.com"], ["+15550001111", "sam@example.com"]),
+    # Several handles on one line. A number mixed with an address is the mail
+    # route's rejected case -- see test_person_targeting_rejects_bad_handles.
+    (["+15550001111", "+15550002222"], ["+15550001111", "+15550002222"]),
 ], ids=["one-handle", "many-handles"])
 def test_person_targeting_opens_one_owner_inclusive_group(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, to: Any, members: list[str],

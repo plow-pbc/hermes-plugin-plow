@@ -3816,7 +3816,47 @@ PLOW_SEND_SEQUENCE_SCHEMA = {
 }
 
 
-def _open_person_thread(adapter, loop, handles, body, trusted_arg, turn):
+def _send_error_result(exc):
+    """A `_PlowSendError` as either outbound route reports it.
+
+    A 5xx, a 408 (timeout after Plow may have accepted), or a 424 (the provider
+    did not confirm -- the server left a dispatch tombstone and the thread may
+    exist) all say as little about delivery as a timeout, and neither route is
+    safe to retry blind: start_group_thread mints a fresh idempotency_key per
+    call, and a re-sent mail is a second mail. Report unknown, forbid the retry.
+    """
+    if exc.status >= 500 or exc.status in (408, 424):
+        return json.dumps({
+            "success": False, "status": exc.status, "delivery_unknown": True,
+            "error": f"{exc.detail} — a {exc.status} can arrive after the message "
+                     f"was accepted. Do NOT retry; check the thread.",
+        })
+    return json.dumps({"success": False, "status": exc.status, "error": exc.detail})
+
+
+def _send_mail(adapter, loop, to, subject, body, turn):
+    """Reach a person by email, from this agent's own mailbox; the API copies
+    the owner. Same authority gate as a text, no trust question (mail has
+    no room to trust)."""
+    if not subject:
+        return json.dumps({"success": False, "error": "subject is required for an email; nothing was sent"})
+    if turn is None or not turn["authority"]:
+        return json.dumps({"success": False,
+                           "error": "reaching a person needs the owner's authority; nothing was sent"})
+    try:
+        data = asyncio.run_coroutine_threadsafe(
+            adapter.send_mail(to, subject, body), loop).result(timeout=45)
+    except _PlowSendError as exc:
+        return _send_error_result(exc)
+    except _PlowPreflightError as exc:
+        return json.dumps({"success": False,
+                           "error": f"could not resolve this agent's mailbox ({exc}); nothing was sent"})
+    except Exception as exc:  # noqa: BLE001 - no answer is not a failure to retry
+        return _lost_answer(exc)
+    return json.dumps({"success": True, **data})
+
+
+def _open_person_thread(adapter, loop, handles, body, trusted_arg, turn, subject):
     """Reach a person (or people) as an owner-inclusive group. The server seats
     the owner on every chat this agent creates, so the owner is effectively
     CC'd; a resumed thread is adopted rather than duplicated (created=false).
@@ -3829,6 +3869,15 @@ def _open_person_thread(adapter, loop, handles, body, trusted_arg, turn):
         members = _normalize_members(handles)
     except ValueError as exc:
         return json.dumps({"success": False, "error": str(exc)})
+    # An address is a different line from a number, so one call cannot be both;
+    # `trusted` has nothing to say about mail, and is ignored rather than gated.
+    mail = [m for m in members if "@" in m]
+    if mail and len(mail) != len(members):
+        return json.dumps({"success": False,
+                           "error": "phone numbers and email addresses are different lines; "
+                                    "send one message per line; nothing was sent"})
+    if mail:
+        return _send_mail(adapter, loop, members, subject, body, turn)
     trusted = _flag(trusted_arg, default=False, safe=False)
     if trusted and (turn is None or not turn["owner"]):
         return json.dumps({"success": False,
@@ -3841,18 +3890,7 @@ def _open_person_thread(adapter, loop, handles, body, trusted_arg, turn):
         data = asyncio.run_coroutine_threadsafe(
             adapter.start_group_thread(members, body, trusted), loop).result(timeout=45)
     except _PlowSendError as exc:
-        if exc.status >= 500 or exc.status in (408, 424):
-            # A 5xx, a 408 (timeout after Plow may have accepted), or a 424 (the
-            # provider did not confirm — the server left a dispatch tombstone and
-            # the thread may exist) all say as little about delivery as a timeout.
-            # start_group_thread mints a fresh idempotency_key per call, so a
-            # retry would double-send; report unknown and do not retry.
-            return json.dumps({
-                "success": False, "status": exc.status, "delivery_unknown": True,
-                "error": f"{exc.detail} — a {exc.status} can arrive after the message "
-                         f"was accepted. Do NOT retry; check the thread.",
-            })
-        return json.dumps({"success": False, "status": exc.status, "error": exc.detail})
+        return _send_error_result(exc)
     except _PlowPreflightError as exc:
         # Failed before the POST: definitive, and safe to retry once fixed.
         return json.dumps({"success": False,
@@ -3917,7 +3955,8 @@ def _plow_send_message(args, **_kwargs):
     # existing chat.
     if isinstance(to, list) or not to.startswith(("cht_", "#")):
         handles = to if isinstance(to, list) else [to]
-        return _open_person_thread(adapter, loop, handles, body, args.get("trusted"), turn)
+        return _open_person_thread(adapter, loop, handles, body, args.get("trusted"), turn,
+                                   (args.get("subject") or "").strip())
 
     target = to
     if to.startswith("#"):
@@ -3957,7 +3996,9 @@ PLOW_SEND_MESSAGE_SCHEMA = {
         "for your owner's macOS Contacts, or plow_contacts for Plow's own book) "
         "and pass the handle -- or an array of handles for a group. That opens "
         "an owner-inclusive group: your owner is always seated, so they see "
-        "every outbound message; a person is never a bare 1:1. Ordinary "
+        "every outbound message; a person is never a bare 1:1. An email address "
+        "in `to` (with `subject`) is mail from your own mailbox, your owner "
+        "copied. Ordinary "
         "outreach (a contractor, a neighbour, a merchant) uses the default "
         "trusted=false; trusted=true hands every member your owner's own "
         "authority and needs your owner's own turn. To post into an EXISTING "
@@ -3979,6 +4020,9 @@ PLOW_SEND_MESSAGE_SCHEMA = {
                                   "owner-inclusive group, or a cht_ id / #title for an "
                                   "existing chat. Omit for action=list."},
             "body": {"type": "string", "description": "Message text. Omit for action=list."},
+            "subject": {"type": "string",
+                        "description": "Required when `to` is an email address: the mail leaves from "
+                                       "your own mailbox with your owner copied. Ignored otherwise."},
             "trusted": {"type": "boolean",
                         "description": "Full trust for a newly opened group (default false): "
                                        "every member acts with your owner's authority. Owner-turn "
