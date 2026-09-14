@@ -2053,16 +2053,23 @@ class PlowChatAdapter(BasePlatformAdapter):
                                     "Nothing was sent.")
         return None
 
+    async def _fresh_cross_chat(self, chat_id):
+        """Before an outbound owner-CC decision, freshen a granted cross-chat
+        target's roster -- the owner may have just left -- and fail closed if it
+        cannot be verified. Only a granted, cross-chat id: an ungranted one is
+        left for _send_guard to refuse, so no out-of-grant fetch or cache write
+        happens ahead of the grant check. Every outbound path calls this so the
+        owner-CC seam reads one policy on one freshness guarantee."""
+        turn = self._active_turn.get()
+        if turn is None or chat_id == turn["chat_uid"] or chat_id not in self.chat_uids:
+            return
+        try:
+            await self._refresh_current_chat(chat_id)
+        except Exception:  # noqa: BLE001 - can't verify owner presence -> fail closed
+            self._chats.pop(chat_id, None)
+
     async def send(self, chat_id, content, reply_to=None, metadata=None):
-        # A cross-chat target must currently seat the owner (checked in
-        # _send_guard). Refresh its roster first: a cached one can be stale --
-        # the owner may have just left -- and an unverifiable one fails closed.
-        cc_turn = self._active_turn.get()
-        if cc_turn is not None and chat_id != cc_turn["chat_uid"]:
-            try:
-                await self._refresh_current_chat(chat_id)
-            except Exception:  # noqa: BLE001 - can't verify owner presence -> fail closed
-                self._chats.pop(chat_id, None)
+        await self._fresh_cross_chat(chat_id)
         refused = self._message_guard(chat_id)
         if refused is not None:
             return refused
@@ -2364,6 +2371,7 @@ class PlowChatAdapter(BasePlatformAdapter):
         """
         async with aiohttp.ClientSession() as http:
             if await self._verbose_enabled(http):
+                await self._fresh_cross_chat(chat_id)
                 refused = self._message_guard(chat_id)
                 if refused is not None:
                     return refused
@@ -2522,6 +2530,7 @@ class PlowChatAdapter(BasePlatformAdapter):
         so without this it fell to the base adapter's "native file send
         unavailable" notice and the file never left the container.
         """
+        await self._fresh_cross_chat(chat_id)
         refused = self._message_guard(chat_id)
         if refused is not None:
             return refused
@@ -3833,7 +3842,7 @@ def _plow_send_message(args, **_kwargs):
 
     target = to
     if to.startswith("#"):
-        if turn is None or not turn["authority"]:
+        if turn is not None and not turn["authority"]:
             return json.dumps({"success": False,
                                "error": "resolving a #title lists your owner's chats and needs their "
                                         "authority; pass a cht_ id instead"})

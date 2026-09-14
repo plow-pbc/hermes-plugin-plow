@@ -6597,18 +6597,81 @@ async def test_a_stale_owner_inclusive_cache_is_refreshed_before_the_owner_check
     posted.assert_not_awaited()  # a refusal must not reach Plow
 
 
-def test_a_hash_title_needs_the_owners_authority(
+@pytest.mark.parametrize("path", ["attachment", "status"])
+async def test_owner_cc_covers_the_attachment_and_status_paths(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, path: str
+) -> None:
+    """The owner-CC seam is uniform: an attachment or a status frame to a
+    cross-chat target the owner has left is refused, exactly as send() is, and
+    nothing reaches Plow."""
+    module = _load(monkeypatch, tmp_path)
+    adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
+    adapter._set_reach([_chat("cht_a"), _chat("cht_grp", group=True)])  # cache seats the owner
+
+    async def _owner_left(chat_uid: str) -> None:
+        adapter._chats[chat_uid] = _owner_excluding_chat(chat_uid)
+
+    monkeypatch.setattr(adapter, "_refresh_current_chat", _owner_left)
+    monkeypatch.setattr(adapter, "_verbose_enabled", mock.AsyncMock(return_value=True))
+    posted = mock.AsyncMock(return_value=_SendResult(success=True))
+    monkeypatch.setattr(adapter, "_post_message", posted)
+    adapter._active_turn.set({"chat_uid": "cht_a", "owner": True, "authority": True})
+    if path == "attachment":
+        note = tmp_path / "note.txt"
+        note.write_text("x")
+        result = await adapter._send_attachment("cht_grp", str(note), caption="hi")
+    else:
+        result = await adapter.send_or_update_status("cht_grp", "working", "still going")
+    assert result.success is False and "does not seat your owner" in result.error
+    posted.assert_not_awaited()
+
+
+async def test_an_ungranted_target_is_refused_without_a_roster_fetch(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
 ) -> None:
-    """Resolving a #title lists the owner's chats, so a member turn cannot use it
-    to probe which private titles exist -- it is refused before the listing."""
+    """The owner-CC refresh only touches a granted, cross-chat id. An ungranted
+    cht_ is refused by the grant check with no authenticated fetch or cache
+    write, so 'authorize' still precedes 'act'."""
+    module = _load(monkeypatch, tmp_path)
+    adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
+    adapter._set_reach([_chat("cht_a")])
+    refreshed = mock.AsyncMock()
+    monkeypatch.setattr(adapter, "_refresh_current_chat", refreshed)
+    adapter._active_turn.set({"chat_uid": "cht_a", "owner": True, "authority": True})
+    result = await adapter.send("cht_ungranted", "hi")
+    assert result.success is False and "outside this agent's grant" in result.error
+    refreshed.assert_not_awaited()
+    assert "cht_ungranted" not in adapter._chats
+
+
+@pytest.mark.parametrize("turn, refused", [
+    ({"chat_uid": "cht_a", "owner": False, "authority": False}, True),
+    (None, False),
+], ids=["member-refused", "cron-allowed"])
+def test_hash_title_resolution_is_gated_on_authority(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, turn: Any, refused: bool
+) -> None:
+    """Resolving a #title lists the owner's chats. A member turn (no authority)
+    is refused before the listing so it cannot probe which private titles exist;
+    a turn-less cron call is unconfined -- like _send_guard and list_chats -- and
+    resolves."""
     module = _load(monkeypatch, tmp_path)
     listed: list[Any] = []
-    _live_tool(module, monkeypatch, "list_chats", result=[], record=listed)
-    module._ACTIVE_TURN.set({"chat_uid": "cht_a", "owner": False, "authority": False})
+    listing = [{"chat_id": "cht_x", "kind": "group", "title": "Private", "participants": []}]
+    adapter = _live_tool(module, monkeypatch, "list_chats", result=listing, record=listed)
+
+    async def _send(chat_id: str, body: str, **_kw: Any) -> Any:
+        return _SendResult(success=True, message_id="m")
+
+    monkeypatch.setattr(adapter, "send", _send)
+    module._ACTIVE_TURN.set(turn)
     out = json.loads(module._plow_send_message({"to": "#Private", "body": "hi"}))
-    assert out["success"] is False and "authority" in out["error"]
-    assert listed == [], "the listing must not run on a turn without the owner's authority"
+    if refused:
+        assert out["success"] is False and "authority" in out["error"]
+        assert listed == [], "the listing must not run on a member turn"
+    else:
+        assert out["success"] is True and out["chat_id"] == "cht_x"
+        assert listed, "a turn-less cron call resolves the title"
 
 
 def test_person_targeting_reports_a_424_as_delivery_unknown(
