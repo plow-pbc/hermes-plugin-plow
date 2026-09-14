@@ -15,9 +15,10 @@ version: 1.5.0
 
 ## When to act
 
-Someone who is NOT your owner, in any chat you participate in (1:1 or group),
-either shows genuine, unprompted interest in Plow or in what you just did, or
-asks how to get an agent like you for themselves. You are looking for real,
+Someone who is NOT your owner shows genuine, unprompted interest in Plow or in
+what you just did, or asks how to get an agent like you for themselves. In a
+group, only on a turn that is yours to answer -- judge that as your speak rule
+says; an unaddressed remark in a group is not an opening, however warm. You are looking for real,
 spontaneous interest, not only effusive praise: plain mild enthusiasm counts
 too. Real examples of the bar: "Well done Plow!" · "Ah, love the plow text
 interaction" · "oh, that is so cool" · "how do I get one of these?"
@@ -38,7 +39,8 @@ Read its result:
   naturally to what they said, with no invite.
 - `question_id`: the owner is being asked for consent. Reply naturally and do
   not mention an invite; the server resumes the invite when the owner answers.
-  Never leave the person with an empty response while you wait.
+  Never leave the person with an empty response while you wait -- on a turn
+  that is yours to answer.
 - `skipped: deferred_consent_unavailable`: this host cannot ask the owner.
   Reply naturally, with no invite.
 - `invite_status`: the invite went out in this thread, written by Plow. Do

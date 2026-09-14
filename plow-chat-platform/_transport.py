@@ -57,23 +57,60 @@ async def _granted_chats(http, auth):
     return body["data"]
 
 
-async def _read_identity(http, auth):
-    """`GET /v1/agents/cloud/me`: the signup block and this agent's number.
+# What an adapter holds before its first identity read, and what a member's
+# turn is shown: no offer, no number, no agent, no roster.
+_NO_IDENTITY = {"signup": None, "number": None, "agent": None, "lines": ()}
 
-    200 answers. 404 is the documented "this token is not one agent" -- a
-    wildcard or multi-line grant -- and answers None so the caller keeps what
-    it holds. Anything else is not an answer about identity: through the
-    credential seam (a 401 is terminal), then fail like the grant read so the
-    caller retries rather than silently running without the offer.
+
+async def _read_identity(http, auth):
+    """Who this agent is and which lines Plow answers from, as one read.
+
+    `GET /v1/agents/me` -- not the `/v1/agents/cloud/me` alias, which serves
+    the old shape with no `agent` key -- for the signup block, this agent's
+    number and its uid. 200 answers those; 404 is the documented "this token
+    is not one agent" (a wildcard or multi-line grant) and answers none of
+    them, so the caller keeps what it holds. Anything else is not an answer
+    about identity: through the credential seam (a 401 is terminal), then fail
+    like the grant read so the caller retries rather than silently running
+    without the offer.
+
+    `GET /v1/lines` for the roster: the pool is shared by every tenant, so it
+    is a fact about Plow, served to the `chats:use` scope every agent token
+    holds, with no 404 case. Each row's `agent_uid` is this owner's agent on
+    that line, when they have one -- the one surface an agent token has for
+    which lines are its owner's, since listing agents takes a scope no agent
+    holds. `has_more` is always false; a true would mean the roster is
+    truncated, which the prompt must not paper over.
     """
-    async with http.get(f"{BASE}/v1/agents/cloud/me", headers=auth) as resp:
+    identity = {}
+    async with http.get(f"{BASE}/v1/agents/me", headers=auth) as resp:
         if resp.status == 200:
             me = await resp.json(content_type=None)
-            return {"signup": me.get("signup"), "number": (me.get("line") or {}).get("provider_key")}
-        if resp.status == 404:
-            return None
+            identity = {"signup": me.get("signup"), "number": (me.get("line") or {}).get("provider_key"),
+                        "agent": me["agent"]["uid"]}
+        elif resp.status != 404:
+            _auth_raise_for_status(resp)
+            raise RuntimeError(f"the identity read returned HTTP {resp.status}")
+    async with http.get(f"{BASE}/v1/lines", headers=auth) as resp:
         _auth_raise_for_status(resp)
-        raise RuntimeError(f"the identity read returned HTTP {resp.status}")
+        if resp.status != 200:
+            raise RuntimeError(f"the lines read returned HTTP {resp.status}")
+        body = await resp.json(content_type=None)
+    if body["has_more"]:
+        raise RuntimeError("the lines listing is truncated")
+    return {**identity, "lines": body["data"]}
+
+
+async def _refresh_identity(http, auth, held):
+    """What an adapter holds after an identity read: the read merged over
+    what it held, so a 404 (a token /me cannot identify as one agent) keeps
+    the offer, and a failure raises before anything is overwritten.
+
+    Once per socket session -- connect and every reconnect -- and never on
+    the reach refresh an unknown thread triggers: a blip on either read must
+    not cost the frame that triggered it (the mail line has no backfill).
+    """
+    return {**held, **await _read_identity(http, auth)}
 
 
 async def _ticket(http, auth):
@@ -157,6 +194,11 @@ def _participant_identity(participant):
     handle = str(participant.get("provider_key") or "").strip()
     display = _one_line(participant.get("display_name"))
     return display if display and display != handle else handle
+
+
+def _line_name(agent):
+    """An agent participant's persona name, or None for an unnamed line."""
+    return (agent.get("line") or {}).get("display_name")
 
 
 def _self_agent_line(chat):
@@ -251,6 +293,43 @@ def _owner_fact(owner):
         return f"Your owner is {name} [{handle}]."
     return (f"Your owner [{handle}] has not given their name yet: ask once and record it with "
             f"plow_name_contact(handle={handle}). {_NEVER_GUESS}")
+
+
+def _lines_fact(identity):
+    """The roster of Plow's lines, as one sentence, or None when none is named.
+
+    Grouped by persona, the way the API itself pairs a mailbox with its agent:
+    a number and a mailbox are rows that share a display_name, listed in the
+    API's order, so the handles read in that order. An unnamed line has no
+    persona to name and is skipped. A persona any of whose rows carries an
+    `agent_uid` is one of this owner's agents; the one carrying this agent's
+    own uid is marked as such, so the model can tell its own threads from its
+    siblings' and both from lines its owner only talks to. All of it is
+    ops-seeded, never sender text.
+    """
+    personas = {}
+    for line in identity["lines"]:
+        if line.get("display_name"):
+            handles, agents = personas.setdefault(line["display_name"], ([], set()))
+            handles.append(line["provider_key"])
+            if line.get("agent_uid"):
+                agents.add(line["agent_uid"])
+    if not personas:
+        return None
+    entries = []
+    for name, (handles, agents) in sorted(personas.items()):
+        if identity["agent"] and identity["agent"] in agents:
+            owned = "; your owner's agent, and that is you"
+        elif agents:
+            owned = "; your owner's agent"
+        else:
+            owned = ""
+        entries.append(f"{name} ({', '.join(handles)}{owned})")
+    return ("Plow's lines -- the numbers and mailboxes Plow agents answer from -- are "
+            f"{', '.join(entries)}. A thread with any of them in your owner's Messages or mail is your "
+            "owner using Plow, whichever agent answered there. 'How do I use Plow', 'what has Plow done "
+            "for me', or a question naming one of those lines means those threads across every line, "
+            "read from the Mac; this line's own history is only part of the answer.")
 
 
 def _provider(chat):
