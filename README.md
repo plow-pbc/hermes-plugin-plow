@@ -180,10 +180,10 @@ every reconnect. Per-chat checkpoints persist under the agent home, and a
 reconnect backfills each granted chat from its checkpoint, so a socket gap
 drops nothing.
 
-An agent's first-ever connect (no home checkpoint yet) hands hermes one setup
-turn in the home chat, signed by Plow, not the owner, and free to end in
-`NO_REPLY`: where the owner's world is (their Mac, through Latch), who the agent
-is, and how it behaves among the owner's people, saved as its own memory note.
+Every connect hands hermes one wakeup turn in the home chat, signed by Plow,
+not the owner, and free to end in `NO_REPLY`: the agent just came online, on its
+first boot (no home checkpoint yet) or a restart. The plugin sends nothing of its
+own at boot; what the agent says, if anything, is its own.
 
 One person's rapid-fire messages are one turn: inbound is buffered per chat
 for a 2s window that resets on each arrival — iMessage's bubble + link-preview

@@ -2214,16 +2214,14 @@ async def test_two_chat_reach_opens_one_granted_socket(monkeypatch: pytest.Monke
 
 
 @pytest.mark.parametrize("live_group", [False, True])
-async def test_a_first_ever_connect_primes_the_agent_once(
+async def test_every_connect_wakes_the_agent_once(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, live_group: bool,
 ) -> None:
-    """A new agent's own stores are empty, and it read that as absence in the
-    owner's world (plow#1880). Its first-ever life hands hermes one
-    Plow-signed setup turn in the home chat -- even when the first session
-    drops before reaching it -- and a restart hands it none. The plugin
-    itself sends nothing: whatever the owner first hears is the agent's own
-    answer to that turn. Owner authority comes from the live roster, not the
-    one cached at connect."""
+    """Each life hands hermes one Plow-signed wakeup turn in the home chat --
+    even when its first session drops before reaching it -- and a first boot
+    reads differently from a restart. The plugin itself sends nothing:
+    whatever the owner first hears is the agent's own answer. Owner
+    authority comes from the live roster, not the one cached at connect."""
     module = _load(monkeypatch, tmp_path)
     handed: list[list[Any]] = []
     sends = mock.AsyncMock(return_value=_SendResult(success=True))
@@ -2244,15 +2242,14 @@ async def test_a_first_ever_connect_primes_the_agent_once(
             with pytest.raises(StopAsyncIteration):
                 await adapter._listen()
 
-    first_life, restart = handed
     assert sends.await_count == 0, "the plugin spoke at boot; first contact is the agent's own answer"
-    assert restart == [], "a restart re-primed an agent that was already set up"
-    [setup] = first_life
-    assert setup["source"]["chat_id"] == "cht_a"
-    assert setup["source"]["role_authorized"] is not live_group, "authority must follow the live roster"
-    assert setup["source"]["user_id"] == "plow_setup", "the setup turn must not speak as the owner"
-    assert module.NO_REPLY_SENTINEL in setup["channel_prompt"], "the owner must be able to see nothing"
-    assert module.LATCH_URL in setup["text"]
+    [first_boot], [restart] = handed
+    for wakeup in (first_boot, restart):
+        assert wakeup["source"]["chat_id"] == "cht_a"
+        assert wakeup["source"]["role_authorized"] is not live_group, "authority must follow the live roster"
+        assert wakeup["source"]["user_id"] == "plow_setup", "the wakeup must not speak as the owner"
+        assert module.NO_REPLY_SENTINEL in wakeup["channel_prompt"], "the owner must be able to see nothing"
+    assert first_boot["text"] != restart["text"], "the agent cannot tell a first boot from a restart"
 
 
 async def test_concurrent_discovery_of_a_new_chat_anchors_it_at_newest(
@@ -4969,8 +4966,7 @@ def test_every_silence_instruction_names_the_sentinel(
                      "addressed to the room, not to you", "you are not addressed"):
         assert handover in module._GROUP_SPEAK_RULE
     assert collaboration.count(module._GROUP_SPEAK_RULE) == 1
-    # A wake or setup turn is exempt: SETUP_TURN tells it to call
-    # plow_list_skills once, which "call nothing, fetch nothing" forbade.
+    # A wake or setup turn is exempt: it has no speaker to be addressed by.
     signed = module._collaboration_prompt("", _collaboration_chat(),
                                           module._NO_IDENTITY, False)
     assert module._GROUP_SPEAK_RULE not in signed
