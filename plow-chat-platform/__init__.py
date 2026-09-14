@@ -2069,9 +2069,9 @@ class PlowChatAdapter(BasePlatformAdapter):
         if chat_id not in self.chat_uids:
             return SendResult(success=False, error=f"Plow Chat {chat_id!r} is outside this agent's grant")
         turn = self._active_turn.get()
-        if turn is None or chat_id == turn["chat_uid"]:
+        if turn is not None and chat_id == turn["chat_uid"]:
             return None
-        if not turn["authority"]:
+        if turn is not None and not turn["authority"]:
             return SendResult(success=False,
                               error=f"Plow Chat turn without the owner's authority is confined to {turn['chat_uid']!r}")
         if not _owner_in_roster(self._chats.get(chat_id) or {}):
@@ -2087,9 +2087,15 @@ class PlowChatAdapter(BasePlatformAdapter):
         cannot be verified. Only a granted, cross-chat id: an ungranted one is
         left for _send_guard to refuse, so no out-of-grant fetch or cache write
         happens ahead of the grant check. Every outbound path calls this so the
-        owner-CC seam reads one policy on one freshness guarantee."""
+        owner-CC seam reads one policy on one freshness guarantee.
+
+        Only a present turn's own chat is exempt (a reply). A turn-less send
+        (cron) has no current chat, so it refreshes and is owner-checked too --
+        a scheduled send must not disclose to a group the owner has left."""
         turn = self._active_turn.get()
-        if turn is None or chat_id == turn["chat_uid"] or chat_id not in self.chat_uids:
+        if chat_id not in self.chat_uids:
+            return
+        if turn is not None and chat_id == turn["chat_uid"]:
             return
         try:
             await self._refresh_current_chat(chat_id)
@@ -2436,7 +2442,12 @@ class PlowChatAdapter(BasePlatformAdapter):
                              json=payload, headers=self.auth) as resp:
             data = await resp.json(content_type=None)
             if resp.status >= 400:
-                return SendResult(success=False, error=f"Plow Chat {resp.status}: {data}")
+                # 408/5xx: Plow may have accepted the message before the error, so
+                # a retry could double-send. Mark it delivery-unknown, exactly as
+                # the sequence path classifies the same statuses.
+                unknown = resp.status >= 500 or resp.status == 408
+                return SendResult(success=False, error=f"Plow Chat {resp.status}: {data}",
+                                  raw_response={"delivery_unknown": True} if unknown else None)
         # A failed post cleared nothing, so only a delivered one re-raises.
         self._retrigger_typing(chat_id, metadata)
         return SendResult(success=True, message_id=data.get("uid"))
@@ -3907,7 +3918,11 @@ def _plow_send_message(args, **_kwargs):
     except Exception as exc:  # noqa: BLE001 - no answer is not a failure to retry
         return _lost_answer(exc)
     if not result.success:
-        return json.dumps({"success": False, "error": result.error})
+        out = {"success": False, "error": result.error}
+        if result.raw_response and result.raw_response.get("delivery_unknown"):
+            out["delivery_unknown"] = True
+            out["error"] = f"{result.error} — Plow may have accepted it; do NOT retry, check the thread."
+        return json.dumps(out)
     return json.dumps({"success": True, "chat_id": target, "message_id": result.message_id})
 
 

@@ -72,6 +72,7 @@ class _SendResult:
     success: bool
     message_id: str | None = None
     error: str | None = None
+    raw_response: Any = None
 
 
 def _rendered(module: Any, prompt: str, name: Any, identity: Any) -> str:
@@ -6538,6 +6539,40 @@ def test_plow_send_message_reports_a_lost_answer_as_delivery_unknown(
     assert out["success"] is False and out["delivery_unknown"] is True
     assert "Do NOT retry" in out["error"]
     assert calls == []
+
+
+def test_a_cron_send_to_an_owner_excluding_chat_is_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """A turn-less (cron) send is owner-checked too: a scheduled message to a
+    chat the owner has left is refused, so cron cannot disclose to the members
+    left behind. Only a present turn's own chat is exempt."""
+    module = _load(monkeypatch, tmp_path)
+    adapter = _live_tool(module, monkeypatch, None)
+    adapter._set_reach([_chat("cht_a"), _owner_excluding_chat("cht_solo")])
+    http = _HTTP()
+    monkeypatch.setattr(module.aiohttp, "ClientSession", lambda *a, **k: http)
+    module._ACTIVE_TURN.set(None)  # cron: no turn, so cht_solo is not exempt
+    out = json.loads(module._plow_send_message({"to": "cht_solo", "body": "digest"}))
+    assert out["success"] is False and "does not seat your owner" in out["error"]
+    assert http.posts == [], "a cron refusal must not reach Plow"
+
+
+def test_an_existing_chat_send_reports_408_5xx_as_delivery_unknown(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """A 408/5xx on an existing-chat POST may have been accepted, so the tool
+    reports delivery unknown and forbids the retry that would double-send --
+    matching the person and sequence paths."""
+    module = _load(monkeypatch, tmp_path)
+    adapter = _live_tool(module, monkeypatch, None)
+    adapter._set_reach([_chat("cht_a")])  # owner-inclusive current chat
+    http = _HTTP(status=503)
+    monkeypatch.setattr(module.aiohttp, "ClientSession", lambda *a, **k: http)
+    module._ACTIVE_TURN.set(_OWNER_DM)  # reply to the current chat (cht_a)
+    out = json.loads(module._plow_send_message({"to": "cht_a", "body": "hi"}))
+    assert out["success"] is False and out["delivery_unknown"] is True
+    assert "do NOT retry" in out["error"]
 
 
 def _owner_excluding_chat(uid: str) -> dict[str, Any]:
