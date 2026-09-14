@@ -32,7 +32,12 @@ The directory is named for the plugin id so the install can be a directory copy:
 > `/v1/auth/agent-invites/opportunities/{opportunity_uid}/send`,
 > `POST /v1/chats` (outbound thread creation — `plow_send_message`'s person-targeting
 > 404s against an older API, so that API change deploys before any
-> `agent-mgr` SHA advance), and
+> `agent-mgr` SHA advance),
+> `POST /v1/email-lines/{uid}/messages` (an email address in `plow_send_message`'s `to`,
+> with a `subject`, goes out from the mailbox that shares this agent's persona; the API
+> seats the owner in `cc` from the credential, so the plugin sends none — deploy the plow
+> API change that does that seating before this plugin SHA is pinned, or a new email
+> leaves with the owner not copied), and
 > `PUT /v1/contacts/{handle}` (`plow_name_contact` — the handle-keyed contact
 > book, superseding the per-participant contact route of
 > [`plow-pbc/plow#1752`](https://github.com/plow-pbc/plow/pull/1752),
@@ -255,7 +260,8 @@ passes `confirm=true` for an explicit owner request. Opening a trusted thread is
 owner-only too, through `plow_send_message(..., trusted=true)` on an owner turn —
 no `confirm` there. `trusted` applies only to a group being created; opening onto
 an existing thread adopts that thread's own trust, and the returned value is
-authoritative. Member turns and calls outside an active chat turn cannot change either.
+authoritative. It has nothing to say about an email address in `to` — no group is
+created there, so it is ignored rather than gated. Member turns and calls outside an active chat turn cannot change either.
 
 This plugin version requires a Plow API that publishes the required `trusted`
 chat field and `PUT /v1/chats/{uid}/trusted`. Deploy that API first: against an

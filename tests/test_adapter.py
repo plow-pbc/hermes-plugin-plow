@@ -3749,13 +3749,21 @@ def test_other_tools_and_non_sends_pass_untouched(
     assert module._pre_tool_call(tool_name, args) is None
 
 
-@pytest.mark.parametrize("turn,delivered", [
-    pytest.param(_OWNER_DM, True, id="owner-turn-sends"),
-    pytest.param(_DISCRETION_MEMBER, False, id="no-authority-refuses"),
-    pytest.param(None, False, id="outside-a-turn-refuses"),
+@pytest.mark.parametrize("to,trusted,turn,recipients", [
+    pytest.param("sam@odio.com", None, _OWNER_DM, ["sam@odio.com"], id="owner-turn-sends"),
+    # Every entry an address is one mail to all of them, not one mail each.
+    pytest.param(["sam@odio.com", "abby@example.com"], None, _OWNER_DM,
+                 ["sam@odio.com", "abby@example.com"], id="several-addresses-one-mail"),
+    # `trusted` hands a new group the owner's authority; mail creates no group,
+    # so it is ignored rather than gated -- a trusted group's member may email
+    # without the owner's own turn, which the owner-only trust gate would refuse.
+    pytest.param("sam@odio.com", True, _TRUSTED_MEMBER, ["sam@odio.com"], id="trusted-is-ignored"),
+    pytest.param("sam@odio.com", None, _DISCRETION_MEMBER, None, id="no-authority-refuses"),
+    pytest.param("sam@odio.com", None, None, None, id="outside-a-turn-refuses"),
 ])
 def test_an_email_address_handle_leaves_from_the_agents_own_mailbox(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, turn: Any, delivered: bool
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, to: Any, trusted: Any,
+    turn: dict[str, Any] | None, recipients: list[str] | None,
 ) -> None:
     """'Email Sam' is the same verb as 'text Sam': the handle picks the
     transport. An address goes out from this agent's mailbox, never as an
@@ -3768,14 +3776,14 @@ def test_an_email_address_handle_leaves_from_the_agents_own_mailbox(
                record=sent)
     module._ACTIVE_TURN.set(turn)
     out = json.loads(module._plow_send_message(
-        {"to": "sam@odio.com", "subject": "Transcript", "body": "Here it is"}))
-    if delivered:
-        assert out == {"success": True, "status": "sent", "thread_id": "t1", "message_id": "m1",
-                       "from": "elm@plow.co"}
-        assert sent == [(["sam@odio.com"], "Transcript", "Here it is")]
-    else:
+        {"to": to, "subject": "Transcript", "body": "Here it is", "trusted": trusted}))
+    if recipients is None:
         assert out["success"] is False and "authority" in out["error"]
         assert sent == []
+    else:
+        assert out == {"success": True, "status": "sent", "thread_id": "t1", "message_id": "m1",
+                       "from": "elm@plow.co"}
+        assert sent == [(recipients, "Transcript", "Here it is")]
 
 
 def test_group_message_reports_adoption_separately_from_delivery(
@@ -6095,9 +6103,13 @@ def test_latch_section_renders_only_when_a_mac_is_connected(
                  # owner's authority: person-targeting selects trusted=false, so
                  # the prompt states that default explicitly.
                  "trusted=false",
+                 # 'Email John' is the same verb as 'text Sam' now — the handle
+                 # picks the transport — so the prompt must name the mailbox
+                 # route rather than send the model to the Mac for a new email.
+                 "'email John'", "from your own mailbox", "your owner copied",
                  # "draft" is the other half of the verb split — it DOES stay
                  # on the Mac, unsent in the owner's own outbox.
-                 "unsent in their outbox",
+                 "DRAFT on the Mac", "unsent in their outbox",
                  # This section renders on an email turn too, where the agent
                  # has a native reply path (email.py's adapter posts to
                  # /v1/chats/<id>/messages). So the email rule says what to DO
