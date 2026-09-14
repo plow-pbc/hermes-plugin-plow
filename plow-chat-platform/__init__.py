@@ -1156,7 +1156,7 @@ _SILENCE_OPTION = (
     "and it will not be delivered. "
 )
 
-# The turn every connect hands hermes: an event, not a briefing. What the agent
+# The turn each process start hands hermes: an event, not a briefing. What the agent
 # makes of coming online -- an opening, a note, silence -- is its own.
 WAKEUP_TURN = ("Plow, not your owner: you just came online in your owner's chat. This is {boot}. "
                f"If you have nothing to say, reply with exactly {NO_REPLY_SENTINEL}.")

@@ -180,7 +180,7 @@ every reconnect. Per-chat checkpoints persist under the agent home, and a
 reconnect backfills each granted chat from its checkpoint, so a socket gap
 drops nothing.
 
-Every connect hands hermes one wakeup turn in the home chat, signed by Plow,
+Each process start hands hermes one wakeup turn in the home chat, signed by Plow,
 not the owner, and free to end in `NO_REPLY`: the agent just came online, on its
 first boot (no home checkpoint yet) or a restart. The plugin sends nothing of its
 own at boot; what the agent says, if anything, is its own.
