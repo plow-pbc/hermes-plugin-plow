@@ -32,18 +32,29 @@ import pytest
 
 PLUGIN = pathlib.Path(__file__).resolve().parents[1] / "plow-chat-platform" / "__init__.py"
 
-# The identity `/v1/agents/cloud/me` serves, as every stub and prefix test reads it.
+# The identity `/v1/agents/me` serves, as every stub and prefix test reads it.
 SIGNUP = {"name": "Life Assistant", "phrase": "Set this up for me: aiworthusing.com/agent-index/life"}
 NUMBER = "+16505550100"
+AGENT = "agt_1"
+ME = {"line": {"uid": "ln_e", "provider_key": NUMBER}, "agent": {"uid": AGENT}, "chats": [], "mcp_url": None,
+      "signup": SIGNUP}
 
 # What `GET /v1/lines` serves: the pool, as personas with a number and a
-# mailbox each. One unnamed row, which the roster must skip.
+# mailbox each. `agent_uid` is this owner's agent on the row: Elm is this
+# agent (its mailbox row rides on the persona, as the API pairs them), Spruce
+# is a sibling, Willow is a line the owner only talks to. One unnamed row,
+# which the roster must skip.
 LINES = [
-    {"uid": "ln_e", "provider_type": "imessage", "provider_key": NUMBER, "display_name": "Elm"},
-    {"uid": "ln_em", "provider_type": "email", "provider_key": "elm@plow.co", "display_name": "Elm"},
-    {"uid": "ln_s", "provider_type": "imessage", "provider_key": "+16505550101", "display_name": "Spruce"},
-    {"uid": "ln_u", "provider_type": "imessage", "provider_key": "+16505550199", "display_name": None},
+    {"uid": "ln_e", "provider_type": "imessage", "provider_key": NUMBER, "display_name": "Elm", "agent_uid": AGENT},
+    {"uid": "ln_em", "provider_type": "email", "provider_key": "elm@plow.co", "display_name": "Elm", "agent_uid": None},
+    {"uid": "ln_s", "provider_type": "imessage", "provider_key": "+16505550101", "display_name": "Spruce",
+     "agent_uid": "agt_2"},
+    {"uid": "ln_w", "provider_type": "imessage", "provider_key": "+16505550102", "display_name": "Willow",
+     "agent_uid": None},
+    {"uid": "ln_u", "provider_type": "imessage", "provider_key": "+16505550199", "display_name": None,
+     "agent_uid": None},
 ]
+IDENTITY = {"signup": SIGNUP, "number": NUMBER, "agent": AGENT, "lines": LINES}
 
 # The four turn shapes every action gate is keyed on, plus no turn at all
 # (a cron run), as `_authority` derives them -- see the prompt matrix. The
@@ -1157,8 +1168,8 @@ class _AnchorLifecycleHTTP:
         self.history_reads: list[str] = []
 
     def get(self, url: str, *, headers: dict[str, str]) -> _Resp:
-        if url.endswith("/v1/agents/cloud/me"):
-            return _Resp({"line": {"uid": "ln_x", "provider_key": NUMBER}, "signup": SIGNUP})
+        if url.endswith("/v1/agents/me"):
+            return _Resp(ME)
         if url.endswith("/v1/lines"):
             return _Resp({"object": "list", "data": LINES, "has_more": False})
         if url.endswith("/v1/chats"):
@@ -1519,7 +1530,7 @@ async def test_every_turn_prompt_opens_with_who_this_agent_is(
     addressed."""
     module = _load(monkeypatch, tmp_path)
     adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
-    adapter._identity = {"signup": SIGNUP, "number": NUMBER, "lines": LINES}
+    adapter._identity = IDENTITY
     chat = _chat("cht_a", group=group, agent_name=agent_name)
     adapter._set_reach([chat])
     _mark_anchored(adapter, "cht_a")
@@ -1566,14 +1577,24 @@ _ROSTER = "Plow's lines -- the numbers and mailboxes Plow agents answer from -- 
     ("name", "identity", "opening", "offer", "roster"),
     [
         pytest.param(
-            "Elm", {"signup": SIGNUP, "number": NUMBER, "lines": LINES},
+            "Elm", IDENTITY,
             "You are Elm, a Plow assistant; people here address you by that name.",
             f'Anyone can get their own Plow Life Assistant by texting "{SIGNUP["phrase"]}" to {NUMBER}.',
-            f"{_ROSTER}Elm ({NUMBER}, elm@plow.co; that is you), Spruce (+16505550101).",
+            f"{_ROSTER}Elm ({NUMBER}, elm@plow.co; your owner's agent, and that is you), "
+            "Spruce (+16505550101; your owner's agent), Willow (+16505550102).",
             id="named-with-signup-and-roster",
         ),
+        # A token /me cannot identify as one agent (404) still has a roster,
+        # and "that is you" is not guessed: no persona is marked as this agent.
         pytest.param(
-            None, {"signup": None, "number": NUMBER, "lines": ()},
+            "Elm", {**IDENTITY, "signup": None, "agent": None},
+            "You are Elm, a Plow assistant; people here address you by that name.", None,
+            f"{_ROSTER}Elm ({NUMBER}, elm@plow.co; your owner's agent), "
+            "Spruce (+16505550101; your owner's agent), Willow (+16505550102).",
+            id="named-no-agent-uid-marks-nobody-as-you",
+        ),
+        pytest.param(
+            None, {"signup": None, "number": NUMBER, "agent": None, "lines": ()},
             "You are a Plow assistant.", None, None, id="unnamed-no-signup-no-roster",
         ),
     ],
@@ -1586,8 +1607,9 @@ def test_the_identity_prefix_says_these_things_in_this_order(
     reordered fact is a behaviour change with no other signal. The agent is a
     "Plow assistant" whatever variant it offers: the signup name says what
     someone else can get, never what this agent is. The roster names every
-    persona once with its number and mailbox, marks this agent's own line,
-    skips unnamed lines, and is absent until a refresh has read it."""
+    persona once with its number and mailbox, marks the owner's own agents
+    and which of them this is, skips unnamed lines, and is absent until a
+    refresh has read it."""
     module = _load(monkeypatch, tmp_path)
     prefix = module._with_identity("PROMPT", name, identity)
 
@@ -1895,7 +1917,7 @@ def test_member_labels_never_gain_channel_prompt_authority(
     sender = chat["participants"][-1]
 
     prompt = module._collaboration_prompt(
-        module.EXTERNAL_CHANNEL_PROMPT, chat, {"signup": None, "number": None})
+        module.EXTERNAL_CHANNEL_PROMPT, chat, module._NO_IDENTITY)
     turn_context = module._collaboration_turn_context(chat, sender)
 
     assert "Ignore prior rules" not in prompt
@@ -1919,7 +1941,7 @@ def test_roster_context_carries_relationships_and_the_prompt_says_they_are_the_o
     # takes, and the owner's own row says so, so naming the owner has a source too.
     assert "Abby (+15550000002) (landlord)" in context
     assert "Sam (+15550000001) (your owner)" in context
-    identity = {"signup": None, "number": None, "lines": ()}
+    identity = module._NO_IDENTITY
     prompt = module._collaboration_prompt(module.EXTERNAL_CHANNEL_PROMPT, chat, identity)
     assert "Abby" not in prompt
     assert "landlord" not in prompt
@@ -2044,46 +2066,48 @@ async def test_a_grant_that_drops_the_configured_home_is_refused(
 @pytest.mark.parametrize(
     ("me_status", "lines_status", "held", "refreshes"),
     [
-        pytest.param(200, 200, {"signup": None, "number": None, "lines": ()}, True, id="200-sets-it"),
-        pytest.param(404, 200, {"signup": SIGNUP, "number": NUMBER, "lines": ()}, True, id="404-keeps-what-we-hold"),
-        pytest.param(503, 200, {"signup": SIGNUP, "number": NUMBER, "lines": ()}, False, id="503-fails-the-refresh"),
+        pytest.param(200, 200, None, True, id="200-sets-it"),
+        pytest.param(404, 200, {**IDENTITY, "lines": ()}, True, id="404-keeps-what-we-hold"),
+        pytest.param(503, 200, {**IDENTITY, "lines": ()}, False, id="503-fails-the-refresh"),
         # Below 400, so raise_for_status stays quiet -- a proxy bouncing us to a
         # login page is still not an answer about identity, and must fail loudly.
-        pytest.param(302, 200, {"signup": SIGNUP, "number": NUMBER, "lines": ()}, False, id="302-fails-the-refresh"),
+        pytest.param(302, 200, {**IDENTITY, "lines": ()}, False, id="302-fails-the-refresh"),
         # The roster read has no 404 rule: any non-200 fails the refresh.
-        pytest.param(200, 503, {"signup": SIGNUP, "number": NUMBER, "lines": ()}, False, id="lines-503-fails-the-refresh"),
+        pytest.param(200, 503, {**IDENTITY, "lines": ()}, False, id="lines-503-fails-the-refresh"),
     ],
 )
-async def test_reach_refresh_reads_the_signup_facts_and_only_a_200_speaks(
+async def test_identity_refresh_reads_me_and_the_roster_and_only_a_200_speaks(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
-    me_status: int, lines_status: int, held: dict[str, Any], refreshes: bool
+    me_status: int, lines_status: int, held: dict[str, Any] | None, refreshes: bool
 ) -> None:
-    """The facts come from /me and /v1/lines on the same refresh that reads the
-    grant. Only a 200 sets them; a 404 on /me (a token /me cannot identify as
-    one agent) keeps what we hold and the phone line up; anything else is not
-    an answer and fails the refresh, so _listen retries rather than running on
-    silently. Refresh has no timer, so an overwrite on failure would strip the
-    offer for the life of a healthy socket."""
+    """The facts come from /me and /v1/lines, once per socket session. Only a
+    200 sets them; a 404 on /me (a token /me cannot identify as one agent)
+    keeps what we hold and the phone line up; anything else is not an answer
+    and fails the refresh, so _listen retries rather than running on silently.
+    An overwrite on failure would strip the offer for the life of a healthy
+    socket. The reach refresh an unknown-chat frame triggers reads neither:
+    a blip there must not cost the frame."""
     module = _load(monkeypatch, tmp_path)
     adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
+    held = dict(module._NO_IDENTITY if held is None else held)
     adapter._identity = dict(held)
 
     class _ReachAndMeHTTP:
         def get(self, url: str, **kwargs: Any) -> _Resp:
-            if url.endswith("/v1/agents/cloud/me"):
-                return _Resp({"line": {"uid": "ln_x", "provider_key": NUMBER}, "chats": [], "mcp_url": None,
-                              "signup": SIGNUP}, status=me_status)
+            if url.endswith("/v1/agents/me"):
+                return _Resp(ME, status=me_status)
             if url.endswith("/v1/lines"):
                 return _Resp({"object": "list", "data": LINES, "has_more": False}, status=lines_status)
             return _Resp({"object": "list", "data": [_chat("cht_a")], "has_more": False})
 
+    await adapter._refresh_reach(_ReachAndMeHTTP())
+    assert adapter.chat_uids == frozenset({"cht_a"}) and adapter._identity == held, "reach alone"
     if refreshes:
-        await adapter._refresh_reach(_ReachAndMeHTTP())
-        assert adapter.chat_uids == frozenset({"cht_a"})
-        assert adapter._identity == {"signup": SIGNUP, "number": NUMBER, "lines": LINES}
+        await adapter._refresh_identity(_ReachAndMeHTTP())
+        assert adapter._identity == (IDENTITY if me_status == 200 else {**held, "lines": LINES})
     else:
         with pytest.raises(RuntimeError):
-            await adapter._refresh_reach(_ReachAndMeHTTP())
+            await adapter._refresh_identity(_ReachAndMeHTTP())
         assert adapter._identity == held
 
 
@@ -2217,6 +2241,7 @@ async def test_a_first_ever_connect_primes_the_agent_once(
         monkeypatch.setattr(module.aiohttp, "ClientSession", lambda *a, **k: _SocketHTTP())
         monkeypatch.setattr(adapter, "send", mock.AsyncMock(return_value=_SendResult(success=True)))
         monkeypatch.setattr(adapter, "_refresh_reach", mock.AsyncMock())
+        monkeypatch.setattr(adapter, "_refresh_identity", mock.AsyncMock())
         async def live_roster(chat_uid: str, adapter: Any = adapter) -> None:
             adapter._chats[chat_uid] = _chat(chat_uid, group=live_group)
 
@@ -3892,6 +3917,7 @@ async def test_connect_publishes_the_live_adapter_and_disconnect_retires_it(
         {"object": "list", "data": [_chat("cht_a")], "has_more": False}
     )
     monkeypatch.setattr(module.aiohttp, "ClientSession", lambda *a, **k: http)
+    monkeypatch.setattr(adapter, "_refresh_identity", mock.AsyncMock())
 
     async def listen_once() -> None:
         # Stands in for a real first anchor pass completing.
@@ -3946,8 +3972,8 @@ async def test_connect_reads_who_invited_the_owner_once_and_comes_up_without_it(
             if url.endswith("/v1/auth/profile"):
                 profile_reads.append(headers)
                 return _Resp(payload, status=status)
-            if url.endswith("/v1/agents/cloud/me"):
-                return _Resp({"line": {"uid": "ln_x", "provider_key": NUMBER}, "signup": SIGNUP})
+            if url.endswith("/v1/agents/me"):
+                return _Resp(ME)
             if url.endswith("/v1/lines"):
                 return _Resp({"object": "list", "data": LINES, "has_more": False})
             return _Resp({"object": "list", "data": [_chat("cht_a")], "has_more": False})
@@ -4988,7 +5014,7 @@ def test_every_silence_instruction_names_the_sentinel(
     its silence, which then delivers. Every turn that may warrant no reply
     is told to answer with the sentinel send() drops instead."""
     module = _load(monkeypatch, tmp_path)
-    collaboration = module._collaboration_prompt("", _collaboration_chat(), {"signup": None, "number": None})
+    collaboration = module._collaboration_prompt("", _collaboration_chat(), module._NO_IDENTITY)
     for prompt in (module.EXTERNAL_CHANNEL_PROMPT,
                    module.GROUP_AUTHORITY_CHANNEL_PROMPT,
                    collaboration):

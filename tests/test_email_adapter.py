@@ -19,7 +19,7 @@ from unittest import mock
 import pytest
 
 from test_adapter import (
-    LINES,
+    IDENTITY,
     _HTTP,
     _Resp,
     _SEND_ARGV,
@@ -130,7 +130,7 @@ async def test_a_mail_thread_is_plow_emails_turn_and_never_plow_chats(
     _mark_anchored(chat, "cht_a")
     mail = _adapter(module)
     mail._set_reach(listing)
-    mail._lines = LINES
+    mail._identity = IDENTITY
     chat_events, mail_events = _capture_events(monkeypatch, chat), _capture_events(monkeypatch, mail)
 
     frame = _envelope("evt_1", "cht_m", "msg_1", body=body, attachments=attachments, role=role)
@@ -146,8 +146,8 @@ async def test_a_mail_thread_is_plow_emails_turn_and_never_plow_chats(
     assert (source.platform, source.chat_type, source.chat_id) == ("plow_email", chat_type, "cht_m")
     assert source.role_authorized is (role == "owner") and source.user_id == f"mem_{role}_cht_m"
     assert event["text"] == expected_text and event["message_id"] == "msg_1"
-    roster = module._lines_fact(LINES, mail.address)
-    assert "that is you" in roster, "the mail line's own address is marked"
+    roster = module._lines_fact(IDENTITY)
+    assert "that is you" in roster, "the mail line's own persona is marked"
     assert event["channel_prompt"] == (f"{module._owner_fact(OWNER)} {roster}" if role == "owner"
                                         else module._owner_fact(OWNER))
     if attachments:

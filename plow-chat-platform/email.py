@@ -27,9 +27,10 @@ from ._transport import (
     _granted_chats,
     _is_chatter,
     _lines_fact,
+    _NO_IDENTITY,
     _owner_fact,
     _owner_identity,
-    _read_lines,
+    _read_identity,
     _self_agent_line,
     _serve,
     _socket,
@@ -60,7 +61,7 @@ class PlowEmailAdapter(BasePlatformAdapter):
         config.typing_indicator = False  # the base's 2s typing loop is a no-op on email
         self.auth = _bearer()
         self.address = None                  # the line's address, off the first mail chat
-        self._lines = ()                     # the roster, read at reach refresh
+        self._identity = dict(_NO_IDENTITY)   # read once per socket session, like plow_chat's
         self._chats = {}                     # uid -> chat resource, mail only
         self._foreign = frozenset()          # the phone line's uids on the same grant
         self._seen_events = []
@@ -83,6 +84,12 @@ class PlowEmailAdapter(BasePlatformAdapter):
     async def _refresh_reach(self, http):
         self._set_reach(await _granted_chats(http, self.auth))
 
+    async def _refresh_identity(self, http):
+        """Once per socket session, never on the reach refresh an unknown
+        thread triggers: a blip here must not cost that thread its first mail
+        (this line has no backfill). See PlowChatAdapter._refresh_identity."""
+        self._identity = {**self._identity, **await _read_identity(http, self.auth)}
+
     def _publish_hint(self):
         """Writes the address onto the platform registry entry the gateway
         reads on every prompt build. Imported lazily -- `gateway.` is a
@@ -103,9 +110,7 @@ class PlowEmailAdapter(BasePlatformAdapter):
                 pass
         async with aiohttp.ClientSession() as http:
             await self._refresh_reach(http)
-            # Once per connect, not per unknown-thread refresh: a roster blip
-            # must not abort delivery of the frame that triggered the refresh.
-            self._lines = await _read_lines(http, self.auth)
+            await self._refresh_identity(http)
         self._ws_task = asyncio.create_task(self._listen())
         return True
 
@@ -127,6 +132,7 @@ class PlowEmailAdapter(BasePlatformAdapter):
             nonlocal first_connection
             if not first_connection:
                 await self._refresh_reach(http)
+                await self._refresh_identity(http)
             first_connection = False
             async with _socket(http, await _ticket(http, self.auth)) as ws:
                 connected()
@@ -175,7 +181,7 @@ class PlowEmailAdapter(BasePlatformAdapter):
             raise
         # The roster rides owner turns only, as it does on the phone line.
         if sender.get("role") == "owner":
-            roster = _lines_fact(self._lines, self.address)
+            roster = _lines_fact(self._identity)
             if roster:
                 channel_prompt = f"{channel_prompt} {roster}"
         body, count = msg["body"].strip(), len(msg["attachments"])

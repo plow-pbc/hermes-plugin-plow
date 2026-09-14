@@ -62,13 +62,14 @@ from ._transport import (
     _granted_chats,
     _is_chatter,
     _is_solo_dm,
+    _line_name,
     _lines_fact,
+    _NO_IDENTITY,
     _one_line,
     _owner_fact,
     _owner_identity,
     _participant_identity,
     _read_identity,
-    _read_lines,
     _represented_member,
     _self_agent_line,
     _serve,
@@ -193,7 +194,7 @@ def _referrer_block(referred_by):
 def _speaker_name(sender, chat):
     if sender.get("type") == "agent":
         represented = _represented_member(chat, sender)
-        name = (sender.get("line") or {}).get("display_name") or "peer agent"
+        name = _line_name(sender) or "peer agent"
         if represented:
             return name, f"peer Plow agent representing {represented.get('display_name') or represented['uid']}"
         return name, "peer Plow agent"
@@ -277,7 +278,7 @@ def _collaboration_prompt(prompt, chat, identity):
         prompt = f"{_VOICE_RULE}{_RELATIONSHIP_FACT} {_NAME_FACT} {prompt}"
     participants = chat.get("participants") or []
     peers = [
-        (peer.get("line") or {}).get("display_name") or "an unnamed peer agent"
+        _line_name(peer) or "an unnamed peer agent"
         for peer in participants
         if peer.get("type") == "agent" and peer.get("relationship") == "peer"
     ]
@@ -322,7 +323,7 @@ def _collaboration_turn_context(chat, sender):
     for agent in (p for p in participants if p.get("type") == "agent"):
         human = _represented_member(chat, agent)
         if human is not None:
-            agent_name = (agent.get("line") or {}).get("display_name") or "unnamed agent"
+            agent_name = _line_name(agent) or "unnamed agent"
             mappings.append(f"{agent_name} represents {_participant_identity(human)}")
     speaker_name, speaker_kind = _speaker_name(sender, chat)
     return _untrusted("chat roster labels", (
@@ -1166,12 +1167,12 @@ EXTERNAL_CHANNEL_PROMPT = (
 def _plow_facts(identity):
     """What every Plow agent should know about Plow, as prompt prose.
 
-    The signup phrase and this agent's number come from /v1/agents/cloud/me,
-    and the roster of lines from /v1/lines, both at reach refresh; the URLs are
-    Plow's own. None of it is sender-supplied text, so carrying it in the
-    prompt is not the injection seam a sender name would be. A member's turn,
-    or a deployment whose API serves no signup block, omits the offer sentence;
-    a member's turn omits the roster too.
+    The signup phrase, this agent's number and the roster of lines come from
+    `_read_identity` once per socket session; the URLs are Plow's own. None of
+    it is sender-supplied text, so carrying it in the prompt is not the
+    injection seam a sender name would be. A member's turn, or a deployment
+    whose API serves no signup block, omits the offer sentence; a member's
+    turn omits the roster too.
 
     The variant name belongs HERE, not in the who-sentence: the resolver falls
     back to the Life row for any provider with no phrase of its own, so it
@@ -1184,7 +1185,7 @@ def _plow_facts(identity):
                      f'"{signup["phrase"]}" to {identity["number"]}.')
     facts.append("If someone other than your owner asks how to get a Plow agent of their own, "
                  "call plow_offer_invite; never give them a number or phrase yourself.")
-    roster = _lines_fact(identity.get("lines") or (), identity.get("number"))
+    roster = _lines_fact(identity)
     if roster:
         facts.append(roster)
     # Both Latch clauses come from transcript evidence; see the PR for counts.
@@ -1276,7 +1277,7 @@ class PlowChatAdapter(BasePlatformAdapter):
         self._configured_home_chat_uid = os.environ["PLOW_HOME_CHANNEL"]
         self.home_chat_uid = self._configured_home_chat_uid
         self.auth = _bearer()
-        self._identity = {"signup": None, "number": None, "lines": ()}   # read at reach refresh, see _refresh_reach
+        self._identity = dict(_NO_IDENTITY)   # see _refresh_identity
         self._referred_by = None            # (name, product) of whoever invited the owner, see _read_referrer
         config.extra["group_sessions_per_user"] = False
         self.chat_uids = frozenset({self.home_chat_uid})
@@ -1394,21 +1395,22 @@ class PlowChatAdapter(BasePlatformAdapter):
         PLOW_HOME_CHANNEL -- a grant that drops it is refused in _set_reach."""
         try:
             self._set_reach(await _granted_chats(http, self.auth))
-            # Who this agent is, for the prompt prefix. Only a 200 sets it
-            # (`_read_identity` answers None on the documented 404): refresh
-            # has no timer (connect, group creation, an unknown-chat frame),
-            # so overwriting on a failure would let one blip strip the offer
-            # for the life of a healthy socket.
-            me = await _read_identity(http, self.auth)
-            # The roster is a fact about Plow, not this token, so it has no
-            # 404 case: a 200 sets it and anything else fails the refresh.
-            lines = await _read_lines(http, self.auth)
-            self._identity = {**self._identity, **(me or {}), "lines": lines}
         except _PlowAuthError:
             raise                              # terminal; _listen owns the stop
         except Exception as exc:              # noqa: BLE001 - the caller reconnects
             log.error("[plow_chat] grant read failed: %s", type(exc).__name__)
             raise
+
+    async def _refresh_identity(self, http):
+        """Who this agent is and which lines Plow has, for the prompt prefix.
+
+        Once per socket session -- connect and every reconnect -- and never on
+        the reach refresh an unknown-chat frame triggers: a blip on either read
+        must not cost the frame that triggered it. Merged over what is held,
+        so a 404 (a token /me cannot identify as one agent) keeps the offer,
+        and a failure raises before anything is overwritten.
+        """
+        self._identity = {**self._identity, **await _read_identity(http, self.auth)}
 
     async def _refresh_current_chat(self, chat_uid):
         """Refresh the preference-bearing resource before the next handoff.
@@ -1479,6 +1481,7 @@ class PlowChatAdapter(BasePlatformAdapter):
                 pass
         async with aiohttp.ClientSession() as http:
             await self._refresh_reach(http)
+            await self._refresh_identity(http)
             # Who invited the owner never changes, so it is read once per
             # process start rather than on every reconnect, and may not fail
             # the connect. Who the owner IS comes off the chat resource each
@@ -2872,6 +2875,7 @@ class PlowChatAdapter(BasePlatformAdapter):
             global _live
             if not first_connection:
                 await self._refresh_reach(http)
+                await self._refresh_identity(http)
             ticket = await _ticket(http, self.auth)
             # ONE gate decides newest vs empty for every chat this agent ever
             # anchors: this process's first connect AND this agent's genuine
