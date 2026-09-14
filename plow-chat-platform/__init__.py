@@ -2713,14 +2713,11 @@ class PlowChatAdapter(BasePlatformAdapter):
             mailbox = self._mailbox_line()
         except Exception as exc:
             raise _PlowPreflightError(f"{type(exc).__name__}: {exc}") from exc
-        async with aiohttp.ClientSession() as http:
-            async with http.post(f"{BASE}/v1/email-lines/{mailbox['uid']}/messages",
-                                 json={"to": to, "subject": subject, "body": body},
-                                 headers=self.auth) as resp:
-                text = await resp.text()
-                if resp.status >= 400:
-                    raise _PlowSendError(resp.status, text)
-                resource = json.loads(text)
+        resource = await self._tool_json(
+            "POST",
+            f"/v1/email-lines/{mailbox['uid']}/messages",
+            body={"to": to, "subject": subject, "body": body},
+        )
         return {"status": resource["status"], "thread_id": resource.get("thread_id"),
                 "message_id": resource.get("message_id"), "from": mailbox["provider_key"]}
 
