@@ -2449,19 +2449,21 @@ class PlowChatAdapter(BasePlatformAdapter):
     async def _post_message(self, http, chat_id, payload, metadata=None):
         async with http.post(f"{BASE}/v1/chats/{chat_id}/messages",
                              json=payload, headers=self.auth) as resp:
+            if _message_delivery_unknown(resp.status):
+                # Classify on status BEFORE reading the body: a 408/424/5xx can
+                # carry an empty or non-JSON body, and parsing it first would
+                # raise past this branch -- the escape that lets a normal reply
+                # redeliver a POST Plow may already have accepted. Phrase it as a
+                # timeout so the base _send_with_retry returns it as-is, and flag
+                # the tool path via raw_response. The body is intentionally not
+                # read: it isn't needed, and a retryable token in it would flip
+                # the base's is_network branch back on.
+                return SendResult(
+                    success=False,
+                    error=f"Plow Chat {resp.status} timed out (delivery unknown)",
+                    raw_response={"delivery_unknown": True})
             data = await resp.json(content_type=None)
             if resp.status >= 400:
-                if _message_delivery_unknown(resp.status):
-                    # Plow may have accepted the message before the error, so a
-                    # retry would double-send. Phrase it as a timeout so the base
-                    # _send_with_retry returns it as-is (see _is_timeout_error)
-                    # rather than re-sending the plain-text fallback, and flag the
-                    # tool path via raw_response. The provider body is dropped: a
-                    # retryable-looking token in it would flip is_network True.
-                    return SendResult(
-                        success=False,
-                        error=f"Plow Chat {resp.status} timed out (delivery unknown)",
-                        raw_response={"delivery_unknown": True})
                 return SendResult(success=False, error=f"Plow Chat {resp.status}: {data}")
         # A failed post cleared nothing, so only a delivered one re-raises.
         self._retrigger_typing(chat_id, metadata)
