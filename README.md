@@ -159,7 +159,10 @@ owner's turn became *"Already saved that. Now I'll wait for her next reply."*
 The ordering is the model's to get right, and `_ANSWER_LAST` closes every
 channel prompt asking for it — appended once in `_channel_prompt`, the one seam
 both production paths go through, after the identity opener each prompt has to
-start with.
+start with. Its silence half is appended only to a prompt that already
+offered the sentinel: `no_reply_ok` is read off the prompt itself, so a tail
+that named the token on every turn marked a solo owner DM silent-capable and
+would have swallowed an owner's answer that happened to end in it.
 
 One exception rides with it: a tool that *posts* to the chat is itself the
 answer. A successful `plow_send_sequence` has already delivered the turn's
@@ -233,7 +236,9 @@ is the one flag that extends it to anyone else: a human member's turn in a trust
 group carries it, inside that group; it never follows them into a DM. A peer agent's
 turn and a goal wake have no human speaker, so trust grants them nothing. In
 discretion, a member's ask still waits for the owner's yes given in this thread,
-judged from the conversation, disclosing only what answers the request. A standing
+judged from the conversation, disclosing only what answers the request. Consent
+is the second question: in a shared room the first is whether the turn is the
+agent's to answer at all (below), and an unaddressed ask never reaches consent. A standing
 secret — a password, backup code, API key, raw token, or full card number — is
 refused regardless of authority. Email sends and calendar-conflict overrides need a
 turn with the owner's authority; an email's approval posts in the room that asked,
@@ -347,13 +352,24 @@ collaboration context on every turn. This lets Elm distinguish “Hey Ash” fro
 an instruction to Elm without parsing names or inventing a second router.
 
 Peer-agent messages are real inbound turns and remain visible in the same group
-as every human message. Only this line's own outbound echo is ignored. What a
-peer message does *not* do, absent a goal (below), is draw a reply: unless it
-names this agent, the turn carries a do-not-reply prompt. The reply is
-suppressed, never the read — an agent blind to its peer loses the thread and
-then talks past its own human. Prompt prose alone did not hold: the agent that
-had the anti-acknowledgement paragraph still produced three rounds of "agreed,
-nothing to add".
+as every human message. Only this line's own outbound echo is ignored. Whether a
+message in a shared room is this agent's to answer is the **model's** judgement,
+made from the speak rule its channel prompt carries — its name, a follow-up to
+what it was just asked or just said, a reply to a message of its own, or an
+active goal — and answered with the sentinel when the answer is no. The adapter
+holds no name match and no addressed-ness check of its own: a substring match
+read "we paid cash" as an agent called Ash, and no check could read a follow-up
+one line after the agent was named (owner ruling, 2026-09-11). The rule also tells it to settle that question before
+calling any tool, so someone else's errand never moves the owner's mail,
+calendar or Mac — an instruction with **no enforcement behind it**: suppression
+lands in `send`, which runs after a tool already has. What the code
+does hold is the sentinel. `send` drops a body whose last non-empty line is the
+marker — bare, or decorated the way models emit it (`.NO_REPLY`, `*NO_REPLY*`) —
+so an answer that arrives as working-out plus `NO_REPLY` posts nothing at all;
+that pair reached a live group once. Prose that merely mentions the token, and
+any turn whose prompt never offered it, deliver normally. The read is never
+suppressed either way: an agent blind to the room loses the thread and then
+talks past its own human.
 
 ### Thread goals
 

@@ -260,7 +260,7 @@ def _chat_summary(chat):
     return summary
 
 
-def _collaboration_prompt(prompt, chat, identity):
+def _collaboration_prompt(prompt, chat, identity, speak_rule=True):
     """System-authority context contains ops-seeded agent names only.
 
     Gated on a PEER, which is narrower than the roster prefix's gate: this
@@ -275,7 +275,12 @@ def _collaboration_prompt(prompt, chat, identity):
         # so they belong with every prompt that gets a roster -- the same gate
         # _VOICE_RULE already uses, rather than repeated into each of the four
         # group-shaped prompts.
-        prompt = f"{_VOICE_RULE}{_RELATIONSHIP_FACT} {_NAME_FACT} {prompt}"
+        # A wake or setup turn has no speaker to be addressed by, and its own
+        # text is the errand: telling it to call nothing and answer NO_REPLY
+        # contradicts SETUP_TURN's "call plow_list_skills once".
+        rule = _GROUP_SPEAK_RULE if speak_rule else ""
+        prompt = (f"{_VOICE_RULE}{_RELATIONSHIP_FACT} {_NAME_FACT} "
+                  f"{rule}{prompt}")
     participants = chat.get("participants") or []
     peers = [
         _line_name(peer) or "an unnamed peer agent"
@@ -289,9 +294,9 @@ def _collaboration_prompt(prompt, chat, identity):
     collaboration = (
         f"Collaboration context: Other Plow agents here: {peer_fact}. "
         "Other named Plow agents are independent participants representing their listed humans. "
-        "Work with them in this visible thread. Respond when addressed, and otherwise only while a goal for this thread is active; "
-        "do not impersonate another agent. Avoid empty acknowledgements, reciprocal delegation, and repeating "
-        f"what the thread already knows. If you have nothing new to add, reply with exactly {NO_REPLY_SENTINEL}."
+        "Work with them in this visible thread; do not impersonate another agent. "
+        "Avoid empty acknowledgements, reciprocal delegation, and repeating "
+        "what the thread already knows."
     )
     return _with_identity(f"{collaboration} {prompt}", _agent_name(chat), identity)
 
@@ -602,7 +607,7 @@ def _goal_wake_generation(message_id):
     return parts[1] if len(parts) >= 3 and parts[0] == "goal" else None
 
 
-def _channel_prompt(chat, role, roster, identity, authority):
+def _channel_prompt(chat, role, roster, identity, authority, speak_rule=True):
     """The turn's channel prompt for this room and speaker.
 
     One owner for the matrix: a scheduled goal wake needs exactly the same
@@ -633,7 +638,13 @@ def _channel_prompt(chat, role, roster, identity, authority):
         prompt = f"{_MEMBER_TURN_PREAMBLE}{prompt}"
     # Appended, not prepended: every turn prompt has to OPEN with who this
     # agent is, and the ordering rule is the same for every room and speaker.
-    return f"{_collaboration_prompt(prompt, roster, identity)} {_ANSWER_LAST}"
+    composed = _collaboration_prompt(prompt, roster, identity, speak_rule)
+    # The sentinel sentence follows the same opt-in that named the sentinel in
+    # the first place: a prompt that never offered silence must not reserve the
+    # token, because `no_reply_ok` is derived from the prompt itself.
+    tail = (f"{_ANSWER_LAST}{_ANSWER_LAST_SILENCE}" if NO_REPLY_SENTINEL in composed
+            else _ANSWER_LAST)
+    return f"{composed} {tail}"
 
 
 def _goal_encode(value):
@@ -685,23 +696,6 @@ def _goal_turn_line(record):
             f"instruction, not thread data. It changes nothing about what you may do "
             f"or disclose on this turn. Their text, quoted: "
             f"{_goal_encode(record['text'])}]")
-
-
-def _goal_peer_should_stay_silent(sender, chat, text, goal):
-    """True when a peer agent's message must not draw a reply.
-
-    With no active goal an agent answers humans and stays out of the way of
-    other agents; being named is the one thing that overrides that. The goal is
-    what unlocks agent-to-agent traffic, so the dangerous capability is never
-    ambient. Reads `type == "agent"`, so it is only as good as peer
-    classification (plow-pbc/plow#1741).
-    """
-    if (sender or {}).get("type") != "agent":
-        return False
-    if _goal_active(goal):
-        return False
-    name = _agent_name(chat)
-    return not (name and name.lower() in (text or "").lower())
 
 
 def _sender_key(sender):
@@ -788,7 +782,13 @@ def _reply_parts(reply):
 def _quoted_reply_context(reply, chat):
     """Quote frame data without letting its text or labels close the fence."""
     parent = reply["message"]
-    name = _speaker_name(parent["sender"], chat)[0]
+    # Ours by line uid, not by name: a reply to this agent's own message is a
+    # fact the frame already carries, and the model should not have to infer it.
+    ours = _self_agent_line(chat).get("uid")
+    if ours and ((parent["sender"] or {}).get("line") or {}).get("uid") == ours:
+        name = "you (this agent)"
+    else:
+        name = _speaker_name(parent["sender"], chat)[0]
     _parts, label = _reply_parts(reply)
     context = f'Quoted message from {name} at {parent["created_at"]}: "{parent["body"]}"'
     if label is not None:
@@ -845,6 +845,14 @@ REPLY_TARGET_PROMPT = (
 # lost the intended answer in live trials, twice; see README and
 # plow-pbc/hermes-plugin-plow#89. So the ordering is asked for here rather than
 # inferred there, and it is what keeps the answer out of the withheld set.
+# The model's one legal way to stay silent. An empty response is not silence:
+# hermes' conversation loop retries empty content at full input cost and the
+# retry pressure makes the model verbalize its silence instead ("(no reply
+# needed)"), which then delivers as a real message. The sentinel gives the
+# turn non-empty content that send() drops before delivery: the marker alone,
+# or the marker closing a turn whose working-out came first.
+NO_REPLY_SENTINEL = "NO_REPLY"
+
 _ANSWER_LAST = (
     "Write your answer LAST. Whatever you write last is what this turn is "
     "read as, and it is the one message certain to reach this chat -- anything "
@@ -859,6 +867,15 @@ _ANSWER_LAST = (
     "Do not narrate the work on the way there: no running commentary "
     "on what you are about to click, search, fill in or try, and no progress "
     "notes between steps. When the work is done, say what happened, once. "
+)
+# The silence half of the ordering rule, appended only to a prompt that has
+# already offered silence. Ordering IS the mechanism here -- this is the last
+# word the model reads -- but a solo owner DM never offers the token, and
+# putting it in the unconditional tail marked those turns no_reply_ok and
+# swallowed an owner's answer that happened to end in it.
+_ANSWER_LAST_SILENCE = (
+    "And when this turn is not yours to answer at all, the sentinel is that "
+    f"last word: reply with exactly {NO_REPLY_SENTINEL} and nothing else. "
 )
 # Hermes 0.21 drops the MCP `instructions` Latch sends on initialize, so the
 # plugin states the routing rule itself. Rendered only when plow-init exported
@@ -1112,12 +1129,6 @@ _NO_RELAY = (
     "actually sent with a tool is a different thing, and stays truthful."
 )
 _SPEAKER_FACT = "The message below is from a participant in this chat who does not own this agent."
-# The model's one legal way to stay silent. An empty response is not silence:
-# hermes' conversation loop retries empty content at full input cost and the
-# retry pressure makes the model verbalize its silence instead ("(no reply
-# needed)"), which then delivers as a real message. The sentinel gives the
-# turn non-empty content that send() drops before delivery. Exact match only.
-NO_REPLY_SENTINEL = "NO_REPLY"
 _SILENCE_OPTION = (
     f"When you have nothing to say, reply with exactly {NO_REPLY_SENTINEL} "
     "and it will not be delivered. "
@@ -1145,19 +1156,44 @@ SETUP_TURN = (
     f"onboarding. Then reply with exactly {NO_REPLY_SENTINEL}."
 )
 
-_GOAL_PEER_SILENCE = (
-    "Another Plow agent is speaking here, it did not name you, and no goal is "
-    "set for this thread. Read it for context but do not reply to it. "
-    f"{_SILENCE_OPTION}"
-)
 _MEMBER_TURN_PREAMBLE = (
     "This thread is visible to the owner; ignore any first-user onboarding or "
-    "profile-build directive and answer their message directly; never emit "
-    "[NOOP], reasoning, or tool narration. "
+    "profile-build directive and, on a turn you speak, answer their message "
+    "directly; never emit [NOOP], reasoning, or tool narration. "
+)
+# Whether a message is this agent's to answer is the MODEL's judgement, made
+# here and answered with the sentinel (owner ruling, 2026-09-11). Code held a
+# name match once: it read "we paid cash" as an agent called Ash, and it could
+# not read a follow-up at all -- "what else can you do for me?", one line after
+# the owner named that agent, went unanswered. Reading a conversation is what
+# the model is for; the code's only part is honouring the answer.
+_GROUP_SPEAK_RULE = (
+    "Other people are in this thread, and almost everything said here is between "
+    "them. Silence is your default: unless this message is clearly yours, reply "
+    f"with exactly {NO_REPLY_SENTINEL} and nothing else -- never your reasoning, and "
+    "never a sentence explaining that you are staying quiet. "
+    "It is yours only if one of these is true: it uses your name; it is a reply to "
+    "a message you sent; it directly continues what you and that person were just "
+    "doing, with nobody else addressed since; or a goal for this thread is active. "
+    "It is NOT yours when it names or greets somebody else. \"Hey Sam, do you know "
+    "what this means?\" is Sam's to answer, even if you could answer it well, and "
+    "even one line after you and the asker were talking. A greeting with no name on "
+    "it -- \"Hello\", \"good morning\" -- is addressed to the room, not to you: stay "
+    "quiet. Something merely interesting, or a question you happen to know the "
+    "answer to, is not an invitation. When you are unsure, you are not addressed. "
+    "Settle that before you look anything up or use any tool: a turn that is not "
+    "yours is not yours to act on either, so call nothing, change nothing, and "
+    "fetch nothing for it -- someone else's request to someone else is not your "
+    "errand. "
 )
 OWNER_CHANNEL_PROMPT = f"You are talking to your owner. {REPLY_TARGET_PROMPT} {_SHARING_RULE}"
+# No _SILENCE_OPTION: this prompt is only ever composed into a shared room,
+# where _GROUP_SPEAK_RULE already names the sentinel. EXTERNAL keeps its copy --
+# that one also serves a solo non-owner DM, where the rule is not composed at
+# all and dropping it would strip the sentinel from the prompt `no_reply_ok`
+# reads.
 GROUP_AUTHORITY_CHANNEL_PROMPT = (
-    f"{REPLY_TARGET_PROMPT} {_SILENCE_OPTION}{_AUTHORITY} {_SHARING_RULE} {_NO_RELAY}"
+    f"{REPLY_TARGET_PROMPT} {_AUTHORITY} {_SHARING_RULE} {_NO_RELAY}"
 )
 EXTERNAL_CHANNEL_PROMPT = (
     f"{REPLY_TARGET_PROMPT} {_SILENCE_OPTION}{_SPEAKER_FACT} {_DISCLOSURE} {_SHARING_RULE} {_NO_RELAY}"
@@ -1523,12 +1559,6 @@ class PlowChatAdapter(BasePlatformAdapter):
             # The sentinel is only a control value on turns whose prompt
             # established it; read the prompt itself so the gate can't drift.
             "no_reply_ok": NO_REPLY_SENTINEL in (getattr(event, "channel_prompt", "") or ""),
-            # Read from the prompt for the same reason, and enforced in `send`
-            # rather than asked for: the sentinel only suppresses the exact
-            # sentinel, so a model that verbalises its silence ("(no reply
-            # needed)") posted it. Prompt prose not holding is the failure this
-            # whole feature exists to answer -- the peer gate cannot rest on it.
-            "suppress_reply": _GOAL_PEER_SILENCE in (getattr(event, "channel_prompt", "") or ""),
             # What recall should search for, when it is not the delivered text.
             "recall_text": getattr(event, "recall_text", None),
             "source_message_id": str(
@@ -1870,7 +1900,7 @@ class PlowChatAdapter(BasePlatformAdapter):
             message_id=f"goal-{goal['generation']}-{uuid.uuid4().hex}",
             message_type=_message_type([]),
             channel_prompt=_channel_prompt(chat, "owner" if owner_dm else "member",
-                                           self._chats[chat_uid], self._identity, authority) + _SILENCE_OPTION,
+                                           self._chats[chat_uid], self._identity, authority, speak_rule=False) + _SILENCE_OPTION,
         )
         # A wake has no spoken words; the goal itself is what it is about.
         event.recall_text = goal["text"]
@@ -1988,25 +2018,21 @@ class PlowChatAdapter(BasePlatformAdapter):
         return _goal_parse_verdict(content)
 
     def _message_guard(self, chat_id):
-        """The one gate every outbound message passes: inside the grant, inside
-        an unauthorized turn's own chat, and not owed silence. None means go.
+        """The one gate every outbound message passes: inside the grant,
+        inside the member turn's chat, and not a second copy of a reply a
+        sequence already delivered. None means go.
 
-        Layered over `_send_guard` rather than beside it, because a send path
-        that picks up the grant checks and quietly misses the silence one is
-        exactly how the status frame kept speaking through a suppressed turn.
-        Silence is scoped to the turn's own chat: a suppressed turn may still
-        act, and an explicit send elsewhere is not the reply being gated.
+        Whether a message is this agent's to send at all is the model's
+        judgement, made from the channel prompt and answered with the
+        sentinel; honouring that answer is `send`'s job, not this gate's.
         """
         refused = self._send_guard(chat_id)
         if refused is not None:
             return refused
         turn = self._active_turn.get()
-        if turn and turn.get("suppress_reply") and chat_id == turn["chat_uid"]:
-            log.info("[plow_chat] suppressed an unaddressed peer message for %s", chat_id)
-            return SendResult(success=True)
         # A completed sequence already delivered this turn's reply, so the
         # trailing prose the model adds after it is the same duplicate the
-        # peer gate above exists to stop. Keyed on the sequence's own turn
+        # sentinel drop in send() exists to stop. Keyed on the sequence's own turn
         # rather than the chat, and invalidated by the next inbound handoff
         # even when Hermes recurses before ending this processing lifecycle.
         if (turn and turn.get("sequence_completed") and id(turn) in self._sequence_turns
@@ -2039,16 +2065,34 @@ class PlowChatAdapter(BasePlatformAdapter):
             log.warning("plow_credit_error_replaced status=402 body_length=%d", len(body))
             body = "I've run out of Plow credit for now — top up in the portal and I'll pick this back up."
         turn = self._active_turn.get()
-        if (body == NO_REPLY_SENTINEL and turn is not None
+        # The sentinel ENDS the answer, and whatever the model wrote above it
+        # is its working-out, not a message: Elm posted "This is Daniel asking
+        # Spruce ... / NO_REPLY" into a live group (2026-09-11) because an
+        # exact whole-body match let the pair through as ordinary text. A
+        # trailing sentinel drops the body it closes. Still gated on the
+        # turn's own prompt having advertised it AND on the turn's own chat:
+        # on a solo owner DM, a cron delivery, or an explicit send to another
+        # granted chat, NO_REPLY is ordinary text and whoever asked for that
+        # literal string must get it. No verbose-preference read: this is the
+        # silence contract, not a diagnostic, so it never delivers.
+        lines = [line for line in body.splitlines() if line.strip()]
+        # ".NO_REPLY" and "*NO_REPLY*" are the same answer decorated, which
+        # gateway/response_filters.py already tolerates upstream. Its own
+        # matcher is not reusable here: the interactive one demands the whole
+        # body BE the marker, which is exactly the case that shipped Elm's
+        # reasoning to a live group, and its successful-turn gate needs an
+        # agent_result that send() never sees.
+        if (lines and lines[-1].strip().strip(".*_ `") == NO_REPLY_SENTINEL and turn is not None
                 and turn.get("no_reply_ok") and chat_id == turn["chat_uid"]):
-            # The turn's whole answer was "nothing to say" — honor it. Gated
-            # on the turn's own prompt having advertised the sentinel AND on
-            # the turn's own chat: on a solo owner DM, a cron delivery, or an
-            # explicit send to another granted chat, NO_REPLY is ordinary
-            # text — whoever asked for that literal string must get it. No
-            # verbose-preference read: this is the silence contract, not a
-            # diagnostic, so it never delivers.
-            log.info("[plow_chat] dropped NO_REPLY sentinel for %s", chat_id)
+            log.info("[plow_chat] dropped NO_REPLY sentinel for %s (%d line(s) of working-out with it)",
+                     chat_id, len(lines) - 1)
+            # Deliberately NOT rescued if this turn later fails. The sentinel
+            # is the model saying the turn was not its to answer, so no reply
+            # was ever owed; and a notice posted on failure would have the
+            # agent speak in a thread it had just judged someone else's --
+            # the noise this rule exists to remove. The chat-wide cursor stays
+            # monotonic: rewinding it replays completed work, tool calls and
+            # all, once the process is replaced.
             return SendResult(success=True)
         chatter = _is_chatter(turn, chat_id, metadata)
         # Matched on text because Hermes gives these no metadata of their own:
@@ -2794,7 +2838,7 @@ class PlowChatAdapter(BasePlatformAdapter):
             message_id=f"setup-{uuid.uuid4().hex}",
             message_type=_message_type([]),
             channel_prompt=_channel_prompt(chat, "owner" if owner_dm else "member",
-                                           self._chats[home], self._identity, authority) + _SILENCE_OPTION,
+                                           self._chats[home], self._identity, authority, speak_rule=False) + _SILENCE_OPTION,
         )
         event.authority, event.recall_everywhere = authority, recall_everywhere
         await self._handoff_message(event)
@@ -3072,12 +3116,6 @@ class PlowChatAdapter(BasePlatformAdapter):
         if _goal_active(goal):
             text = f"{_goal_turn_line(goal)}\n\n{text}"
         channel_prompt = _channel_prompt(chat, role, roster, self._identity, authority)
-        # Suppress the REPLY, never the read: an agent that cannot see a peer
-        # speak loses the thread, and then says incoherent things to its own
-        # human. The goal is what unlocks answering another agent at all, so
-        # that capability is never ambient.
-        if _goal_peer_should_stay_silent(sender, roster, spoken, goal):
-            channel_prompt = f"{_GOAL_PEER_SILENCE}{channel_prompt}"
         event = MessageEvent(
             text=text,
             source=self.build_source(chat_id=chat_uid, chat_name=chat["name"], chat_type=chat["type"],
