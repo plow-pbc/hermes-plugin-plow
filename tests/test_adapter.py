@@ -3749,41 +3749,66 @@ def test_other_tools_and_non_sends_pass_untouched(
     assert module._pre_tool_call(tool_name, args) is None
 
 
-@pytest.mark.parametrize("to,trusted,turn,recipients", [
-    pytest.param("sam@odio.com", None, _OWNER_DM, ["sam@odio.com"], id="owner-turn-sends"),
+# What `adapter.send_mail` answers with, as the tool reads it back. The API
+# answers 202 `acceptance_unknown` when Gmail may have taken the mail and not
+# confirmed it: no thread id, no message id, and nothing to check it by.
+_MAIL_SENT = {"status": "sent", "thread_id": "t1", "message_id": "m1", "from": "elm@plow.co"}
+_MAIL_UNCONFIRMED = {"status": "acceptance_unknown", "thread_id": None, "message_id": None,
+                     "from": "elm@plow.co"}
+_MAIL_NO_AUTHORITY = {"success": False,
+                      "error": "reaching a person needs the owner's authority; nothing was sent"}
+
+
+@pytest.mark.parametrize("to,trusted,turn,answer,recipients,expected", [
+    pytest.param("sam@odio.com", None, _OWNER_DM, _MAIL_SENT, ["sam@odio.com"],
+                 {"success": True, **_MAIL_SENT}, id="owner-turn-sends"),
     # Every entry an address is one mail to all of them, not one mail each.
-    pytest.param(["sam@odio.com", "abby@example.com"], None, _OWNER_DM,
-                 ["sam@odio.com", "abby@example.com"], id="several-addresses-one-mail"),
+    pytest.param(["sam@odio.com", "abby@example.com"], None, _OWNER_DM, _MAIL_SENT,
+                 ["sam@odio.com", "abby@example.com"], {"success": True, **_MAIL_SENT},
+                 id="several-addresses-one-mail"),
     # `trusted` hands a new group the owner's authority; mail creates no group,
     # so it is ignored rather than gated -- a trusted group's member may email
     # without the owner's own turn, which the owner-only trust gate would refuse.
-    pytest.param("sam@odio.com", True, _TRUSTED_MEMBER, ["sam@odio.com"], id="trusted-is-ignored"),
-    pytest.param("sam@odio.com", None, _DISCRETION_MEMBER, None, id="no-authority-refuses"),
-    pytest.param("sam@odio.com", None, None, None, id="outside-a-turn-refuses"),
+    pytest.param("sam@odio.com", True, _TRUSTED_MEMBER, _MAIL_SENT, ["sam@odio.com"],
+                 {"success": True, **_MAIL_SENT}, id="trusted-is-ignored"),
+    # An unconfirmed acceptance is not a success: the mail may be out, and a
+    # retry is a second real one, so it reads back as delivery-unknown.
+    pytest.param("sam@odio.com", None, _OWNER_DM, _MAIL_UNCONFIRMED, ["sam@odio.com"],
+                 {"success": False, "status": "acceptance_unknown", "delivery_unknown": True,
+                  "from": "elm@plow.co",
+                  "error": "Gmail may have accepted the mail. Do NOT retry; check with your owner."},
+                 id="unconfirmed-acceptance-is-not-a-retry"),
+    # No mailbox for this persona fails before the POST: definitive, and safe
+    # to retry once the roster has one.
+    pytest.param("sam@odio.com", None, _OWNER_DM, "preflight", ["sam@odio.com"],
+                 {"success": False,
+                  "error": "could not resolve this agent's mailbox (no mailbox); nothing was sent"},
+                 id="no-mailbox-says-nothing-was-sent"),
+    pytest.param("sam@odio.com", None, _DISCRETION_MEMBER, _MAIL_SENT, None, _MAIL_NO_AUTHORITY,
+                 id="no-authority-refuses"),
+    pytest.param("sam@odio.com", None, None, _MAIL_SENT, None, _MAIL_NO_AUTHORITY,
+                 id="outside-a-turn-refuses"),
 ])
 def test_an_email_address_handle_leaves_from_the_agents_own_mailbox(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, to: Any, trusted: Any,
-    turn: dict[str, Any] | None, recipients: list[str] | None,
+    turn: dict[str, Any] | None, answer: Any, recipients: list[str] | None,
+    expected: dict[str, Any],
 ) -> None:
     """'Email Sam' is the same verb as 'text Sam': the handle picks the
     transport. An address goes out from this agent's mailbox, never as an
-    iMessage to an Apple ID and never from the owner's Gmail -- and under the
-    same authority gate a text obeys."""
+    iMessage to an Apple ID and never from the owner's Gmail -- under the same
+    authority gate a text obeys, and every answer but a confirmed send reads
+    back as something the model must not repeat."""
     module = _load(monkeypatch, tmp_path)
     sent: list[Any] = []
-    _live_tool(module, monkeypatch, "send_mail",
-               result={"status": "sent", "thread_id": "t1", "message_id": "m1", "from": "elm@plow.co"},
-               record=sent)
+    raises = module._PlowPreflightError("no mailbox") if answer == "preflight" else None
+    _live_tool(module, monkeypatch, "send_mail", result=None if raises else answer,
+               raises=raises, record=sent)
     module._ACTIVE_TURN.set(turn)
     out = json.loads(module._plow_send_message(
         {"to": to, "subject": "Transcript", "body": "Here it is", "trusted": trusted}))
-    if recipients is None:
-        assert out["success"] is False and "authority" in out["error"]
-        assert sent == []
-    else:
-        assert out == {"success": True, "status": "sent", "thread_id": "t1", "message_id": "m1",
-                       "from": "elm@plow.co"}
-        assert sent == [(recipients, "Transcript", "Here it is")]
+    assert out == expected
+    assert sent == ([(recipients, "Transcript", "Here it is")] if recipients else [])
 
 
 def test_group_message_reports_adoption_separately_from_delivery(

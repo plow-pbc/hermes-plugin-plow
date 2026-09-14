@@ -910,8 +910,9 @@ LATCH_PROMPT = (
     "For your owner's own requests, default to the Mac for anything "
     "about them or their world — 'my computer', 'my files', 'my email', 'say this', 'open that', "
     "'find X' mean the Mac unless they say otherwise; your own shell and files are for your own "
-    "work only. Reaching a person is the exception; the verb decides. SENDING ('text Sam', "
-    "'email John') is yours, from your own line: plow_send_message. Resolve their name to a handle "
+    "work only. Reaching a person is the exception; the verb decides whose job it is and `to` picks "
+    "the line. SENDING ('text Sam', 'email John') is yours: plow_send_message. Resolve their name "
+    "to a handle "
     "(Latch's `contacts` skill, or plow_contacts) and pass it as `to` — a number opens a group that "
     "seats your owner, never a bare 1:1, trusted=false by default; an address plus a subject leaves "
     "from your own mailbox, your owner copied. action=list shows your chats. Never send via the "
@@ -3428,7 +3429,7 @@ def _flag(value, *, default, safe):
 
 
 def _normalize_members(recipients):
-    """The cleaned member list for POST /v1/chats. Kept out of logs — phones are PII.
+    """The cleaned recipient list, for a group POST or a mail. Kept out of logs — phones are PII.
 
     Members stay a list end-to-end now, so the comma check is a malformed-entry
     guard rather than a delimiter rule: one array element carrying two addresses
@@ -3852,6 +3853,14 @@ def _send_mail(adapter, loop, to, subject, body, turn):
                            "error": f"could not resolve this agent's mailbox ({exc}); nothing was sent"})
     except Exception as exc:  # noqa: BLE001 - no answer is not a failure to retry
         return _lost_answer(exc)
+    if data["status"] != "sent":
+        # 202 `acceptance_unknown`: Gmail may have taken the mail and not said
+        # so, and there is no thread or message id to check it by. A retry is a
+        # second real email, so this reads back like a 424, never as a success.
+        return json.dumps({"success": False, "status": data["status"], "delivery_unknown": True,
+                           "from": data["from"],
+                           "error": "Gmail may have accepted the mail. Do NOT retry; "
+                                    "check with your owner."})
     return json.dumps({"success": True, **data})
 
 
@@ -3911,11 +3920,15 @@ def _plow_send_message(args, **_kwargs):
     """The one messaging tool: reach a person, post into an existing chat, or
     list the chats.
 
-    `to` decides the route. A bare handle/name, or an array of them, is a
-    PERSON: it resolves to an owner-inclusive group via start_group_thread, so
-    the owner is CC'd by construction -- a person is never a 1:1, since a Plow
-    dm is structurally owner<->agent and a third party is reachable only in a
-    group. A `cht_` id or a `#title` names an EXISTING chat and posts there
+    `to` decides the route, and which line it leaves from. A bare handle/name,
+    or an array of them, is a PERSON. A number resolves to an owner-inclusive
+    group via start_group_thread, so the owner is CC'd by construction -- a
+    person is never a 1:1, since a Plow dm is structurally owner<->agent and a
+    third party is reachable only in a group. An email address (with `subject`)
+    goes through send_mail instead, from the mailbox sharing this agent's
+    persona, where the API seats the owner in cc. One call is all numbers or
+    all addresses; they are different lines.
+    A `cht_` id or a `#title` names an EXISTING chat and posts there
     through send(), whose owner-CC guard refuses a hand-picked room the owner
     is not in. `action="list"` enumerates the owner's chats with participants,
     the sanctioned source of a cht_ id.
