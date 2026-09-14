@@ -140,7 +140,7 @@ def _load(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, *, deferred_q
 
     base.MessageType = _MessageType  # type: ignore[attr-defined]
     cache = tmp_path / "cache"
-    cache.mkdir()
+    cache.mkdir(exist_ok=True)  # a second load over one tmp_path is a process restart
 
     def _cache(kind: str):
         def write(data: bytes, name: str = "") -> str:
@@ -2217,35 +2217,43 @@ async def test_two_chat_reach_opens_one_granted_socket(monkeypatch: pytest.Monke
 async def test_every_connect_wakes_the_agent_once(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, live_group: bool,
 ) -> None:
-    """Each life hands hermes one Plow-signed wakeup turn in the home chat --
-    even when its first session drops before reaching it, and however often
-    `connect(is_reconnect=True)` replaces `_listen` -- and a first boot reads
-    differently from a restart, even when the listener that wakes it runs
-    after the first one anchored. The plugin itself sends nothing: whatever
-    the owner first hears is the agent's own answer. Owner authority comes
-    from the live roster, not the one cached at connect."""
-    module = _load(monkeypatch, tmp_path)
+    """Each process hands hermes one Plow-signed wakeup turn in the home chat
+    -- even when a session drops or fails a roster read before reaching it,
+    and however often the gateway replaces the adapter -- and a first boot
+    reads differently from a restart, even when the adapter that wakes it
+    runs after an earlier one anchored. The plugin itself sends nothing:
+    whatever the owner first hears is the agent's own answer. Owner authority
+    comes from the live roster, not the one cached at connect."""
     handed: list[list[Any]] = []
     sends = mock.AsyncMock(return_value=_SendResult(success=True))
-    # First-ever life, then a restart over the same checkpoint; each life's
-    # first listener drops before its wakeup and is replaced.
-    for listeners in (3, 2):
-        adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
-        adapter._set_reach([_chat("cht_a")])
+    # First-ever process, then a restart: a module reload over the same
+    # checkpoint. Each listener is a fresh adapter, as the gateway's reconnect
+    # watcher builds one.
+    for listeners in (("drop", "roster", "ok", "ok"), ("drop", "ok")):
+        module = _load(monkeypatch, tmp_path)
         monkeypatch.setattr(module.aiohttp, "ClientSession", lambda *a, **k: _SocketHTTP())
-        monkeypatch.setattr(adapter, "send", sends)
-        monkeypatch.setattr(adapter, "_refresh_reach", mock.AsyncMock())
         monkeypatch.setattr(module, "_refresh_identity", mock.AsyncMock(return_value=module._NO_IDENTITY))
-        async def live_roster(chat_uid: str, adapter: Any = adapter) -> None:
-            adapter._chats[chat_uid] = _chat(chat_uid, group=live_group)
+        process: list[Any] = []
+        for kind in listeners:
+            adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
+            adapter._set_reach([_chat("cht_a")])
+            monkeypatch.setattr(adapter, "send", sends)
+            monkeypatch.setattr(adapter, "_refresh_reach", mock.AsyncMock())
 
-        monkeypatch.setattr(adapter, "_refresh_current_chat", live_roster)
-        monkeypatch.setattr(adapter, "_backfill", mock.AsyncMock(side_effect=[OSError("socket dropped"), None, None]))
-        handed.append(_capture_events(monkeypatch, adapter))
-        for _ in range(listeners):
+            async def live_roster(chat_uid: str, adapter: Any = adapter, kind: str = kind) -> None:
+                if kind == "roster":
+                    raise OSError("roster read failed")
+                adapter._chats[chat_uid] = _chat(chat_uid, group=live_group)
+
+            monkeypatch.setattr(adapter, "_refresh_current_chat", live_roster)
+            monkeypatch.setattr(adapter, "_backfill",
+                                mock.AsyncMock(side_effect=OSError("socket dropped") if kind == "drop" else None))
+            events = _capture_events(monkeypatch, adapter)
             with mock.patch.object(module.asyncio, "sleep", side_effect=StopAsyncIteration):
                 with pytest.raises(StopAsyncIteration):
                     await adapter._listen()
+            process += events
+        handed.append(process)
 
     assert sends.await_count == 0, "the plugin spoke at boot; first contact is the agent's own answer"
     [first_boot], [restart] = handed
@@ -2255,32 +2263,6 @@ async def test_every_connect_wakes_the_agent_once(
         assert wakeup["source"]["user_id"] == "plow_setup", "the wakeup must not speak as the owner"
         assert module.NO_REPLY_SENTINEL in wakeup["channel_prompt"], "the owner must be able to see nothing"
     assert first_boot["text"] != restart["text"], "the agent cannot tell a first boot from a restart"
-
-
-async def test_a_failed_roster_read_leaves_the_wakeup_owed(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
-) -> None:
-    """A transient read while building the wakeup must not spend it: the
-    next session hands it once."""
-    module = _load(monkeypatch, tmp_path)
-    adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
-    adapter._set_reach([_chat("cht_a")])
-    monkeypatch.setattr(module.aiohttp, "ClientSession", lambda *a, **k: _SocketHTTP())
-    monkeypatch.setattr(adapter, "_refresh_reach", mock.AsyncMock())
-    monkeypatch.setattr(module, "_refresh_identity", mock.AsyncMock(return_value=module._NO_IDENTITY))
-    reads = iter([OSError("roster read failed"), None, None])
-
-    async def flaky_roster(chat_uid: str) -> None:
-        if failure := next(reads):
-            raise failure
-        adapter._chats[chat_uid] = _chat(chat_uid)
-
-    monkeypatch.setattr(adapter, "_refresh_current_chat", flaky_roster)
-    handed = _capture_events(monkeypatch, adapter)
-    with mock.patch.object(module.asyncio, "sleep", side_effect=[None, None, StopAsyncIteration]):
-        with pytest.raises(StopAsyncIteration):
-            await adapter._listen()
-    assert len(handed) == 1, "a failed read spent the wakeup, or a later session handed it again"
 
 
 async def test_concurrent_discovery_of_a_new_chat_anchors_it_at_newest(

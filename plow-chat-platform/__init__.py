@@ -1160,6 +1160,10 @@ _SILENCE_OPTION = (
 # makes of coming online -- an opening, a note, silence -- is its own.
 WAKEUP_TURN = ("Plow, not your owner: you just came online in your owner's chat. This is {boot}. "
                f"If you have nothing to say, reply with exactly {NO_REPLY_SENTINEL}.")
+# The process's one wakeup, its label and latch: the gateway replaces both
+# `_listen` and the adapter itself on reconnect, so neither can hold them.
+_first_boot = None
+_woken = False
 
 _MEMBER_TURN_PREAMBLE = (
     "This thread is visible to the owner; ignore any first-user onboarding or "
@@ -1332,10 +1336,6 @@ class PlowChatAdapter(BasePlatformAdapter):
             }
         }
         self._ws_task = None
-        # The process's one wakeup: `connect(is_reconnect=True)` replaces
-        # `_listen`, so its label and latch cannot live there.
-        self._first_boot = None
-        self._woken = False
         self._anchor_lock = asyncio.Lock()
         self._quiet_until = 0.0              # while now is under this, the gate is quiet without a read
         self._seen = []                      # (chat uid, message uid), newest last
@@ -2888,7 +2888,8 @@ class PlowChatAdapter(BasePlatformAdapter):
         # Spent here, not before the reads above: a failed read leaves the
         # wakeup owed to the next session, while a hand-off that raises every
         # time still cannot tear down every session after it.
-        self._woken = True
+        global _woken
+        _woken = True
         await self._handoff_message(event)
 
     async def _backfill(self, http, chat_uid):
@@ -2946,8 +2947,9 @@ class PlowChatAdapter(BasePlatformAdapter):
         # existing on disk is what means "not the first life"; read once,
         # here, before anything below can change it.
         first_install = not self._anchored_chats.get(self.home_chat_uid)
-        if self._first_boot is None:
-            self._first_boot = first_install
+        global _first_boot
+        if _first_boot is None:
+            _first_boot = first_install
 
         async def session(http, connected):
             nonlocal first_connection
@@ -2990,8 +2992,8 @@ class PlowChatAdapter(BasePlatformAdapter):
                     # backlog, so it cannot run ahead of an offline `/goal
                     # clear` still sitting in the queue.
                     self._goal_arm_wakes()
-                    if not self._woken:
-                        await self._prime(self._first_boot)
+                    if not _woken:
+                        await self._prime(_first_boot)
                     async for frame in ws:
                         if frame.type == aiohttp.WSMsgType.TEXT:
                             await self._on_frame(frame.json(), http)
