@@ -1594,6 +1594,15 @@ class PlowChatAdapter(BasePlatformAdapter):
             ) if event.message_id else None,
         }
         if not turn["owner"]:
+            # A member turn may still name someone -- but never the owner's own
+            # handle; `_plow_name_contact` checks a member's target against this.
+            turn["owner_handle"] = next(
+                (
+                    item.get("provider_key") for item in self._chats.get(chat_uid, {}).get("participants", [])
+                    if item.get("type") == "member" and item.get("role") == "owner"
+                ),
+                None,
+            )
             participant = next(
                 (
                     item for item in self._chats.get(chat_uid, {}).get("participants", [])
@@ -4272,9 +4281,10 @@ def _plow_name_contact(args, **_kwargs):
     a member of this chat, someone in another thread, or the owner themselves.
     A display name may be written on any active turn: it comes from the owner's
     ask, the owner's own contacts, or the person naming their own handle, and
-    a wrong one costs a label. A relationship is who someone is TO the owner,
-    so it keeps the owner's own turn as its whole trust boundary. No active turn
-    at all refuses either: a turn-less write has nobody to have asked.
+    a wrong one costs a label -- except the owner's own handle, which only the
+    owner names. A relationship is who someone is TO the owner, so it keeps the
+    owner's own turn as its whole trust boundary. No active turn at all refuses
+    either: a turn-less write has nobody to have asked.
     """
     turn = _ACTIVE_TURN.get()
     if turn is None:
@@ -4282,6 +4292,10 @@ def _plow_name_contact(args, **_kwargs):
                            "error": "this requires an active turn; nothing was recorded"})
     handle = str(args.get("handle") or "").strip()
     body = {k: args[k] for k in ("display_name", "relationship") if args.get(k) is not None}
+    if not turn.get("owner") and handle == turn.get("owner_handle"):
+        return json.dumps({"success": False,
+                           "error": "your owner's own name comes from them: this requires the "
+                                    "owner's own active turn, nothing was recorded"})
     if "relationship" in body and not turn.get("owner"):
         return json.dumps({"success": False,
                            "error": "a relationship comes from the owner: this requires the owner's "
@@ -4324,9 +4338,10 @@ PLOW_NAME_CONTACT_SCHEMA = {
         "People are keyed by handle, so this reaches anyone your owner can name, in "
         "this chat or not, and a phone and an email for the same person each take "
         "the same name; the roster shows each person as name (handle). Your owner's "
-        "own handle takes a display_name -- that is their account name -- but not a "
-        "relationship. Omit display_name/relationship to leave it; for other people, "
-        "pass \"\" to clear it."
+        "own handle takes a display_name -- that is their account name -- but only "
+        "your owner's own turn may write it, and it never takes a relationship. "
+        "Omit display_name/relationship to leave it; for other people, pass \"\" to "
+        "clear it."
     ),
     "parameters": {
         "type": "object",

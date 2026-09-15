@@ -2438,6 +2438,15 @@ def test_a_display_name_is_written_on_any_active_turn(
     assert record == ([("+15550000003", {"display_name": "Andrew Lee", "relationship": "investor"})]
                       if turn["owner"] else [])
 
+    # The owner's own handle is the one target a member turn may not name,
+    # even with just a display_name: that write comes from the owner or nobody.
+    record.clear()
+    owner_turn = {**turn, "owner_handle": "+15550000001"}
+    module._ACTIVE_TURN.set(owner_turn)
+    out = json.loads(module._plow_name_contact({"handle": "+15550000001", "display_name": "Sam"}))
+    assert out["success"] is turn["owner"]
+    assert record == ([("+15550000001", {"display_name": "Sam"})] if turn["owner"] else [])
+
 
 def _authority_case_read_the_book(module: Any, monkeypatch: pytest.MonkeyPatch, turn: dict[str, Any] | None, authorized: bool) -> None:
     """The mirror of naming's gate: a no-turn cron caller reads, where it refuses to write."""
@@ -3081,7 +3090,7 @@ def test_invite_workflow_reports_delivery_failure(
             "missing",
             {"chat_uid": "cht_b", "owner": False, "dm": False, "authority": False, "recall_everywhere": False,
              "no_reply_ok": False, "recall_text": None,
-             "source_message_id": "msg_delight_1"},
+             "source_message_id": "msg_delight_1", "owner_handle": "+15550000001"},
             id="missing-participant",
         ),
         pytest.param(
@@ -3093,7 +3102,8 @@ def test_invite_workflow_reports_delivery_failure(
                 "provider_key": "+17035550123",
             },
             "cp_taylor",
-            _invite_turn(participant_identity="Taylor Injected suffix", triggered_at=mock.ANY),
+            _invite_turn(participant_identity="Taylor Injected suffix", triggered_at=mock.ANY,
+                         owner_handle="+15550000001"),
             id="normalized-name",
         ),
         pytest.param(
@@ -3109,6 +3119,7 @@ def test_invite_workflow_reports_delivery_failure(
                 participant_uid="cp_phone",
                 participant_identity="+17035550124",
                 triggered_at=mock.ANY,
+                owner_handle="+15550000001",
             ),
             id="phone-fallback",
         ),
