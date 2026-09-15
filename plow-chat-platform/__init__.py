@@ -975,7 +975,7 @@ MAC_SKILLS_HEAD = (
     "the one that covers what they asked is the first thing you read (plow_read_skill) and then "
     "do, before session_search, before memory, before you reply:\n"
 )
-MAC_SKILLS_TTL_S = 600
+REFRESH_TTL_S = 600
 # Hermes' budgets (hermes_cli.plugins_dispatch): a section over
 # MAX_SYSTEM_PROMPT_SECTION_CHARS is dropped whole, and so is the section
 # that carries the aggregate over MAX_SYSTEM_PROMPT_SECTIONS_TOTAL_CHARS --
@@ -1001,7 +1001,7 @@ MAC_SKILLS_MAX_CHARS = min(
     - _hermes_section_chars("plow-latch", LATCH_PROMPT) - 2  # the separator between sections
     - (_hermes_section_chars("plow-latch-skills", "x" * HERMES_SECTION_MAX_CHARS) - HERMES_SECTION_MAX_CHARS),
 )
-MAC_SKILLS_RETRY_S = 60
+REFRESH_RETRY_S = 60
 _mac_skills: dict[str, Any] = {"text": "", "fetched_at": 0.0, "tried_at": 0.0, "lock": threading.Lock()}
 
 
@@ -1104,10 +1104,10 @@ def _refresh_mac_skills() -> None:
 
 
 def _kick_refresh(cache: dict[str, Any], refresh: Callable[[], None], name: str) -> None:
-    """Start `refresh` in the background once `cache` is past its TTL, at most once a minute."""
+    """Start `refresh` in the background once `cache` is past its TTL, throttled by its own retry interval."""
     now = time.time()
     with cache["lock"]:
-        if now - cache["fetched_at"] <= MAC_SKILLS_TTL_S or now - cache["tried_at"] < MAC_SKILLS_RETRY_S:
+        if now - cache["fetched_at"] <= REFRESH_TTL_S or now - cache["tried_at"] < REFRESH_RETRY_S:
             return
         cache["tried_at"] = now
     threading.Thread(target=refresh, name=name, daemon=True).start()
@@ -3421,7 +3421,12 @@ def _wiki_read(name: str) -> str | None:
 
 def _wiki_write(name: str, text: str) -> None:
     if os.environ.get("WIKI_PATH"):
-        (pathlib.Path(os.environ["WIKI_PATH"]) / ".wiki" / name).write_text(text)
+        # Write-and-rename: a kill mid-write must never leave a torn
+        # embeddings.json, which would fail JSONDecodeError forever after.
+        path = pathlib.Path(os.environ["WIKI_PATH"]) / ".wiki" / name
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(text)
+        os.replace(tmp, path)
         return
     _relay_call(os.environ["PLOW_MCP_URL"], os.environ["PLOW_AGENT_TOKEN"], "plow_write_file",
                 {"path": f"{WIKI_RELAY_ROOT}/.wiki/{name}", "content": text}, WIKI_RELAY_TIMEOUT_S)
@@ -3456,14 +3461,14 @@ def _load_wiki_corpus() -> dict[str, Any] | None:
     documents = [_wiki_document(c) for c in index["chunks"]]
     keys = [_wiki_key(d) for d in documents]
     stored = json.loads(_wiki_read("embeddings.json") or '{"vectors": {}}')["vectors"]
-    missing = {k: d for k, d in zip(keys, documents) if k not in stored}
-    pending = list(missing.items())
+    changed = stored.keys() != set(keys)  # a key added or gone since the file was last written
+    pending = [(k, d) for k, d in zip(keys, documents) if k not in stored]
     for start in range(0, len(pending), WIKI_EMBED_BATCH):
         batch = pending[start:start + WIKI_EMBED_BATCH]
         for (key, _), vector in zip(batch, _embed([d for _, d in batch])):
             stored[key] = base64.b64encode(struct.pack(f"<{len(vector)}f", *vector)).decode()
     kept = {k: stored[k] for k in sorted(set(keys))}
-    if kept.keys() != stored.keys() or missing:
+    if changed:
         _wiki_write("embeddings.json", json.dumps({"vectors": kept}, separators=(",", ":")))
     vectors = []
     for k in keys:

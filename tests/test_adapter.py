@@ -8,6 +8,7 @@ the adapter without adding Hermes itself as a dependency.
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import hashlib
 import http.server
@@ -17,6 +18,7 @@ import logging
 import os
 import pathlib
 import re
+import struct
 import sys
 import threading
 import time
@@ -25,7 +27,7 @@ import urllib.error
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Iterator
 from unittest import mock
 
 import pytest
@@ -6261,6 +6263,18 @@ def test_mac_skills_section_renders_the_manifest_as_prompt_text(monkeypatch, tmp
     assert render({}) == text
 
 
+@contextlib.contextmanager
+def _serve(handler: type[http.server.BaseHTTPRequestHandler]) -> Iterator[str]:
+    """Run `handler` on a background thread for the life of the block, yielding its base URL."""
+    server = http.server.HTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 @pytest.mark.parametrize(("result", "expected"), [
     ({"content": [{"type": "text", "text": json.dumps({"status": "completed", "path": "/p", "content": "hi"})}]},
      {"status": "completed", "path": "/p", "content": "hi"}),
@@ -6287,19 +6301,14 @@ def test_relay_call_returns_a_completed_payload_and_raises_with_the_cause_otherw
 
         def log_message(self, *_a: Any) -> None: ...
 
-    server = http.server.HTTPServer(("127.0.0.1", 0), _Handler)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    try:
-        url = f"http://127.0.0.1:{server.server_address[1]}/mcp"
+    with _serve(_Handler) as base_url:
+        url = f"{base_url}/mcp"
         if isinstance(expected, str):
             with pytest.raises(module._RelayToolError) as excinfo:
                 module._relay_call(url, "t", "plow_read_file", {"path": "~/x"}, 5.0)
             assert excinfo.value.cause == expected
         else:
             assert module._relay_call(url, "t", "plow_read_file", {"path": "~/x"}, 5.0) == expected
-    finally:
-        server.shutdown()
-        server.server_close()
     assert seen[0]["params"] == {"name": "plow_read_file", "arguments": {"path": "~/x"}}
 
 
@@ -6322,10 +6331,8 @@ def test_fetch_mac_skills_refuses_a_redirect(monkeypatch: pytest.MonkeyPatch, tm
         def log_message(self, *_a: Any) -> None:
             ...
 
-    server = http.server.HTTPServer(("127.0.0.1", 0), _Handler)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    try:
-        url = f"http://127.0.0.1:{server.server_address[1]}/mcp"
+    with _serve(_Handler) as base_url:
+        url = f"{base_url}/mcp"
         with pytest.raises(urllib.error.HTTPError) as excinfo:
             module._fetch_mac_skills(url, "line-scoped-token", timeout=5.0)
         # The refusal must not carry the attacker-controlled Location, which
@@ -6335,9 +6342,6 @@ def test_fetch_mac_skills_refuses_a_redirect(monkeypatch: pytest.MonkeyPatch, tm
         # Nothing from the Mac's response headers reaches the error, either.
         assert excinfo.value.headers.get("Location") is None
         assert "attacker.example" not in str(dict(excinfo.value.headers))
-    finally:
-        server.shutdown()
-        server.server_close()
 
     assert hits == ["/mcp"], "followed the redirect instead of refusing it at the first host"
 
@@ -6360,16 +6364,11 @@ def test_refresh_mac_skills_logs_no_mac_controlled_content(
         def log_message(self, *_a: Any) -> None:
             ...
 
-    server = http.server.HTTPServer(("127.0.0.1", 0), _Handler)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    try:
-        monkeypatch.setenv("PLOW_MCP_URL", f"http://127.0.0.1:{server.server_address[1]}/mcp")
+    with _serve(_Handler) as base_url:
+        monkeypatch.setenv("PLOW_MCP_URL", f"{base_url}/mcp")
         monkeypatch.setenv("PLOW_AGENT_TOKEN", "line-scoped-token")
         with caplog.at_level("INFO"):
             module._refresh_mac_skills()
-    finally:
-        server.shutdown()
-        server.server_close()
 
     logged = "\n".join(r.getMessage() for r in caplog.records)
     assert "not fetched" in logged
@@ -6616,14 +6615,14 @@ _WIKI_CHUNKS = {"updated": "2026-09-13", "chunks": [
 def embed_server() -> Any:
     """A fake Ollama /api/embed. One axis per name the text contains plus a small
     shared axis, so the nearest chunk is exactly the one naming the same person."""
-    state = SimpleNamespace(inputs=[], status=200, url="")
+    state = SimpleNamespace(inputs=[], status=200, reason="", url="")
 
     class _Handler(http.server.BaseHTTPRequestHandler):
         def do_POST(self) -> None:
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             state.inputs.extend(body["input"])
             if state.status != 200:
-                self.send_response(state.status)
+                self.send_response(state.status, state.reason or None)
                 self.end_headers()
                 return
             vectors = [[float("jane" in t.lower()), float("bob" in t.lower()), 0.1] for t in body["input"]]
@@ -6635,12 +6634,9 @@ def embed_server() -> Any:
 
         def log_message(self, *_a: Any) -> None: ...
 
-    server = http.server.HTTPServer(("127.0.0.1", 0), _Handler)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    state.url = f"http://127.0.0.1:{server.server_address[1]}"
-    yield state
-    server.shutdown()
-    server.server_close()
+    with _serve(_Handler) as base_url:
+        state.url = base_url
+        yield state
 
 
 def _mounted_wiki(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, embed_url: str) -> pathlib.Path:
@@ -6663,6 +6659,13 @@ def test_wiki_refresh_embeds_only_the_chunks_it_has_no_vector_for(
     assert embed_server.inputs == ["title: Jane Doe | text: Prefers 30-minute video calls before noon Eastern.",
                                    "title: Bob Li | text: Allergic to shellfish."]
     first = stored.read_bytes()
+    jane_key = hashlib.sha256(
+        ("embeddinggemma:256\n" + "title: Jane Doe | text: Prefers 30-minute video calls before noon Eastern.")
+        .encode()
+    ).hexdigest()
+    jane_vector = struct.unpack("<3f", base64.b64decode(json.loads(first)["vectors"][jane_key]))
+    norm = (1**2 + 0**2 + 0.1**2) ** 0.5
+    assert jane_vector == pytest.approx([1 / norm, 0, 0.1 / norm])
 
     embed_server.inputs.clear()
     module._refresh_wiki()
@@ -6682,18 +6685,27 @@ def test_wiki_refresh_embeds_only_the_chunks_it_has_no_vector_for(
 def test_a_failed_wiki_refresh_keeps_the_last_corpus_and_logs_nothing_from_the_wiki(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, embed_server: Any, caplog: pytest.LogCaptureFixture
 ) -> None:
+    """A failed refresh is logged by exception TYPE only. A secret-shaped
+    string riding the embedder's own error response -- here its HTTP reason
+    phrase, which lands in the raised HTTPError's message -- must never reach
+    the persisted log line."""
     module = _load(monkeypatch, tmp_path)
     wiki = _mounted_wiki(monkeypatch, tmp_path, embed_server.url)
     module._refresh_wiki()
     corpus = module._wiki["corpus"]
-    (wiki / ".wiki" / "chunks.json").write_text('{"chunks": [{"page": "sk-from-the-wiki-abcdefgh"')
+
+    edited = json.loads(json.dumps(_WIKI_CHUNKS))
+    edited["chunks"][1]["text"] = "Allergic to peanuts."
+    (wiki / ".wiki" / "chunks.json").write_text(json.dumps(edited))
+    embed_server.status = 500
+    embed_server.reason = "sk-planted-by-the-embedder-abcdefgh"
     with caplog.at_level("INFO"):
         module._refresh_wiki()
     assert module._wiki["corpus"] is corpus
-    assert "JSONDecodeError" in caplog.text and "sk-from-the-wiki" not in caplog.text
+    assert "HTTPError" in caplog.text and "sk-planted-by-the-embedder" not in caplog.text
 
 
-def test_a_wiki_that_was_never_indexed_is_an_empty_corpus(
+def test_a_wiki_whose_index_is_gone_has_no_corpus(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, embed_server: Any
 ) -> None:
     module = _load(monkeypatch, tmp_path)
