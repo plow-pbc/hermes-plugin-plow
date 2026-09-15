@@ -3425,8 +3425,12 @@ def _embed(inputs: list[str]) -> list[tuple[float, ...]]:
                        "dimensions": WIKI_EMBED_DIMS, "keep_alive": "24h"}).encode()
     req = urllib.request.Request(os.environ["PLOW_WIKI_EMBED_URL"].rstrip("/") + "/api/embed", data=body,
                                  method="POST", headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=WIKI_EMBED_TIMEOUT_S) as resp:
-        vectors = json.loads(resp.read())["embeddings"]
+    try:
+        with urllib.request.urlopen(req, timeout=WIKI_EMBED_TIMEOUT_S) as resp:
+            vectors = json.loads(resp.read())["embeddings"]
+    except urllib.error.HTTPError as e:
+        # Status only: the reason is the embedder's text, and Hermes logs a failing hook's error.
+        raise RuntimeError(f"embedder answered HTTP {e.code}") from None
     if len(vectors) != len(inputs):
         raise RuntimeError(f"embedded {len(vectors)} of {len(inputs)} inputs")
     return [tuple(x / (math.sqrt(sum(y * y for y in v)) or 1.0) for x in v) for v in vectors]
@@ -3440,7 +3444,10 @@ def _load_wiki_corpus() -> dict[str, Any] | None:
     index = json.loads(raw)
     documents = [f"title: {c['title']} | text: {c['text']}" for c in index["chunks"]]
     keys = [hashlib.sha256(f"{WIKI_EMBED_MODEL}:{WIKI_EMBED_DIMS}\n{d}".encode()).hexdigest() for d in documents]
-    stored = json.loads(_wiki_read(WIKI_EMBEDDINGS_PATH) or '{"vectors": {}}')["vectors"]
+    try:  # absent, or torn by a write the relay does not make atomic: a cache miss, rebuilt below
+        stored = json.loads(_wiki_read(WIKI_EMBEDDINGS_PATH) or "")["vectors"]
+    except (ValueError, KeyError, TypeError):
+        stored = {}
     changed = stored.keys() != set(keys)  # a key added or gone since the file was last written
     pending = [(k, d) for k, d in zip(keys, documents) if k not in stored]
     for start in range(0, len(pending), WIKI_EMBED_BATCH):

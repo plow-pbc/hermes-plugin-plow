@@ -22,6 +22,7 @@ import struct
 import sys
 import threading
 import time
+import traceback
 import types
 import urllib.error
 from dataclasses import dataclass
@@ -6706,6 +6707,12 @@ def test_wiki_refresh_embeds_only_the_chunks_it_has_no_vector_for(
     assert [c["text"] for c in module._wiki["corpus"]["chunks"]] == [
         "Prefers 30-minute video calls before noon Eastern.", "Allergic to peanuts."]
 
+    # A torn write (the relay's writeFile is not atomic) is a cache miss, rebuilt, never a stuck agent.
+    mac_wiki[stored] = mac_wiki[stored][:40]
+    embed_server.inputs.clear()
+    module._refresh_wiki()
+    assert len(embed_server.inputs) == 2 and len(json.loads(mac_wiki[stored])["vectors"]) == 2
+
 
 def test_a_failed_wiki_refresh_keeps_the_last_corpus_and_logs_nothing_from_the_wiki(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, embed_server: Any, mac_wiki: dict[str, str],
@@ -6727,7 +6734,7 @@ def test_a_failed_wiki_refresh_keeps_the_last_corpus_and_logs_nothing_from_the_w
     with caplog.at_level("INFO"):
         module._refresh_wiki()
     assert module._wiki["corpus"] is corpus
-    assert "HTTPError" in caplog.text and "sk-planted-by-the-embedder" not in caplog.text
+    assert "RuntimeError" in caplog.text and "sk-planted-by-the-embedder" not in caplog.text
 
 
 def test_a_wiki_whose_index_is_gone_has_no_corpus(
@@ -6814,10 +6821,13 @@ def test_wiki_recall_raises_when_the_turn_cannot_be_embedded(
     module = _load(monkeypatch, tmp_path)
     module._refresh_wiki()
     embed_server.status = 500
+    embed_server.reason = "echo-of-the-owners-turn"  # an embedder reflecting what it was sent
     module._ACTIVE_TURN.set(_OWNER_DM)
-    with pytest.raises(urllib.error.HTTPError):
+    with pytest.raises(RuntimeError, match="HTTP 500") as excinfo:
         module._wiki_recall(session_id="s", user_message="When does Jane like to meet for a call?",
                             platform=module.PLATFORM_NAME)
+    # What Hermes logs for a failing hook -- the error and its traceback -- carries none of the reason.
+    assert "echo-of-the-owners-turn" not in "".join(traceback.format_exception(excinfo.value))
 
 
 def test_wiki_recall_reaches_for_the_agents_own_last_words_when_the_reply_is_thin(
