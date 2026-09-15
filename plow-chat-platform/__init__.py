@@ -3272,11 +3272,20 @@ _RECALL_TOKEN_LIMIT = 16
 # How far back to look for the agent's own last words. A previous turn's final
 # message is a row or three back; ten covers the tool calls in between.
 _RECALL_TAIL_SCAN = 10
-# messages_fts indexes `tool_calls` alongside `content`, and snippet() renders
-# whichever column it likes best -- so a row can match on its prose and still
-# come back as tool-call JSON. The column filter in _recall_query stops the
-# matching; this stops the rendering.
-_RECALL_PAYLOAD = re.compile(r'"(?:call_id|response_item_id|arguments|tool_call_id)"\s*:')
+# Two kinds of snippet window that are not what anyone said. messages_fts
+# indexes `tool_calls` alongside `content`, and snippet() renders whichever
+# column it likes best -- so a row can match on its prose and still come back
+# as tool-call JSON; the column filter in _recall_query stops the matching,
+# this stops the rendering. And a group turn's content OPENS with its
+# untrusted roster block, so a word that matches inside it ("Spruce") renders
+# the label with a few words of message behind it: six "Spruce represents
+# Daniel" labels under Sam's question told Elm its owner had no Spruce line
+# (2026-09-15). The vocabulary is this module's own (_untrusted,
+# _collaboration_turn_context), so the match is exact, and a 40-token window
+# that overlaps a label has too little message left to be worth recalling.
+_RECALL_NOISE = re.compile(
+    r'"(?:call_id|response_item_id|arguments|tool_call_id)"\s*:'
+    r"|\[Untrusted |" + re.escape(_UNTRUSTED_MARK) + r"|Agent mappings: |Current speaker: ")
 
 
 def _recall_body(text):
@@ -3363,7 +3372,7 @@ def _recall(session_id, user_message, platform, **_kwargs):
         for row in rows:
             if row["session_id"] == session_id:
                 continue
-            if _RECALL_PAYLOAD.search(row["snippet"]):
+            if _RECALL_NOISE.search(row["snippet"]):
                 continue
             if not everywhere:
                 session = db.get_session(row["session_id"]) or {}
