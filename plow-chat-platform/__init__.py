@@ -4267,7 +4267,7 @@ def _plow_name_contact(args, **_kwargs):
 
     Keyed by handle, so the owner's contact book reaches anyone they can name --
     a member of this chat, someone in another thread, or the owner themselves.
-    A display name may be written on any active turn: it comes from the owner's
+    A display name may be written on any active turn whose roster seats the owner: it comes from the owner's
     ask, the owner's own contacts, or the person naming their own handle, and
     a wrong one costs a label -- except the owner's own handle, which only the
     owner names. A relationship is who someone is TO the owner, so it keeps the
@@ -4324,7 +4324,8 @@ PLOW_NAME_CONTACT_SCHEMA = {
         "Record what your owner calls a person, and who that person is to your "
         "owner (e.g. \"wife\", \"landlord\"). A display_name comes from your owner's "
         "ask, your owner's own contacts, or what a person says about their own "
-        "handle, and may be recorded on any active turn without asking; a "
+        "handle, and may be recorded without asking on any active turn whose "
+        "roster seats your owner; a "
         "relationship is who they are to your owner and needs your owner's own turn. "
         "People are keyed by handle, so this reaches anyone your owner can name, in "
         "this chat or not, and a phone and an email for the same person each take "

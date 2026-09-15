@@ -455,9 +455,10 @@ to the owner — `wife`, `landlord` — through `plow_name_contact`, which `PUT`
 `/v1/contacts/{handle}`. The book is keyed by handle, not by chat, so one name
 follows the person into every thread they are in; naming the owner's own handle
 sets their account name, and a relationship on their own handle is refused.
-A display name may be recorded on any active turn — it comes from the owner's
-ask, the owner's own contacts, or a person naming their own handle — while a
-relationship needs the owner's own turn; no active turn at all writes nothing.
+A display name may be recorded on any active turn whose roster seats the
+owner — it comes from the owner's ask, the owner's own contacts, or a person
+naming their own handle — while a relationship needs the owner's own turn; no
+active turn at all, or a member's turn on a roster with no owner, writes nothing.
 A relationship renders as
 `Name (handle) (relationship)` in the untrusted roster context above — where
 the owner's own row also carries `(your owner)` — never in
