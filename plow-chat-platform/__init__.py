@@ -3423,6 +3423,8 @@ def _embed(inputs: list[str]) -> list[tuple[float, ...]]:
                                  method="POST", headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=WIKI_EMBED_TIMEOUT_S) as resp:
         vectors = json.loads(resp.read())["embeddings"]
+    if len(vectors) != len(inputs):
+        raise RuntimeError(f"embedded {len(vectors)} of {len(inputs)} inputs")
     return [tuple(x / (math.sqrt(sum(y * y for y in v)) or 1.0) for x in v) for v in vectors]
 
 
