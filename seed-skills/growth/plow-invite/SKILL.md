@@ -44,8 +44,7 @@ Read its result:
 - `skipped: deferred_consent_unavailable`: this host cannot ask the owner.
   Reply naturally, with no invite.
 - `sent_in_thread`: Plow wrote the invite into this thread, and that text is
-  your reply for this turn. Anything more you write in this chat this turn is
-  not delivered.
+  your whole reply for this turn. Do not add a follow-up about the invite.
 
 The owner's standing answer is recorded by
 `python3 <this skill's dir>/scripts/mint_invite.py --consent granted` or
