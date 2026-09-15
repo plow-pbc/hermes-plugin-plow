@@ -27,12 +27,22 @@ The directory is named for the plugin id so the install can be a directory copy:
 > as possibly-delivered and declines the retry that would have worked. It fails
 > safe, never sending a duplicate, but deploy that API change before pinning
 > this plugin or recoverable invites are silently dropped.
+> A sent invite requires the send endpoint's response to carry
+> `{"status":"sent","sent":[{"message_id","body"}]}`
+> ([`plow-pbc/plow#1974`](https://github.com/plow-pbc/plow/issues/1974)): against
+> an older API the plugin reads the send as delivery-unknown and never silences
+> the turn, so that API change deploys before `PLOW_CHAT_PLUGIN_SHA` moves.
 > This plugin also requires a Plow API that serves agent-invite consent,
 > `/v1/auth/agent-invites/opportunities`,
 > `/v1/auth/agent-invites/opportunities/{opportunity_uid}/send`,
-> `POST /v1/chats` (outbound thread creation — `plow_start_group_message`
+> `POST /v1/chats` (outbound thread creation — `plow_send_message`'s person-targeting
 > 404s against an older API, so that API change deploys before any
-> `agent-mgr` SHA advance), and
+> `agent-mgr` SHA advance),
+> `POST /v1/email-lines/{uid}/messages` (an email address in `plow_send_message`'s `to`,
+> with a `subject`, goes out from the mailbox that shares this agent's persona; the API
+> seats the owner in `cc` from the credential, so the plugin sends none — deploy
+> [`plow-pbc/plow#1959`](https://github.com/plow-pbc/plow/pull/1959), which does that
+> seating, before this plugin SHA is pinned, or every new email is refused with a 403), and
 > `PUT /v1/contacts/{handle}` (`plow_name_contact` — the handle-keyed contact
 > book, superseding the per-participant contact route of
 > [`plow-pbc/plow#1752`](https://github.com/plow-pbc/plow/pull/1752),
@@ -119,6 +129,8 @@ URL in git.
 | `PLOW_HOME_CHANNEL` | yes | the home chat, `cht_…` — where cron and default output land, and must be a phone-line chat (the line's `provider_type` is `imessage`). Must be inside the credential's grant; a grant without it refuses to connect |
 | `PLOW_API_BASE` | no | API base, default `https://api.plow.co` (no `/v1` suffix) |
 | `PLOW_MCP_URL` | no | the Mac relay URL plow-init exports when the account has a Mac; when set, the plugin adds a system-prompt section that makes the Mac the default for owner work |
+| `PLOW_WIKI_EMBED_URL` | no | Ollama base URL that embeds the owner's wiki for recall (e.g. `http://<ollama-host>:11434`); with `PLOW_MCP_URL` set, turns in the owner's DM and trusted rooms carry the nearest wiki facts |
+| `WIKI_WRITER` | no | this agent's writer name in the wiki's `wiki.toml`; wiki recall reaches `shared` roots plus the roots this agent writes — unset reaches `shared` roots only |
 
 Diagnostics — agent status frames, 💾 background-review posts, ⏳ long-running
 heartbeats, ⚠️ turn-stop warnings — are dropped in **every** room unless the
@@ -165,12 +177,13 @@ that named the token on every turn marked a solo owner DM silent-capable and
 would have swallowed an owner's answer that happened to end in it.
 
 One exception rides with it: a tool that *posts* to the chat is itself the
-answer. A successful `plow_send_sequence` has already delivered the turn's
-reply, so the guard drops the prose that follows — the rule says so, or a
-model that finished its tools first would have its answer suppressed. That
-drop is lifted again by a later message or goal wake for the same chat: once
-one arrives the lifecycle is ambiguous, and a duplicated line of intro prose
-is the price of never losing the reply the wake was queued for.
+answer. A successful `plow_send_sequence` and a `plow_offer_invite` that sent
+the invite have each already delivered the turn's reply, so the guard drops
+the prose that follows — the rule says so, or a model that finished its tools
+first would have its answer suppressed. That drop is lifted again by a later
+message or goal wake for the same chat: once one arrives the lifecycle is
+ambiguous, and a duplicated line of intro prose is the price of never losing
+the reply the wake was queued for.
 
 `plugin.yaml` is the authority on this list; the table is a reader's summary.
 
@@ -180,10 +193,10 @@ every reconnect. Per-chat checkpoints persist under the agent home, and a
 reconnect backfills each granted chat from its checkpoint, so a socket gap
 drops nothing.
 
-An agent's first-ever connect (no home checkpoint yet) hands hermes one setup
-turn in the home chat, signed by Plow, not the owner, and free to end in
-`NO_REPLY`: where the owner's world is (their Mac, through Latch), who the agent
-is, and how it behaves among the owner's people, saved as its own memory note.
+Each process start hands hermes one wakeup turn in the home chat, signed by Plow,
+not the owner, and free to end in `NO_REPLY`: the agent just came online, on its
+first boot (no home checkpoint yet) or a restart. The plugin sends nothing of its
+own at boot; what the agent says, if anything, is its own.
 
 One person's rapid-fire messages are one turn: inbound is buffered per chat
 for a 2s window that resets on each arrival — iMessage's bubble + link-preview
@@ -250,9 +263,13 @@ merchant — begins with discretion, as does a group another member starts. Only
 the owner can change that later.
 
 The `plow_set_conversation_trusted` tool writes the same API preference as the
-dashboard; opening a trusted thread is owner-only too. Both only succeed on an owner-
-authored Plow Chat turn where the model passes `confirm=true` for an explicit owner
-request. Member turns and calls outside an active chat turn cannot change either.
+dashboard; it only succeeds on an owner-authored Plow Chat turn where the model
+passes `confirm=true` for an explicit owner request. Opening a trusted thread is
+owner-only too, through `plow_send_message(..., trusted=true)` on an owner turn —
+no `confirm` there. `trusted` applies only to a group being created; opening onto
+an existing thread adopts that thread's own trust, and the returned value is
+authoritative. It has nothing to say about an email address in `to` — no group is
+created there, so it is ignored rather than gated. Member turns and calls outside an active chat turn cannot change either.
 
 This plugin version requires a Plow API that publishes the required `trusted`
 chat field and `PUT /v1/chats/{uid}/trusted`. Deploy that API first: against an
@@ -267,7 +284,8 @@ A is invisible to chat B's next turn unless it is recorded there. The
 `plow_send_message` tool is the one sanctioned way to post cross-chat; it goes
 through the adapter's `send()` like every other outbound message (the grant,
 and the confinement of a turn without the owner's authority, apply exactly as
-for a reply). `plow_list_chats` is where its `cht_` id comes from: a live `GET
+for a reply). `plow_send_message` with `action=list` is where its `cht_` id
+comes from: a live `GET
 /v1/chats` — the same read that establishes reach, so the credential's grant
 is the whole listing — reduced to
 id, kind, title, the humans by name and handle, and trust. Only `active` rooms
@@ -289,7 +307,7 @@ for cron and `hermes send` deliveries — on the delivery's own coroutine, so a
 caller that stopped waiting cannot strand a delivered message unrecorded. A
 chat's session is born on its first inbound message, so a chat that has never
 spoken has nowhere to record to: the adapter logs a warning and that chat
-will not remember the send. A thread `plow_start_group_message` created is
+will not remember the send. A thread `plow_send_message` opened for a person is
 in that state; one it resumed is handled like any other cross-chat send,
 which records the opener only where a session already exists (a thread
 resumed before anyone replied has none, and logs the same warning). Posting
@@ -324,6 +342,22 @@ holds matches; that ceiling is deliberate until it is felt. Hermes stamps
 injected context onto the turn's wire copy and replays it for the life of
 the session, so a snippet recalled once stays in that session's context
 afterwards.
+
+### Recall from the owner's wiki
+
+With `PLOW_WIKI_EMBED_URL` and `PLOW_MCP_URL` set, a second `pre_llm_call`
+hook appends up to five of the owner's wiki facts nearest the turn, by
+embedding, to turns where recall reaches every chat (the owner's DM, a trusted
+room). `wiki index` writes the facts to `.wiki/chunks.json`; a background
+refresh embeds any fact it has no vector for and stores the vectors in
+`~/Plow/wiki.recall/embeddings.json`, beside the wiki rather than inside it so
+`wiki snapshot` never commits them, so agents sharing a wiki share its vectors —
+every agent embeds every chunk, whether or not it may recall it. A refresh
+that cannot reach the wiki or the embedder keeps the last corpus, and the
+block says when it was synced. The turn's own embedding is not caught: a
+failure is logged by Hermes and the turn keeps chat recall. Each wiki chunk is
+stamped with its root's writer; see `WIKI_WRITER` above for which roots a
+turn recalls.
 
 ### What a group thread is called
 

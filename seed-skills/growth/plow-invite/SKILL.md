@@ -1,7 +1,7 @@
 ---
 name: plow-invite
 description: When someone who is not your owner shows genuine interest in Plow or asks how to get an agent of their own, offer them one.
-version: 1.5.0
+version: 1.6.0
 ---
 
 # Plow invite: delight-triggered referral
@@ -43,11 +43,8 @@ Read its result:
   that is yours to answer.
 - `skipped: deferred_consent_unavailable`: this host cannot ask the owner.
   Reply naturally, with no invite.
-- `invite_status`: the invite went out in this thread, written by Plow. Do
-  not echo it, restate the phrase, or add a number of your own. Do not
-  announce that you sent it or tell them to check their messages. It is
-  already here in this thread, so a follow-up like "just sent you an invite,
-  check your messages" only confuses them.
+- `sent_in_thread`: Plow wrote the invite into this thread, and that text is
+  your whole reply for this turn. Do not add a follow-up about the invite.
 
 The owner's standing answer is recorded by
 `python3 <this skill's dir>/scripts/mint_invite.py --consent granted` or

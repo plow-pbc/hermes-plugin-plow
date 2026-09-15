@@ -1,7 +1,7 @@
 ---
 name: google-workspace
 description: "Gmail and Google Calendar through the owner's Mac."
-version: 2.4.0
+version: 2.5.0
 ---
 
 # Google Workspace — through the owner's Mac
@@ -21,8 +21,14 @@ Mac-managed instances):
    only source for the command and its arguments — do not carry a
    spelling from memory or from this file. The Mac mints its own
    short-lived Google token; you never see or need one.
-2. Sending an email needs a turn with the owner's authority — the owner
-   anywhere, or a human in a group the owner trusts. On such a turn the
+2. A new email you send as yourself is not `gmail send` at all: use
+   `plow_send_message` with the address in `to` and a `subject`, and it
+   leaves from your own mailbox with your owner copied, under the same
+   authority a text needs and with no approval card. `gmail send` below
+   is only for mail your owner wants out of their own account.
+3. Sending an email from your owner's account needs a turn with the
+   owner's authority — the owner anywhere, or a human in a group the
+   owner trusts. On such a turn the
    gateway posts the command into that same room and waits for
    `/approve`, which anyone there may answer. Compose the whole message
    — recipients, subject, body — in the one `gmail send` command; that
@@ -33,7 +39,7 @@ Mac-managed instances):
    human in a trusted group, to make the request. Any other command may
    show the owner an approval card on their Mac; if it hangs, it is
    waiting there, and a refusal there is a denial on the Mac.
-3. Calendar conflicts are yours to judge, not something a chat approves.
+4. Calendar conflicts are yours to judge, not something a chat approves.
    A calendar create that overlaps an existing commitment is refused,
    never queued for approval: the check covers every connected account,
    and the refusal comes back to you. To book anyway, re-send the same
@@ -50,7 +56,7 @@ Mac-managed instances):
    with the owner's authority can fix a time, so from any other turn the
    override is blocked and nothing is booked — ask the owner, or a human
    in a trusted group, to confirm.
-4. If a connected MCP server lists no `google-workspace` skill, Google is
+5. If a connected MCP server lists no `google-workspace` skill, Google is
    not available to this agent. Say exactly that — do not fall back to
    local OAuth. If no MCP server with `plow_*` tools is connected at all,
    that is not the same thing: Latch is unreachable, so say the owner's Mac

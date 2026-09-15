@@ -36,3 +36,13 @@ optional_env:
     prompt: "Plow Mac relay URL"
     secret: false
     password: false
+  - name: PLOW_WIKI_EMBED_URL
+    description: "Ollama base URL that embeds the owner's wiki for recall (e.g. http://<ollama-host>:11434). With PLOW_MCP_URL set, turns in the owner's DM and trusted rooms carry the nearest wiki facts"
+    prompt: "Wiki embedding server URL"
+    secret: false
+    password: false
+  - name: WIKI_WRITER
+    description: "This agent's writer name in the wiki's wiki.toml; wiki recall reaches shared roots plus the roots this agent writes. Unset: shared roots only"
+    prompt: "This agent's wiki writer name"
+    secret: false
+    password: false
