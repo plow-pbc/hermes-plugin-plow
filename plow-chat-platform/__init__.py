@@ -3485,15 +3485,15 @@ _WIKI_END = "(end of wiki facts)"
 
 def _wiki_recall(session_id, user_message, platform, **_kwargs):
     """pre_llm_call: the owner's wiki facts nearest this turn, appended to the
-    user message like chat recall, and only where recall reaches every chat:
-    the owner's DM or a trusted room -- the wiki is owner material. A separate
-    hook from `_recall`, so an embedding failure (raised, logged by Hermes)
-    never silences chat recall. The corpus is whatever the background refresh
-    last loaded; a sleeping Mac serves the last one, and the block says when it
-    was synced. Ranks only `shared` roots and `WIKI_WRITER`'s own, at query
-    time so every agent's embeddings.json key set stays identical."""
+    user message like chat recall, on every Plow Chat turn: what the agent may
+    share is the room's prompt's decision (the discretion rule), not what it
+    knows. A separate hook from `_recall`, so an embedding failure (raised,
+    logged by Hermes) never silences chat recall. The corpus is whatever the
+    background refresh last loaded; a sleeping Mac serves the last one, and the
+    block says when it was synced. Ranks only `shared` roots and `WIKI_WRITER`'s
+    own, at query time so every agent's embeddings.json key set stays identical."""
     turn = _ACTIVE_TURN.get()
-    if platform != PLATFORM_NAME or turn is None or not turn["recall_everywhere"]:
+    if platform != PLATFORM_NAME or turn is None:
         return None
     _kick_refresh(_wiki, _refresh_wiki, "plow-wiki-recall")
     with _wiki["lock"]:
