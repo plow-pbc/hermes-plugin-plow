@@ -14,7 +14,6 @@ import json
 import logging
 import math
 import mimetypes
-import operator
 import os
 import pathlib
 import re
@@ -3543,7 +3542,12 @@ def _wiki_recall(session_id, user_message, platform, **_kwargs):
     if not query.strip():
         return None
     [vector] = _embed([f"task: search result | query: {query}"])
-    ranked = sorted(((sum(map(operator.mul, vector, corpus["vectors"][i])), i) for i in allowed), reverse=True)
+    # zip(strict=True): a corpus vector embedded at a different dimension --
+    # a stored vector predating a WIKI_EMBED_DIMS change, or an embed server
+    # that ignored the request's `dimensions` -- must raise, not have map()
+    # silently score a truncated prefix as a plausible-looking match.
+    ranked = sorted(((sum(x * y for x, y in zip(vector, corpus["vectors"][i], strict=True)), i) for i in allowed),
+                    reverse=True)
     hits = [corpus["chunks"][i] for score, i in ranked[:WIKI_RECALL_LIMIT] if score >= WIKI_RECALL_MIN_SCORE]
     if not hits:
         return None

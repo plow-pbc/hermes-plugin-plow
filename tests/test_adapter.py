@@ -6852,6 +6852,23 @@ def test_wiki_recall_raises_when_the_turn_cannot_be_embedded(
                             platform=module.PLATFORM_NAME)
 
 
+def test_wiki_recall_raises_on_a_corpus_vector_of_the_wrong_dimension(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, embed_server: Any
+) -> None:
+    """A stored vector at a different dimension than the turn's own -- predating
+    a WIKI_EMBED_DIMS change, or from an embed server that ignored the
+    request's `dimensions` -- must raise, never let a truncated dot product
+    score it as a plausible-looking match."""
+    module = _load(monkeypatch, tmp_path)
+    _mounted_wiki(monkeypatch, tmp_path, embed_server.url)
+    module._refresh_wiki()
+    module._wiki["corpus"]["vectors"] = [v + (0.0,) for v in module._wiki["corpus"]["vectors"]]
+    module._ACTIVE_TURN.set(_OWNER_DM)
+    with pytest.raises(ValueError):
+        module._wiki_recall(session_id="s", user_message="When does Jane like to meet for a call?",
+                            platform=module.PLATFORM_NAME)
+
+
 def test_wiki_recall_reaches_for_the_agents_own_last_words_when_the_reply_is_thin(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, embed_server: Any
 ) -> None:
