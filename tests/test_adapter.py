@@ -2514,13 +2514,25 @@ def test_external_turn_prompt_carries_disclosure_no_relay_and_ownership(monkeypa
     assert module._AUTHORITY not in prompt
 
 
+@pytest.mark.parametrize("role, authority", [("owner", True), ("member", False), ("member", True)])
+def test_channel_prompt_keeps_invites_member_only_and_never_requests_secrets(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, role: str, authority: bool,
+) -> None:
+    module = _load(monkeypatch, tmp_path)
+    chat = _chat("cht_a", group=True, trusted=authority)
+    prompt = module._channel_prompt({**chat, "type": "group"}, role, chat, IDENTITY, authority)
+    for marker in ("plow_offer_invite", "never give them a number or phrase yourself"):
+        assert (marker in prompt) == (role == "member")
+    assert "or ask for a standing secret" in prompt
+
+
 @pytest.mark.parametrize("owner_name", [None, "Sam"])
 def test_routine_owner_dm_prompt_is_short_and_keeps_authority(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, owner_name: str | None,
 ) -> None:
     module = _load(monkeypatch, tmp_path)
     chat = _chat("cht_a", owner_name=owner_name)
-    prompt = module._channel_prompt({**chat, "type": "dm"}, "owner", chat, module._NO_IDENTITY, True)
+    prompt = module._channel_prompt({**chat, "type": "dm"}, "owner", chat, IDENTITY, True)
     assert len(prompt.split()) < 120
     for marker in ("Plow assistant", "owner is speaking", "full authority", "this chat",
                    "plow_send_message", "standing secret", "password", "backup code",
