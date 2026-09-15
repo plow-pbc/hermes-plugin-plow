@@ -6678,7 +6678,7 @@ def test_wiki_refresh_embeds_only_the_chunks_it_has_no_vector_for(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, embed_server: Any, mac_wiki: dict[str, str]
 ) -> None:
     module = _load(monkeypatch, tmp_path)
-    stored = "~/Plow/wiki/.wiki/embeddings.json"
+    stored = "~/Plow/wiki.recall/embeddings.json"  # beside the wiki, not in it: wiki snapshot never carries it
 
     module._refresh_wiki()
     assert embed_server.inputs == ["title: Jane Doe | text: Prefers 30-minute video calls before noon Eastern.",

@@ -349,8 +349,9 @@ With `PLOW_WIKI_EMBED_URL` and `PLOW_MCP_URL` set, a second `pre_llm_call`
 hook appends up to five of the owner's wiki facts nearest the turn, by
 embedding, to turns where recall reaches every chat (the owner's DM, a trusted
 room). `wiki index` writes the facts to `.wiki/chunks.json`; a background
-refresh embeds any fact it has no vector for and stores the vectors beside the
-wiki in `.wiki/embeddings.json`, so agents sharing a wiki share its vectors —
+refresh embeds any fact it has no vector for and stores the vectors in
+`~/Plow/wiki.recall/embeddings.json`, beside the wiki rather than inside it so
+`wiki snapshot` never commits them, so agents sharing a wiki share its vectors —
 every agent embeds every chunk, whether or not it may recall it. A refresh
 that cannot reach the wiki or the embedder keeps the last corpus, and the
 block says when it was synced. The turn's own embedding is not caught: a

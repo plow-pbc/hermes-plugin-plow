@@ -3384,11 +3384,13 @@ def _recall(session_id, user_message, platform, **_kwargs):
 
 
 # Wiki recall (hermes-plugin-plow#174): the owner's wiki facts nearest the turn,
-# by embedding. `wiki index` writes the facts to <wiki>/.wiki/chunks.json; this
-# refresh embeds any fact it has no vector for and keeps the vectors next to the
-# wiki, in embeddings.json, so every agent on that machine shares them and the
-# embedding service only computes. The service is wakeup's Ollama for now
-# (tailnet only); plow-pbc/plow#1938 replaces it. `/api/embed`, not
+# by embedding. `wiki index` writes the facts to <wiki>/.wiki/chunks.json, a
+# generated file inside the wiki like any page. This refresh embeds any fact it
+# has no vector for and keeps the vectors beside the wiki, not in it, in
+# <wiki>.recall/embeddings.json -- plugin-owned megabytes of base64 that
+# `wiki snapshot` must never carry -- so every agent on that machine shares
+# them and the embedding service only computes. The service is wakeup's Ollama
+# for now (tailnet only); plow-pbc/plow#1938 replaces it. `/api/embed`, not
 # `/v1/embeddings`: only the native endpoint honours keep_alive, and without it
 # the first turn after five idle minutes waited 2-5 s for a model load.
 WIKI_EMBED_MODEL = "embeddinggemma"
@@ -3396,24 +3398,26 @@ WIKI_EMBED_DIMS = 256  # trained to truncate; keeps embeddings.json under the re
 WIKI_EMBED_BATCH = 64
 WIKI_EMBED_TIMEOUT_S = 20.0  # under Hermes' 30 s bounded-hook timeout
 WIKI_RELAY_ROOT = "~/Plow/wiki"
+WIKI_CHUNKS_PATH = f"{WIKI_RELAY_ROOT}/.wiki/chunks.json"
+WIKI_EMBEDDINGS_PATH = f"{WIKI_RELAY_ROOT}.recall/embeddings.json"  # sibling of the wiki: never snapshotted
 WIKI_RELAY_TIMEOUT_S = 20.0  # Latch's relay timeout
 _wiki: dict[str, Any] = {"corpus": None, "fetched_at": 0.0, "tried_at": 0.0, "lock": threading.Lock()}
 
 
-def _wiki_read(name: str) -> str | None:
-    """A `.wiki/` file's text, or None when the wiki has none."""
+def _wiki_read(path: str) -> str | None:
+    """A relay file's text, or None when it doesn't exist."""
     try:
         return _relay_call(os.environ["PLOW_MCP_URL"], os.environ["PLOW_AGENT_TOKEN"], "plow_read_file",
-                           {"path": f"{WIKI_RELAY_ROOT}/.wiki/{name}"}, WIKI_RELAY_TIMEOUT_S)["content"]
+                           {"path": path}, WIKI_RELAY_TIMEOUT_S)["content"]
     except _RelayToolError as e:
         if e.args[0] == "not_found":
             return None
         raise
 
 
-def _wiki_write(name: str, text: str) -> None:
+def _wiki_write(path: str, text: str) -> None:
     _relay_call(os.environ["PLOW_MCP_URL"], os.environ["PLOW_AGENT_TOKEN"], "plow_write_file",
-                {"path": f"{WIKI_RELAY_ROOT}/.wiki/{name}", "content": text}, WIKI_RELAY_TIMEOUT_S)
+                {"path": path, "content": text}, WIKI_RELAY_TIMEOUT_S)
 
 
 def _embed(inputs: list[str]) -> list[tuple[float, ...]]:
@@ -3429,14 +3433,14 @@ def _embed(inputs: list[str]) -> list[tuple[float, ...]]:
 
 
 def _load_wiki_corpus() -> dict[str, Any] | None:
-    raw = _wiki_read("chunks.json")
+    raw = _wiki_read(WIKI_CHUNKS_PATH)
     if raw is None:
         log.info("plow_chat: the wiki has no .wiki/chunks.json (run `wiki index`); no wiki recall")
         return None
     index = json.loads(raw)
     documents = [f"title: {c['title']} | text: {c['text']}" for c in index["chunks"]]
     keys = [hashlib.sha256(f"{WIKI_EMBED_MODEL}:{WIKI_EMBED_DIMS}\n{d}".encode()).hexdigest() for d in documents]
-    stored = json.loads(_wiki_read("embeddings.json") or '{"vectors": {}}')["vectors"]
+    stored = json.loads(_wiki_read(WIKI_EMBEDDINGS_PATH) or '{"vectors": {}}')["vectors"]
     changed = stored.keys() != set(keys)  # a key added or gone since the file was last written
     pending = [(k, d) for k, d in zip(keys, documents) if k not in stored]
     for start in range(0, len(pending), WIKI_EMBED_BATCH):
@@ -3445,7 +3449,7 @@ def _load_wiki_corpus() -> dict[str, Any] | None:
             stored[key] = base64.b64encode(struct.pack(f"<{len(vector)}f", *vector)).decode()
     kept = {k: stored[k] for k in sorted(set(keys))}
     if changed:
-        _wiki_write("embeddings.json", json.dumps({"vectors": kept}, separators=(",", ":")))
+        _wiki_write(WIKI_EMBEDDINGS_PATH, json.dumps({"vectors": kept}, separators=(",", ":")))
     vectors = [struct.unpack(f"<{len(b) // 4}f", b) for b in map(base64.b64decode, (kept[k] for k in keys))]
     return {"updated": index["updated"], "chunks": index["chunks"], "vectors": vectors}
 
