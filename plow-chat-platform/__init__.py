@@ -4011,22 +4011,22 @@ def _plow_name_contact(args, **_kwargs):
 
     Keyed by handle, so the owner's contact book reaches anyone they can name --
     a member of this chat, someone in another thread, or the owner themselves.
-    Owner-turn-authorized only: fails CLOSED, like `plow_start_group_message`'s
-    trusted branch and `plow_set_conversation_trusted` -- both a member's own
-    turn and no active turn at all refuse a direct write here, so a label can
-    only ever be written by a call made on the owner's own turn. The turn is
-    read for that authority alone; the write itself is not chat-scoped.
-
-    The handle is not roster-scoped: any handle the owner names is written.
-    The owner's own turn is the whole trust boundary.
+    A display name may be written on any active turn: it comes from the owner's
+    ask, the owner's own contacts, or the person naming their own handle, and
+    a wrong one costs a label. A relationship is who someone is TO the owner,
+    so it keeps the owner's own turn as its whole trust boundary. No active turn
+    at all refuses either: a turn-less write has nobody to have asked.
     """
     turn = _ACTIVE_TURN.get()
-    if turn is None or not turn.get("owner"):
+    if turn is None:
         return json.dumps({"success": False,
-                           "error": "names come from the owner: this requires the owner's "
-                                    "own active turn, nothing was recorded"})
+                           "error": "this requires an active turn; nothing was recorded"})
     handle = str(args.get("handle") or "").strip()
     body = {k: args[k] for k in ("display_name", "relationship") if args.get(k) is not None}
+    if "relationship" in body and not turn.get("owner"):
+        return json.dumps({"success": False,
+                           "error": "a relationship comes from the owner: this requires the owner's "
+                                    "own active turn, nothing was recorded"})
     if not handle or not body:
         return json.dumps({"success": False,
                            "error": "a handle, and display_name or relationship, are required"})

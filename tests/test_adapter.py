@@ -2391,8 +2391,42 @@ def _authority_case_name_a_contact(module: Any, monkeypatch: pytest.MonkeyPatch,
         # No chat id rides along: the contact book is keyed by handle, not by room.
         assert record == [("+15550000002", {"display_name": "Abby", "relationship": "wife"})]
     else:
-        assert "owner" in out["error"]
+        assert "turn" in out["error"]
         assert record == []
+
+
+@pytest.mark.parametrize(
+    "turn",
+    [
+        pytest.param(_OWNER_DM, id="owner-dm"),
+        pytest.param(_OWNER_GROUP, id="owner-group"),
+        pytest.param(_TRUSTED_MEMBER, id="trusted-member"),
+        pytest.param(_DISCRETION_MEMBER, id="discretion-member"),
+    ],
+)
+def test_a_display_name_is_written_on_any_active_turn(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, turn: dict[str, Any],
+) -> None:
+    """What a person is called comes from the owner's ask, the owner's own
+    contacts, or the person naming their own handle -- all of which can land on
+    a member's turn. Who they are TO the owner still does not."""
+    module = _load(monkeypatch, tmp_path)
+    record: list[Any] = []
+    _live_tool(module, monkeypatch, "name_contact",
+               result={"display_name": "Andrew Lee", "relationship": None}, record=record)
+    module._ACTIVE_TURN.set(turn)
+
+    out = json.loads(module._plow_name_contact({"handle": "+15550000003", "display_name": "Andrew Lee"}))
+
+    assert out["success"] is True
+    assert record == [("+15550000003", {"display_name": "Andrew Lee"})]
+
+    record.clear()
+    out = json.loads(module._plow_name_contact(
+        {"handle": "+15550000003", "display_name": "Andrew Lee", "relationship": "investor"}))
+    assert out["success"] is turn["owner"]
+    assert record == ([("+15550000003", {"display_name": "Andrew Lee", "relationship": "investor"})]
+                      if turn["owner"] else [])
 
 
 def _authority_case_read_the_book(module: Any, monkeypatch: pytest.MonkeyPatch, turn: dict[str, Any] | None, authorized: bool) -> None:
