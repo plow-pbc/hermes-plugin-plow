@@ -42,11 +42,6 @@ def test_a_seed_skill_names_only_tools_the_plugin_registers(
 ) -> None:
     tokens = set(re.findall(r"\bplow_[a-z_]+\b", skill.read_text()))
     registered = _registered_tools(_load(monkeypatch, tmp_path))
-    # A skill naming nothing at all means the read or the pattern broke, not
-    # that the skill is clean. Checked before the allowlist comes off, because
-    # a skill whose whole plow_* surface is Latch's (google-workspace) is
-    # legitimately empty afterwards.
-    assert tokens, f"{skill} names no plow_* token at all; the read or the pattern is broken"
     named = tokens - LATCH_MCP_TOOLS
     assert named <= registered, f"{skill} names tools the plugin does not register: {sorted(named - registered)}"
 

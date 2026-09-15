@@ -168,11 +168,11 @@ write last — the running commentary, into the room the gate was protecting.
 `plow-hermes-agent`'s seed config records the same conclusion from an earlier
 attempt, measured live: a whole onboarding introduction disappeared and the
 owner's turn became *"Already saved that. Now I'll wait for her next reply."*
-The ordering is the model's to get right, and `_ANSWER_LAST` closes every
-channel prompt asking for it — appended once in `_channel_prompt`, the one seam
-both production paths go through, after the identity opener each prompt has to
-start with. Its silence half is appended only to a prompt that already
-offered the sentinel: `no_reply_ok` is read off the prompt itself, so a tail
+The ordering is the model's to get right. Output discipline belongs in the
+base image's SOUL.md; the channel prompt carries identity, authority, reply
+routing, owner-name state and sharing rules. Latch and dashboard reference
+material lives in the `plow-latch` and `plow-dashboard` seed skills. The silence
+rule is appended only to a prompt that already offered the sentinel: `no_reply_ok` is read off the prompt itself, so a tail
 that named the token on every turn marked a solo owner DM silent-capable and
 would have swallowed an owner's answer that happened to end in it.
 

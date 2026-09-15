@@ -79,17 +79,10 @@ class _SendResult:
 
 
 def _rendered(module: Any, prompt: str, name: Any, identity: Any) -> str:
-    """A channel prompt as `_channel_prompt` renders it.
-
-    Identity opens it and the answer-ordering rule closes it; the tests below
-    model both so a change to either has one place to land. The silence half of
-    that rule follows the same opt-in production uses -- a prompt that never
-    offered the sentinel must not end by reserving it.
-    """
+    """Identity opens the prompt; silence stays opt-in."""
     composed = module._with_identity(prompt, name, identity)
-    tail = (f"{module._ANSWER_LAST}{module._ANSWER_LAST_SILENCE}"
-            if module.NO_REPLY_SENTINEL in composed else module._ANSWER_LAST)
-    return f"{composed} {tail}"
+    return (f"{composed} {module._ANSWER_LAST_SILENCE}"
+            if module.NO_REPLY_SENTINEL in composed else composed)
 
 
 def _load(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, *, deferred_questions: bool = True) -> Any:
@@ -1555,11 +1548,6 @@ async def test_every_turn_prompt_opens_with_who_this_agent_is(
         assert (offer in event["channel_prompt"]) == (role == "owner")
 
 
-# The dashboard cards the prefix names, in the order it names them.
-_CARDS = ("credits and usage", "Plow lines", "full trust for group chats", "delight invites",
-          "the daily payment limit", "verbose output", "the Latch connection")
-
-
 def _assert_in_order(text: str, *fragments: str) -> None:
     """Every fragment is present, and each one after the one before it."""
     at = -1
@@ -1613,10 +1601,8 @@ def test_the_identity_prefix_says_these_things_in_this_order(
     prefix = module._with_identity("PROMPT", name, identity)
 
     assert prefix.startswith(opening)
-    _assert_in_order(prefix, opening, *filter(None, (offer,)), "call plow_offer_invite",
-                     *filter(None, (roster, roster and "read from the Mac")),
-                     "Reach for it yourself", "has to be awake with Latch running",
-                     module.LATCH_URL, module.DASHBOARD_URL, *_CARDS, "PROMPT")
+    _assert_in_order(prefix, opening, *filter(None, (offer,)),
+                     *filter(None, (roster, roster and "read from the Mac")), "PROMPT")
     assert (_ROSTER in prefix) == (roster is not None)
     assert "+16505550199" not in prefix, "an unnamed line is not a persona"
 
@@ -1710,10 +1696,8 @@ async def test_authority_selects_the_prompt(
     if group:
         expected = _voiced(module, expected)
     (event,) = handled
-    # Byte-for-byte equality pins _ANSWER_LAST's trailing position and
-    # _SHARING_RULE's presence -- both are baked into `expected`. Nothing is
-    # suppressed by code here: whether a turn is this agent's to answer is the
-    # model's call, made from the prompt this test pins.
+    # The room and role select the disclosure rules; the model decides
+    # whether this turn is the agent's to answer.
     assert event["channel_prompt"] == _rendered(module, expected, None, adapter._identity)
     assert (event.authority, event.recall_everywhere) == (authority, everywhere)
     await adapter.on_processing_start(event)
@@ -2528,6 +2512,28 @@ def test_external_turn_prompt_carries_disclosure_no_relay_and_ownership(monkeypa
     for rule in (module._DISCLOSURE, module._NO_RELAY, module._SPEAKER_FACT):
         assert rule in prompt
     assert module._AUTHORITY not in prompt
+
+
+@pytest.mark.parametrize("owner_name", [None, "Sam"])
+def test_routine_owner_dm_prompt_is_short_and_keeps_authority(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, owner_name: str | None,
+) -> None:
+    module = _load(monkeypatch, tmp_path)
+    chat = _chat("cht_a", owner_name=owner_name)
+    prompt = module._channel_prompt({**chat, "type": "dm"}, "owner", chat, module._NO_IDENTITY, True)
+    assert len(prompt.split()) < 120
+    for marker in ("Plow assistant", "owner is speaking", "full authority", "this chat",
+                   "plow_send_message", "standing secret", "password", "backup code",
+                   "API key", "raw token", "full card number", "one-time sign-in code",
+                   "only", "sharing", "skills", "memories", "agents", "narrow", "widen",
+                   "+15550000001"):
+        assert marker.lower() in prompt.lower()
+    if owner_name:
+        assert owner_name in prompt
+    else:
+        for marker in ("ask once", "plow_name_contact(handle=+15550000001)", "Never guess"):
+            assert marker in prompt
+    assert module.NO_REPLY_SENTINEL not in prompt
 
 
 def test_owner_turn_prompt_names_ownership(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> None:
@@ -5165,7 +5171,6 @@ def test_every_silence_instruction_names_the_sentinel(
     # there. The unconditional tail must not name it: `no_reply_ok` is read off
     # the composed prompt, so a tail that named it marked a solo owner DM
     # silent-capable and swallowed an answer ending in the token.
-    assert module.NO_REPLY_SENTINEL not in module._ANSWER_LAST
     assert module.NO_REPLY_SENTINEL in module._ANSWER_LAST_SILENCE
     for constant in (module.EXTERNAL_CHANNEL_PROMPT,
                      module.GROUP_AUTHORITY_CHANNEL_PROMPT,
@@ -5179,7 +5184,6 @@ def test_every_silence_instruction_names_the_sentinel(
     solo = module._channel_prompt({**_dm_chat(), "type": "dm"}, "owner", _dm_chat(),
                                   module._NO_IDENTITY, True)
     assert module.NO_REPLY_SENTINEL not in solo, "an owner DM must not reserve the token"
-    assert module._ANSWER_LAST in solo, "the ordering rule still rides every turn"
     group = module._channel_prompt({**_collaboration_chat(), "type": "group"}, "owner",
                                    _collaboration_chat(), module._NO_IDENTITY, True)
     assert module._ANSWER_LAST_SILENCE in group, "a group turn ends on the sentinel"
