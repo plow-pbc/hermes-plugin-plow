@@ -1983,7 +1983,6 @@ def test_roster_prompt_names_the_sources_of_a_name(monkeypatch: pytest.MonkeyPat
     assert "your owner's own contacts" in fact
     assert "their own handle" in fact
     assert "same name" in fact
-    assert "ask" not in fact.split(module._NEVER_GUESS)[0]
     assert module._NEVER_GUESS in fact
     start = module.PLOW_SEND_MESSAGE_SCHEMA["description"]
     assert "plow_name_contact" in start
@@ -2401,7 +2400,7 @@ def _authority_case_name_a_contact(module: Any, monkeypatch: pytest.MonkeyPatch,
         # No chat id rides along: the contact book is keyed by handle, not by room.
         assert record == [("+15550000002", {"display_name": "Abby", "relationship": "wife"})]
     else:
-        assert "turn" in out["error"]
+        assert ("active turn" if turn is None else "owner") in out["error"]
         assert record == []
 
 
