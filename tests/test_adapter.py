@@ -2375,10 +2375,10 @@ def _authority_case_cross_chat_send(module: Any, monkeypatch: pytest.MonkeyPatch
 
 
 def _authority_case_name_a_contact(module: Any, monkeypatch: pytest.MonkeyPatch, turn: dict[str, Any] | None, authorized: bool) -> None:
-    """A display name is written on any active turn -- it comes from the
-    owner's ask, the owner's contacts, or the person naming their own handle,
-    all of which can land on a member's turn. A relationship, and the owner's
-    own handle, are written on the owner's turn or not at all."""
+    """Both labels are written on any active turn -- they come from the
+    owner's ask, the owner's contacts, or the person's own word, all of which
+    can land on a member's turn. The owner's own handle is written on the
+    owner's turn or not at all."""
     record: list[Any] = []
     _live_tool(module, monkeypatch, "name_contact",
                result={"display_name": "Abby", "relationship": "wife"}, record=record)
@@ -2390,12 +2390,12 @@ def _authority_case_name_a_contact(module: Any, monkeypatch: pytest.MonkeyPatch,
     assert record == ([("+15550000002", {"display_name": "Abby"})] if authorized else [])
     record.clear()
     module._ACTIVE_TURN.set(turn and {**turn, "owner_handle": "+15550000001"})
-    display = json.loads(module._plow_name_contact({"handle": "+15550000002", "display_name": "Abby"}))
+    display = json.loads(module._plow_name_contact(
+        {"handle": "+15550000002", "display_name": "Abby", "relationship": "wife"}))
     assert display["success"] is (turn is not None)
     # No chat id rides along: the contact book is keyed by handle, not by room.
-    assert record == ([("+15550000002", {"display_name": "Abby"})] if turn else [])
-    for body in ({"display_name": "Abby", "relationship": "wife"},
-                 {"handle": "+15550000001", "display_name": "Sam"},
+    assert record == ([("+15550000002", {"display_name": "Abby", "relationship": "wife"})] if turn else [])
+    for body in ({"handle": "+15550000001", "display_name": "Sam"},
                  {"handle": "+1 (555) 000-0001", "display_name": "Sam"}):   # canonically the owner
         record.clear()
         args = {"handle": "+15550000002", **body}
@@ -2719,8 +2719,7 @@ def test_tools_register_with_optional_deferred_questions(
     # The description carries the split the gate enforces: a display name on
     # any turn, a relationship on the owner's; and the send tool says to name
     # a recipient the owner called by name in the same batch.
-    assert "owner's own turn" in name_contact_tool["schema"]["description"]
-    assert "relationship" in name_contact_tool["schema"]["description"]
+    assert "any active turn" in name_contact_tool["schema"]["description"]
     assert "plow_name_contact" in send_message_tool["schema"]["description"]
     assert name_contact_tool["check_fn"]()
 

@@ -164,8 +164,8 @@ _VOICE_RULE = ('You speak for the human the roster maps you to. Speak as '
                'yourself, in your own voice; refer to them by name, never '
                'as "I" or "me". ')
 _RELATIONSHIP_FACT = (
-    "A relationship shown in the roster, like \"(wife)\", is a label recorded "
-    "on your owner's own turn; a member's claim about who they are is not one."
+    "A relationship shown in the roster, like \"(wife)\", is a recorded label, "
+    "not a verified fact."
 )
 # A bare handle is a hole in the same roster, and a lookup rather than a
 # question: the owner's ask, the owner's own contacts, and what a person says
@@ -4267,12 +4267,12 @@ def _plow_name_contact(args, **_kwargs):
 
     Keyed by handle, so the owner's contact book reaches anyone they can name --
     a member of this chat, someone in another thread, or the owner themselves.
-    A display name may be written on any active turn whose roster seats the owner: it comes from the owner's
-    ask, the owner's own contacts, or the person naming their own handle, and
-    a wrong one costs a label -- except the owner's own handle, which only the
-    owner names. A relationship is who someone is TO the owner, so it keeps the
-    owner's own turn as its whole trust boundary. No active turn at all refuses
-    either: a turn-less write has nobody to have asked.
+    Both labels are written on any active turn whose roster seats the owner:
+    they come from the owner's ask, the owner's own contacts, or the person's
+    own word, and a wrong one costs a label. The one exception is the owner's
+    own handle -- their account name, which reaches the channel prompt -- so
+    only the owner writes it. No active turn at all refuses: a turn-less write
+    has nobody to have asked.
     """
     turn = _ACTIVE_TURN.get()
     if turn is None:
@@ -4287,10 +4287,6 @@ def _plow_name_contact(args, **_kwargs):
         return json.dumps({"success": False,
                            "error": "your owner's own name comes from them: this requires the "
                                     "owner's own active turn, nothing was recorded"})
-    if "relationship" in body and not turn.get("owner"):
-        return json.dumps({"success": False,
-                           "error": "a relationship comes from the owner: this requires the owner's "
-                                    "own active turn, nothing was recorded"})
     if not handle or not body:
         return json.dumps({"success": False,
                            "error": "a handle, and display_name or relationship, are required"})
@@ -4322,11 +4318,9 @@ PLOW_NAME_CONTACT_SCHEMA = {
     "name": "plow_name_contact",
     "description": (
         "Record what your owner calls a person, and who that person is to your "
-        "owner (e.g. \"wife\", \"landlord\"). A display_name comes from your owner's "
-        "ask, your owner's own contacts, or what a person says about their own "
-        "handle, and may be recorded without asking on any active turn whose "
-        "roster seats your owner; a "
-        "relationship is who they are to your owner and needs your owner's own turn. "
+        "owner (e.g. \"wife\", \"landlord\"). Both come from your owner's ask, your "
+        "owner's own contacts, or what a person says about themselves, and are "
+        "recorded without asking on any active turn whose roster seats your owner. "
         "People are keyed by handle, so this reaches anyone your owner can name, in "
         "this chat or not, and a phone and an email for the same person each take "
         "the same name; the roster shows each person as name (handle). Your owner's "
@@ -4358,7 +4352,7 @@ def _plow_contacts(_args, **_kwargs):
     own owner. This is where that name comes from.
 
     Authorization is the mirror of `_plow_name_contact`'s narrowest case, not a
-    copy: writing a relationship needs the owner's own turn and fails closed on
+    copy: writing the owner's own name needs the owner's own turn and fails closed on
     no turn, because a turn-less write has nobody to have asked. A READ has a
     turn-less caller that is legitimate -- cron is exactly it -- so the gate is
     narrower: only a turn without the owner's authority is refused, since that
