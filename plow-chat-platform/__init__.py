@@ -4280,7 +4280,10 @@ def _plow_name_contact(args, **_kwargs):
                            "error": "this requires an active turn; nothing was recorded"})
     handle = str(args.get("handle") or "").strip()
     body = {k: args[k] for k in ("display_name", "relationship") if args.get(k) is not None}
-    if not turn.get("owner") and turn.get("owner_handle") and _handle_key(handle) == _handle_key(turn["owner_handle"]):
+    owner_handle = turn.get("owner_handle")
+    if not turn.get("owner") and (not owner_handle or _handle_key(handle) == _handle_key(owner_handle)):
+        # Fail closed: a member turn may not name the owner, and on a roster
+        # that seats no owner it cannot tell who that is.
         return json.dumps({"success": False,
                            "error": "your owner's own name comes from them: this requires the "
                                     "owner's own active turn, nothing was recorded"})

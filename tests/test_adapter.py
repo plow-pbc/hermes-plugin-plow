@@ -2382,6 +2382,13 @@ def _authority_case_name_a_contact(module: Any, monkeypatch: pytest.MonkeyPatch,
     record: list[Any] = []
     _live_tool(module, monkeypatch, "name_contact",
                result={"display_name": "Abby", "relationship": "wife"}, record=record)
+    # A roster that seats no owner cannot say who a member may not name, so a
+    # member turn there writes nothing; the owner's own turn needs no roster.
+    module._ACTIVE_TURN.set(turn)
+    display = json.loads(module._plow_name_contact({"handle": "+15550000002", "display_name": "Abby"}))
+    assert display["success"] is authorized
+    assert record == ([("+15550000002", {"display_name": "Abby"})] if authorized else [])
+    record.clear()
     module._ACTIVE_TURN.set(turn and {**turn, "owner_handle": "+15550000001"})
     display = json.loads(module._plow_name_contact({"handle": "+15550000002", "display_name": "Abby"}))
     assert display["success"] is (turn is not None)
