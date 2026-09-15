@@ -1035,13 +1035,20 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 _NO_REDIRECT_OPENER = urllib.request.build_opener(_NoRedirect)
 
 
-def _fetch_mac_skills(url: str, token: str, timeout: float = 8.0) -> list[dict[str, str]]:
-    """One JSON-RPC tools/call of plow_list_skills through the relay. Latch's
-    server is stateless (no initialize, JSON responses), so this is the whole
-    exchange. Raises on anything but a well-formed manifest."""
+class _RelayToolError(Exception):
+    """A relay tool that did not complete: its diagnosis's cause (`not_found`), or its status (`pending`)."""
+
+    def __init__(self, cause: str) -> None:
+        super().__init__(cause)
+        self.cause = cause
+
+
+def _relay_call(url: str, token: str, name: str, arguments: dict[str, Any], timeout: float) -> dict[str, Any]:
+    """One JSON-RPC tools/call through the relay. Latch's server is stateless
+    (no initialize, JSON or SSE responses), so this is the whole exchange."""
     body = json.dumps({
         "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-        "params": {"name": "plow_list_skills", "arguments": {}},
+        "params": {"name": name, "arguments": arguments},
     }).encode()
     req = urllib.request.Request(url, data=body, method="POST", headers={
         "Authorization": "Bearer " + token,
@@ -1055,9 +1062,17 @@ def _fetch_mac_skills(url: str, token: str, timeout: float = 8.0) -> list[dict[s
     result = json.loads(raw)["result"]
     payload = result.get("structuredContent")
     if payload is None:
-        text = next(c["text"] for c in result["content"] if c.get("type") == "text")
-        payload = json.loads(text)
-    skills = payload["skills"]
+        payload = json.loads(next(c["text"] for c in result["content"] if c.get("type") == "text"))
+    if result.get("isError"):
+        raise _RelayToolError(str((payload.get("diagnosis") or {}).get("cause") or "error"))
+    if payload.get("status", "completed") != "completed":
+        raise _RelayToolError(str(payload["status"]))
+    return payload
+
+
+def _fetch_mac_skills(url: str, token: str, timeout: float = 8.0) -> list[dict[str, str]]:
+    """plow_list_skills through the relay. Raises on anything but a well-formed manifest."""
+    skills = _relay_call(url, token, "plow_list_skills", {}, timeout)["skills"]
     return [{"name": str(sk["name"]), "description": str(sk["description"])} for sk in skills]
 
 

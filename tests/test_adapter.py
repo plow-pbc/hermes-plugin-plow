@@ -6261,6 +6261,48 @@ def test_mac_skills_section_renders_the_manifest_as_prompt_text(monkeypatch, tmp
     assert render({}) == text
 
 
+@pytest.mark.parametrize(("result", "expected"), [
+    ({"content": [{"type": "text", "text": json.dumps({"status": "completed", "path": "/p", "content": "hi"})}]},
+     {"status": "completed", "path": "/p", "content": "hi"}),
+    ({"structuredContent": {"skills": []}, "content": [{"type": "text", "text": "ignored"}]}, {"skills": []}),
+    ({"isError": True, "content": [{"type": "text", "text": json.dumps({"diagnosis": {"cause": "not_found"}})}]},
+     "not_found"),
+    ({"content": [{"type": "text", "text": json.dumps({"status": "pending", "handle": "h"})}]}, "pending"),
+], ids=["completed", "structured", "not-found", "pending"])
+def test_relay_call_returns_a_completed_payload_and_raises_with_the_cause_otherwise(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, result: dict[str, Any], expected: Any
+) -> None:
+    module = _load(monkeypatch, tmp_path)
+    seen: list[dict[str, Any]] = []
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            seen.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
+            body = f"event: message\ndata: {json.dumps({'jsonrpc': '2.0', 'id': 1, 'result': result})}\n\n".encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_a: Any) -> None: ...
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), _Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        url = f"http://127.0.0.1:{server.server_address[1]}/mcp"
+        if isinstance(expected, str):
+            with pytest.raises(module._RelayToolError) as excinfo:
+                module._relay_call(url, "t", "plow_read_file", {"path": "~/x"}, 5.0)
+            assert excinfo.value.cause == expected
+        else:
+            assert module._relay_call(url, "t", "plow_read_file", {"path": "~/x"}, 5.0) == expected
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert seen[0]["params"] == {"name": "plow_read_file", "arguments": {"path": "~/x"}}
+
+
 def test_fetch_mac_skills_refuses_a_redirect(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> None:
     """The manifest fetch carries the agent's line-scoped bearer token, and the
     relay is transparent: a compromised owner Mac answering with a cross-host
