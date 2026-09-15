@@ -3615,23 +3615,16 @@ _SEND_ARGV = [
 @pytest.mark.parametrize("argv,expect", [
     (_SEND_ARGV, ("andrew@example.com", "Catching up", "Menlo Park or a video call?")),
     (["plow-gog", "mail", "reply", "18c9", "--body", "ok", "--account", "so@plow.co"], ("18c9",)),
-    # A bare `gog` argv is never the Google CLI here: Latch refuses it before
-    # any intent exists (plow-pbc/latch#396), and only `plow-gog` reaches the
-    # provider — so this must not be classified as a mail send.
-    (["gog", "email", "reply-all", "18c9", "--body=ok"], None),
     (["plow-gog", "gmail", "fwd", "18c9", "--to", "c@d.co"], ("c@d.co",)),
     (["plow-gog", "gmail", "send", "--to", "a@b.co", "--subject", "--help", "--body", "x"], ("a@b.co",)),
     (["plow-gog", "gmail", "send", "--to", "a@b.co", "--subject", "s", "--", "--help"], ("a@b.co",)),
 ])
 def test_send_summary_names_what_goes_out(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, argv: list[str], expect: tuple[str, ...] | None,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, argv: list[str], expect: tuple[str, ...],
 ) -> None:
     module = _load(monkeypatch, tmp_path)
     summary = module._google_send_summary(argv)
-    if expect is None:
-        assert summary is None
-    else:
-        assert all(value in summary for value in expect)
+    assert all(value in summary for value in expect)
 
 
 @pytest.mark.parametrize("argv", [
@@ -3655,6 +3648,9 @@ def test_send_summary_names_what_goes_out(
     ["python3", "-c", "print('gmail send')"],
     ["plow-gog"],
     [],
+    # Bare `gog` is not the Google CLI: Latch refuses it before any intent
+    # exists (plow-pbc/latch#396); only `plow-gog` reaches the provider.
+    ["gog", "email", "reply-all", "18c9", "--body=ok"],
 ])
 def test_send_summary_ignores_reads_drafts_and_every_booking(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, argv: list[str],
