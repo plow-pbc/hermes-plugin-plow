@@ -341,6 +341,19 @@ injected context onto the turn's wire copy and replays it for the life of
 the session, so a snippet recalled once stays in that session's context
 afterwards.
 
+### Recall from the owner's wiki
+
+With `PLOW_WIKI_EMBED_URL` set and a wiki to reach — a mounted `WIKI_PATH`, or
+`~/Plow/wiki` on the owner's Mac through the relay — a second `pre_llm_call`
+hook appends up to five of the owner's wiki facts nearest the turn, by
+embedding, to turns where recall reaches every chat (the owner's DM, a trusted
+room). `wiki index` writes the facts to `.wiki/chunks.json`; a background
+refresh embeds any fact it has no vector for and stores the vectors beside the
+wiki in `.wiki/embeddings.json`, so agents sharing a wiki share its vectors. A
+refresh that cannot reach the wiki or the embedder keeps the last corpus, and
+the block says when it was synced. The turn's own embedding is not caught: a
+failure is logged by Hermes and the turn keeps chat recall.
+
 ### What a group thread is called
 
 The home chat is always `Plow Chat`. Every other granted thread is named from
