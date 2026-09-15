@@ -3618,7 +3618,7 @@ def _normalize_members(recipients):
     return cleaned
 
 
-_GOOGLE_CLIS = frozenset({"plow-gog", "gog"})
+_GOOGLE_CLIS = frozenset({"plow-gog"})
 _GMAIL_GROUPS = frozenset({"gmail", "mail", "email"})
 # gog v0.36.0 "Write" verbs that transmit mail. `import` and `autoreply` do
 # not, and `drafts create|reply|forward` only save a draft.
