@@ -244,10 +244,10 @@ refused regardless of authority. Email sends and calendar-conflict overrides nee
 turn with the owner's authority; an email's approval posts in the room that asked,
 and an override posts none. A turn without authority cannot send to other chats, set
 goals, or list the owner's other rooms, and only the owner's own turn writes
-a relationship into the contact book. A group the owner deliberately stands up to
-act on their behalf begins trusted; ordinary outreach the owner asks for —
-texting a contractor, a neighbour, a merchant — begins with discretion, as
-does a group another member starts. Only the owner can change that later.
+a relationship into the contact book. A group the owner deliberately stands up to act on their behalf begins trusted;
+ordinary outreach the owner asks for — texting a contractor, a neighbour, a
+merchant — begins with discretion, as does a group another member starts. Only
+the owner can change that later.
 
 The `plow_set_conversation_trusted` tool writes the same API preference as the
 dashboard; opening a trusted thread is owner-only too. Both only succeed on an owner-
@@ -416,28 +416,31 @@ In a shared thread the prompt tells the agent to speak as itself and refer to
 the human it represents by name, never as "I" or "me" — the name itself stays
 in the untrusted roster context above, never in the prompt.
 
-The owner may also tell the agent what to call a person and who that person is to the
-owner — `wife`, `landlord` — through `plow_name_contact`, which `PUT`s
-`/v1/contacts/{handle}`. The book is keyed by handle, not by chat, so one name follows
-the person into every thread they are in; naming the owner's own handle sets their
-account name, and a relationship on their own handle is refused. A display name may be
-recorded on any active turn — it comes from the owner's ask, the owner's own contacts,
-or a person naming their own handle — while a relationship needs the owner's own turn;
-no active turn at all writes nothing. A relationship renders as `Name (handle)
-(relationship)` in the untrusted roster context above — where the owner's own row also
-carries `(your owner)` — never in the channel prompt, which instead states generically
-that a roster relationship is a label recorded on the owner's turn, and that a
-member's claim about who they are is just that — a claim. Every roster-bearing prompt
-also tells the agent that a row still showing a bare handle — its owner's included —
-is a name to look up in those sources and record with the tool, never one to guess out
-of mail, calendar or memory. `plow_contacts` reads the book back, owner's row first,
-for the turns that have no roster at all — a Hermes-cron turn carries no chat, and
-this is where its owner's own name comes from; it reads on a turn with the owner's
-authority or with no active turn at all, and refuses only a turn without that
-authority. A relationship stays owner-turn-only, above, unlike this read. An owner
-turn needs no such read: the chat resource every one of them already re-reads carries
-the owner as a participant — name, handle and role — in a solo DM as much as in a
-group. That is what the channel prompt names them from:
+The owner may also tell the agent what to call a person and who that person is
+to the owner — `wife`, `landlord` — through `plow_name_contact`, which `PUT`s
+`/v1/contacts/{handle}`. The book is keyed by handle, not by chat, so one name
+follows the person into every thread they are in; naming the owner's own handle
+sets their account name, and a relationship on their own handle is refused.
+A display name may be recorded on any active turn — it comes from the owner's
+ask, the owner's own contacts, or a person naming their own handle — while a
+relationship needs the owner's own turn; no active turn at all writes nothing.
+A relationship renders as
+`Name (handle) (relationship)` in the untrusted roster context above — where
+the owner's own row also carries `(your owner)` — never in
+the channel prompt, which instead states generically that a roster
+relationship is a label recorded on the owner's turn, and that a member's
+claim about who they are is just that — a claim. Every roster-bearing prompt
+also tells the agent that a row still showing a bare handle — its owner's
+included — is a name to look up in those sources and record with the tool,
+never one to guess out of mail, calendar or memory. `plow_contacts` reads the book back,
+owner's row first, for the turns that have no roster at all — a Hermes-cron
+turn carries no chat, and this is where its owner's own name comes from; it
+reads on a turn with the owner's authority or with no active turn at all, and
+refuses only a turn without that authority. A relationship stays owner-turn-only,
+above, unlike this read. An
+owner turn needs no such read: the chat resource every one of them already
+re-reads carries the owner as a participant — name, handle and role — in a solo
+DM as much as in a group. That is what the channel prompt names them from:
 `Your owner is Sam [+1…].`, or, while they are still unnamed, the same ask with
 their handle already filled in, since a solo DM and a goal wake have no roster
 for the paragraph above to gate on. A name they change lands on their very next
