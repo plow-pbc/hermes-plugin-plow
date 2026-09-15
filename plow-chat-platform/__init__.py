@@ -225,18 +225,6 @@ def _owner_dm(chat):
     return _is_solo_dm(chat) and len(members) == 1 and members[0].get("role") == "owner"
 
 
-def _owner_in_roster(chat):
-    """The owner sits in this chat as a member -- the invariant every outbound
-    target must satisfy. Outbound to a person is owner-inclusive by
-    construction (the server seats the owner on every agent-created chat), so a
-    room the owner is not in can only be one the model hand-picked by id: the
-    1:1 that the `send()` guard refuses.
-    """
-    return any(p.get("role") == "owner"
-               for p in chat.get("participants") or []
-               if p.get("type") == "member")
-
-
 def _message_delivery_unknown(status):
     """A message POST answered with 408/424/5xx may have been accepted before the
     error surfaced (Plow maps ProviderAcceptedPersistenceError -> 424), so a retry
@@ -2096,7 +2084,10 @@ class PlowChatAdapter(BasePlatformAdapter):
         if turn is not None and not turn["authority"]:
             return SendResult(success=False,
                               error=f"Plow Chat turn without the owner's authority is confined to {turn['chat_uid']!r}")
-        if not _owner_in_roster(self._chats.get(chat_id) or {}):
+        # Outbound to a person is owner-inclusive by construction (the server
+        # seats the owner on every agent-created chat), so a room the owner is
+        # not in can only be one the model hand-picked by id: the 1:1 refused here.
+        if _owner_participant(self._chats.get(chat_id) or {}) is None:
             return SendResult(success=False,
                               error=f"Plow Chat {chat_id!r} does not seat your owner; outbound to a person "
                                     "goes to a group that includes them, never a 1:1 that leaves them out. "

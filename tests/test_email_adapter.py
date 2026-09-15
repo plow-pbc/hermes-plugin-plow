@@ -192,34 +192,12 @@ async def test_an_email_turn_confines_the_chat_tools_and_never_sends_from_the_ow
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, role: str,
 ) -> None:
     """The tools and the Latch mail gate read one turn slot. A member's email
-    turn is refused the contact book like a member's chat turn; and on ANY
-    email turn a plow-gog send is blocked -- the reply goes out from this
-    line, which is the ghostwriting bug this design exists to end."""
-    module, _entry = _load_email(monkeypatch, tmp_path)
-    mail = _adapter(module)
-    event = SimpleNamespace(source=SimpleNamespace(chat_id="cht_m", chat_type="dm",
-                                                   role_authorized=role == "owner"))
-    await mail.on_processing_start(event)
-    owner = role == "owner"
-    assert module._ACTIVE_TURN.get() == {"chat_uid": "cht_m", "owner": owner, "dm": False,
-                                         "authority": owner, "email": True, "owner_handle": None}
-    contacts = json.loads(module._plow_contacts({}))
-    assert contacts["success"] is False
-    assert ("without the owner's authority" in contacts["error"]) == (role == "member")
-    gate = module._pre_tool_call("mcp__latch__plow_run_command", {"argv": _SEND_ARGV}, session_id="s1")
-    assert gate["action"] == "block"
-    await mail.on_processing_complete(event, None)
-    assert module._ACTIVE_TURN.get() is None
-
-
-@pytest.mark.parametrize("role", ["owner", "member"])
-async def test_a_non_owner_email_turn_may_not_rename_the_owner(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, role: str,
-) -> None:
-    """plow_name_contact is a tool shared with the chat platform: F3's guard
-    against a non-owner turn renaming the owner must hold on an email turn
-    too, which needs its own owner_handle stamp (off this thread's roster) to
-    enforce it."""
+    turn is refused the contact book like a member's chat turn, and may not
+    rename the owner -- plow_name_contact is shared with the chat platform, so
+    the owner_handle stamp off this thread's roster has to hold here too, case
+    variants included; and on ANY email turn a plow-gog send is blocked -- the
+    reply goes out from this line, which is the ghostwriting bug this design
+    exists to end."""
     module, _entry = _load_email(monkeypatch, tmp_path)
     mail = _adapter(module)
     mail._set_reach([_mail_chat("cht_m")])
@@ -229,13 +207,19 @@ async def test_a_non_owner_email_turn_may_not_rename_the_owner(
     event = SimpleNamespace(source=SimpleNamespace(chat_id="cht_m", chat_type="dm",
                                                    role_authorized=role == "owner"))
     await mail.on_processing_start(event)
-
-    out = json.loads(module._plow_name_contact({"handle": OWNER[1], "display_name": "Sam"}))
-
     owner = role == "owner"
-    assert out["success"] is owner
-    assert record == ([(OWNER[1], {"display_name": "Sam"})] if owner else [])
+    assert module._ACTIVE_TURN.get() == {"chat_uid": "cht_m", "owner": owner, "dm": False,
+                                         "authority": owner, "email": True, "owner_handle": OWNER[1]}
+    contacts = json.loads(module._plow_contacts({}))
+    assert contacts["success"] is False
+    assert ("without the owner's authority" in contacts["error"]) == (role == "member")
+    rename = json.loads(module._plow_name_contact({"handle": OWNER[1].upper(), "display_name": "Sam"}))
+    assert rename["success"] is owner
+    assert record == ([(OWNER[1].upper(), {"display_name": "Sam"})] if owner else [])
+    gate = module._pre_tool_call("mcp__latch__plow_run_command", {"argv": _SEND_ARGV}, session_id="s1")
+    assert gate["action"] == "block"
     await mail.on_processing_complete(event, None)
+    assert module._ACTIVE_TURN.get() is None
 
 
 @pytest.mark.parametrize(
