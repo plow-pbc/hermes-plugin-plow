@@ -1959,9 +1959,10 @@ def test_roster_context_carries_relationships_and_the_prompt_says_they_are_the_o
         composed = module._collaboration_prompt(base, chat, identity)
         assert module._RELATIONSHIP_FACT in composed
         # A bare handle is a hole in the same roster, so the instruction to
-        # fill it rides the same gate: ask, once, and record it -- rather than
-        # inventing a name out of the owner's mail or calendar.
-        assert "ask their name once" in composed
+        # fill it rides the same gate: name it from the owner's ask, contacts,
+        # or the person's own word -- rather than inventing one out of mail or
+        # calendar.
+        assert "your owner's own contacts" in composed
         assert "plow_name_contact" in composed
     # OWNER_CHANNEL_PROMPT is only ever selected for a solo DM turn, so that's
     # the composition a real turn produces -- not this group chat.
@@ -1978,6 +1979,23 @@ def test_roster_context_carries_relationships_and_the_prompt_says_they_are_the_o
     assert "+15550000002 (+15550000002) (landlord)" in humans
     assert "mem_daniel_cht_a" not in humans
     assert "Ash represents +15550000002" in mappings
+
+
+def test_roster_prompt_names_the_sources_of_a_name(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> None:
+    """A bare handle is a lookup, not a question: the owner's ask, the owner's
+    own contacts, and the person's own word about their own handle all name it,
+    and a second handle for the same person gets the same name."""
+    module = _load(monkeypatch, tmp_path)
+    fact = module._NAME_FACT
+    assert "your owner's own contacts" in fact
+    assert "their own handle" in fact
+    assert "same name" in fact
+    assert "ask" not in fact.split(module._NEVER_GUESS)[0]
+    assert module._NEVER_GUESS in fact
+    start = module.PLOW_START_GROUP_MESSAGE_SCHEMA["description"]
+    assert "plow_name_contact" in start
+    name = module.PLOW_NAME_CONTACT_SCHEMA["description"]
+    assert "owner's own turn" in name and "relationship" in name
 
 
 async def test_next_inbound_turn_refreshes_current_trust_before_prompt_selection(

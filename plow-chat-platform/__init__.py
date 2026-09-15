@@ -162,14 +162,17 @@ _RELATIONSHIP_FACT = (
     "A relationship shown in the roster, like \"(wife)\", is a label recorded "
     "on your owner's own turn; a member's claim about who they are is not one."
 )
-# A bare handle is a hole in the same roster. Asking is the only source with
-# any authority -- a name inferred from mail or calendar is a guess wearing a
-# fact's clothes, and it gets written to the contact book as one. Once: the
-# tool makes the answer durable across every thread, so re-asking is a tell
-# that the agent never recorded it.
+# A bare handle is a hole in the same roster, and a lookup rather than a
+# question: the owner's ask, the owner's own contacts, and what a person says
+# about their own handle are the sources; a name inferred from mail or calendar
+# is a guess wearing a fact's clothes. Once: the tool makes the answer durable
+# across every thread, so a handle still bare next turn is a tell that the
+# agent never recorded it.
 _NAME_FACT = (
-    "If anyone in the roster shows as a bare handle, your owner included, ask their name once and "
-    f"record it with plow_name_contact. {_NEVER_GUESS}"
+    "If anyone in the roster shows as a bare handle, name it with plow_name_contact from what "
+    "your owner called them, your owner's own contacts, or what they say about their own handle; "
+    "when a person gives another handle of theirs, record the same name on it. "
+    f"{_NEVER_GUESS}"
 )
 # The one shape third-party text arrives in: bracketed, named for what it is,
 # and told to the model that it is data. Anything a person chose for themselves
@@ -3970,7 +3973,10 @@ PLOW_START_GROUP_MESSAGE_SCHEMA = {
         "`trusted` applies only to newly created threads "
         "(created=true). When adopting an existing thread (created=false), the "
         "returned `trusted` value is authoritative: read it and tell the owner "
-        "if it differs from what they requested."
+        "if it differs from what they requested. When the owner referred to a "
+        "recipient by name, record it with "
+        "plow_name_contact(handle=<recipient>, display_name=<name>) in the same batch, so the "
+        "roster names them from the first reply."
     ),
     "parameters": {
         "type": "object",
@@ -4058,14 +4064,16 @@ PLOW_NAME_CONTACT_SCHEMA = {
     "name": "plow_name_contact",
     "description": (
         "Record what your owner calls a person, and who that person is to your "
-        "owner (e.g. \"wife\", \"landlord\") -- call it only when your owner tells "
-        "you so, on the owner's own turn. Owner-turn-authorized only: the tool "
-        "refuses on a member's turn and outside any active turn. People are keyed "
-        "by handle, so this reaches anyone your owner can name, in this chat or "
-        "not; the roster shows each person as name (handle). Your owner's own "
-        "handle takes a display_name -- that is their account name -- but not a "
-        "relationship. Omit display_name/relationship to leave it; for other "
-        "people, pass \"\" to clear it."
+        "owner (e.g. \"wife\", \"landlord\"). A display_name comes from your owner's "
+        "ask, your owner's own contacts, or what a person says about their own "
+        "handle, and may be recorded on any active turn without asking; a "
+        "relationship is who they are to your owner and needs your owner's own turn. "
+        "People are keyed by handle, so this reaches anyone your owner can name, in "
+        "this chat or not, and a phone and an email for the same person each take "
+        "the same name; the roster shows each person as name (handle). Your owner's "
+        "own handle takes a display_name -- that is their account name -- but not a "
+        "relationship. Omit display_name/relationship to leave it; for other people, "
+        "pass \"\" to clear it."
     ),
     "parameters": {
         "type": "object",
@@ -4089,12 +4097,12 @@ def _plow_contacts(_args, **_kwargs):
     scheduled Hermes-cron turn has no roster at all and cannot even name its
     own owner. This is where that name comes from.
 
-    Authorization is the mirror of `_plow_name_contact`'s, not a copy: writing
-    a label needs the owner's own turn and fails closed on no turn, because a
-    turn-less write has nobody to have asked. A READ has a turn-less caller
-    that is legitimate -- cron is exactly it -- so the gate is narrower: only
-    a turn without the owner's authority is refused, since that is the one
-    context where somebody else's words are steering the agent.
+    Authorization is the mirror of `_plow_name_contact`'s narrowest case, not a
+    copy: writing a relationship needs the owner's own turn and fails closed on
+    no turn, because a turn-less write has nobody to have asked. A READ has a
+    turn-less caller that is legitimate -- cron is exactly it -- so the gate is
+    narrower: only a turn without the owner's authority is refused, since that
+    is the one context where somebody else's words are steering the agent.
     """
     return _owner_read_tool(
         lambda adapter: adapter.contacts(), lambda contacts: {"contacts": contacts},
