@@ -29,6 +29,7 @@ from ._transport import (
     _lines_fact,
     _NO_IDENTITY,
     _owner_fact,
+    _owner_handle,
     _owner_identity,
     _refresh_identity,
     _self_agent_line,
@@ -220,8 +221,13 @@ class PlowEmailAdapter(BasePlatformAdapter):
         # alone; `email` keeps the Latch mail gate shut -- a reply here goes out
         # from this line, never their Gmail.
         owner = bool(event.source.role_authorized)
+        # `plow_name_contact` is a tool shared with the chat platform; a
+        # non-owner sender on this line must be refused the same way a
+        # non-owner chat turn is, so it needs the same owner_handle to check.
+        chat = self._chats.get(event.source.chat_id, {})
         _ACTIVE_TURN.set({"chat_uid": event.source.chat_id, "owner": owner,
-                          "dm": False, "authority": owner, "email": True})
+                          "dm": False, "authority": owner, "email": True,
+                          "owner_handle": _owner_handle(chat)})
 
     async def on_processing_complete(self, event, outcome):
         _ACTIVE_TURN.set(None)

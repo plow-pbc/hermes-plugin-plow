@@ -27,6 +27,7 @@ from test_adapter import (
     _capture_events,
     _chat,
     _envelope,
+    _live_tool,
     _load,
     _mark_anchored,
     _settle,
@@ -201,7 +202,7 @@ async def test_an_email_turn_confines_the_chat_tools_and_never_sends_from_the_ow
     await mail.on_processing_start(event)
     owner = role == "owner"
     assert module._ACTIVE_TURN.get() == {"chat_uid": "cht_m", "owner": owner, "dm": False,
-                                         "authority": owner, "email": True}
+                                         "authority": owner, "email": True, "owner_handle": None}
     contacts = json.loads(module._plow_contacts({}))
     assert contacts["success"] is False
     assert ("without the owner's authority" in contacts["error"]) == (role == "member")
@@ -209,6 +210,32 @@ async def test_an_email_turn_confines_the_chat_tools_and_never_sends_from_the_ow
     assert gate["action"] == "block"
     await mail.on_processing_complete(event, None)
     assert module._ACTIVE_TURN.get() is None
+
+
+@pytest.mark.parametrize("role", ["owner", "member"])
+async def test_a_non_owner_email_turn_may_not_rename_the_owner(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, role: str,
+) -> None:
+    """plow_name_contact is a tool shared with the chat platform: F3's guard
+    against a non-owner turn renaming the owner must hold on an email turn
+    too, which needs its own owner_handle stamp (off this thread's roster) to
+    enforce it."""
+    module, _entry = _load_email(monkeypatch, tmp_path)
+    mail = _adapter(module)
+    mail._set_reach([_mail_chat("cht_m")])
+    record: list[Any] = []
+    _live_tool(module, monkeypatch, "name_contact",
+               result={"display_name": "Sam", "relationship": None}, record=record)
+    event = SimpleNamespace(source=SimpleNamespace(chat_id="cht_m", chat_type="dm",
+                                                   role_authorized=role == "owner"))
+    await mail.on_processing_start(event)
+
+    out = json.loads(module._plow_name_contact({"handle": OWNER[1], "display_name": "Sam"}))
+
+    owner = role == "owner"
+    assert out["success"] is owner
+    assert record == ([(OWNER[1], {"display_name": "Sam"})] if owner else [])
+    await mail.on_processing_complete(event, None)
 
 
 @pytest.mark.parametrize(

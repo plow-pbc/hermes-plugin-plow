@@ -250,6 +250,22 @@ def _chat_type(chat):
     return "dm" if _is_solo_dm(chat) else "group"
 
 
+def _owner_participant(chat):
+    """The chat's owner participant, or None -- the one scan every reader of
+    "who owns this chat" builds on, whether it treats absence as a broken
+    contract (`_owner_identity`) or as merely unknown (`_owner_handle`)."""
+    return next((p for p in chat.get("participants") or []
+                 if p.get("type") == "member" and p.get("role") == "owner"), None)
+
+
+def _owner_handle(chat):
+    """The owner's own handle off this chat's roster, or None when the chat
+    carries no owner participant. What `_plow_name_contact` compares a turn's
+    write target against to refuse a non-owner turn renaming the owner."""
+    owner = _owner_participant(chat)
+    return owner.get("provider_key") if owner else None
+
+
 def _owner_identity(chat):
     """The owner's name and handle, off the chat every owner turn refreshes.
 
@@ -264,8 +280,7 @@ def _owner_identity(chat):
     on every turn, not only an owner's, and `_serve` logs the exception TYPE
     only -- so an unnamed StopIteration there reads as a network blip.
     """
-    owner = next((p for p in chat.get("participants") or []
-                  if p.get("type") == "member" and p.get("role") == "owner"), None)
+    owner = _owner_participant(chat)
     if owner is None:
         raise RuntimeError(f"chat {chat.get('uid')} has no owner participant")
     # `_participant_identity` already answers "named, or still a bare handle?"

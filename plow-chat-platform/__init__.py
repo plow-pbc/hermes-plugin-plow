@@ -69,6 +69,7 @@ from ._transport import (
     _NO_IDENTITY,
     _one_line,
     _owner_fact,
+    _owner_handle,
     _owner_identity,
     _participant_identity,
     _refresh_identity,
@@ -1596,13 +1597,7 @@ class PlowChatAdapter(BasePlatformAdapter):
         if not turn["owner"]:
             # A member turn may still name someone -- but never the owner's own
             # handle; `_plow_name_contact` checks a member's target against this.
-            turn["owner_handle"] = next(
-                (
-                    item.get("provider_key") for item in self._chats.get(chat_uid, {}).get("participants", [])
-                    if item.get("type") == "member" and item.get("role") == "owner"
-                ),
-                None,
-            )
+            turn["owner_handle"] = _owner_handle(self._chats.get(chat_uid, {}))
             participant = next(
                 (
                     item for item in self._chats.get(chat_uid, {}).get("participants", [])
