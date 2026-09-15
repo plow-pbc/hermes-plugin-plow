@@ -1,7 +1,7 @@
 ---
 name: plow-invite
 description: When someone who is not your owner shows genuine interest in Plow or asks how to get an agent of their own, offer them one.
-version: 1.6.0
+version: 1.7.0
 ---
 
 # Plow invite: delight-triggered referral
@@ -17,8 +17,10 @@ version: 1.6.0
 
 Someone who is NOT your owner shows genuine, unprompted interest in Plow or in
 what you just did, or asks how to get an agent like you for themselves. In a
-group, only on a turn that is yours to answer -- judge that as your speak rule
-says; an unaddressed remark in a group is not an opening, however warm. You are looking for real,
+group this counts even when they say it to someone else ("Wow Sam, your agent
+is super cool"): call the tool anyway, and on a turn that is not otherwise
+yours to answer, reply exactly NO_REPLY whatever it returns, where the bullets
+below would reply naturally -- your speak rule allows this one call. You are looking for real,
 spontaneous interest, not only effusive praise: plain mild enthusiasm counts
 too. Real examples of the bar: "Well done Plow!" · "Ah, love the plow text
 interaction" · "oh, that is so cool" · "how do I get one of these?"

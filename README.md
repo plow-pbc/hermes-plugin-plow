@@ -251,7 +251,9 @@ turn and a goal wake have no human speaker, so trust grants them nothing. In
 discretion, a member's ask still waits for the owner's yes given in this thread,
 judged from the conversation, disclosing only what answers the request. Consent
 is the second question: in a shared room the first is whether the turn is the
-agent's to answer at all (below), and an unaddressed ask never reaches consent. A standing
+agent's to answer at all (below), and an unaddressed ask never reaches consent -- except
+praise of the agent or an ask for an agent of one's own, which still starts
+`plow_offer_invite` (below). A standing
 secret — a password, backup code, API key, raw token, or full card number — is
 refused regardless of authority. Email sends and calendar-conflict overrides need a
 turn with the owner's authority; an email's approval posts in the room that asked,
@@ -396,7 +398,12 @@ read "we paid cash" as an agent called Ash, and no check could read a follow-up
 one line after the agent was named (owner ruling, 2026-09-11). The rule also tells it to settle that question before
 calling any tool, so someone else's errand never moves the owner's mail,
 calendar or Mac — an instruction with **no enforcement behind it**: suppression
-lands in `send`, which runs after a tool already has. What the code
+lands in `send`, which runs after a tool already has. One call is carved out of
+that: praise of this agent from a person who is not its owner is an invite
+opening even when it is said to someone else, so `plow_offer_invite` may run on
+a turn the agent otherwise stays silent on. It only offers that person an agent
+of their own and moves nothing of the owner's; without the carve-out, "Wow Sam,
+your agent is super cool" read as Sam's turn and no invite ever went out (#196). What the code
 does hold is the sentinel. `send` drops a body whose last non-empty line is the
 marker — bare, or decorated the way models emit it (`.NO_REPLY`, `*NO_REPLY*`) —
 so an answer that arrives as working-out plus `NO_REPLY` posts nothing at all;
