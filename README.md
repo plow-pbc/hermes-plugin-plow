@@ -129,6 +129,8 @@ URL in git.
 | `PLOW_HOME_CHANNEL` | yes | the home chat, `cht_…` — where cron and default output land, and must be a phone-line chat (the line's `provider_type` is `imessage`). Must be inside the credential's grant; a grant without it refuses to connect |
 | `PLOW_API_BASE` | no | API base, default `https://api.plow.co` (no `/v1` suffix) |
 | `PLOW_MCP_URL` | no | the Mac relay URL plow-init exports when the account has a Mac; when set, the plugin adds a system-prompt section that makes the Mac the default for owner work |
+| `PLOW_WIKI_EMBED_URL` | no | Ollama base URL that embeds the owner's wiki for recall (e.g. `http://<ollama-host>:11434`); with `PLOW_MCP_URL` set, turns in the owner's DM and trusted rooms carry the nearest wiki facts |
+| `WIKI_WRITER` | no | this agent's writer name in the wiki's `wiki.toml`; wiki recall reaches `shared` roots plus the roots this agent writes — unset reaches `shared` roots only |
 
 Diagnostics — agent status frames, 💾 background-review posts, ⏳ long-running
 heartbeats, ⚠️ turn-stop warnings — are dropped in **every** room unless the
@@ -343,8 +345,7 @@ afterwards.
 
 ### Recall from the owner's wiki
 
-With `PLOW_WIKI_EMBED_URL` set and a wiki to reach — a mounted `WIKI_PATH`, or
-`~/Plow/wiki` on the owner's Mac through the relay — a second `pre_llm_call`
+With `PLOW_WIKI_EMBED_URL` and `PLOW_MCP_URL` set, a second `pre_llm_call`
 hook appends up to five of the owner's wiki facts nearest the turn, by
 embedding, to turns where recall reaches every chat (the owner's DM, a trusted
 room). `wiki index` writes the facts to `.wiki/chunks.json`; a background
@@ -354,9 +355,8 @@ every agent embeds every chunk, whether or not it may recall it. A refresh
 that cannot reach the wiki or the embedder keeps the last corpus, and the
 block says when it was synced. The turn's own embedding is not caught: a
 failure is logged by Hermes and the turn keeps chat recall. Each wiki chunk is
-stamped with its root's writer, and a turn only ever recalls a `shared` root
-plus the one root `WIKI_WRITER` names, so material kept under an owner
-exception on one agent's own root never reaches another agent's turn.
+stamped with its root's writer; see `WIKI_WRITER` above for which roots a
+turn recalls.
 
 ### What a group thread is called
 
