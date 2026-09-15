@@ -6606,6 +6606,107 @@ def test_recall_lets_a_store_failure_propagate(
     assert db.closed is True
 
 
+_WIKI_CHUNKS = {"updated": "2026-09-13", "chunks": [
+    {"page": "people/jane-doe", "title": "Jane Doe", "text": "Prefers 30-minute video calls before noon Eastern."},
+    {"page": "people/bob-li", "title": "Bob Li", "text": "Allergic to shellfish."},
+]}
+
+
+@pytest.fixture
+def embed_server() -> Any:
+    """A fake Ollama /api/embed. One axis per name the text contains plus a small
+    shared axis, so the nearest chunk is exactly the one naming the same person."""
+    state = SimpleNamespace(inputs=[], status=200, url="")
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            state.inputs.extend(body["input"])
+            if state.status != 200:
+                self.send_response(state.status)
+                self.end_headers()
+                return
+            vectors = [[float("jane" in t.lower()), float("bob" in t.lower()), 0.1] for t in body["input"]]
+            out = json.dumps({"embeddings": vectors}).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(out)))
+            self.end_headers()
+            self.wfile.write(out)
+
+        def log_message(self, *_a: Any) -> None: ...
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), _Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    state.url = f"http://127.0.0.1:{server.server_address[1]}"
+    yield state
+    server.shutdown()
+    server.server_close()
+
+
+def _mounted_wiki(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, embed_url: str) -> pathlib.Path:
+    wiki = tmp_path / "wiki"
+    (wiki / ".wiki").mkdir(parents=True)
+    (wiki / ".wiki" / "chunks.json").write_text(json.dumps(_WIKI_CHUNKS))
+    monkeypatch.setenv("WIKI_PATH", str(wiki))
+    monkeypatch.setenv("PLOW_WIKI_EMBED_URL", embed_url)
+    return wiki
+
+
+def test_wiki_refresh_embeds_only_the_chunks_it_has_no_vector_for(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, embed_server: Any
+) -> None:
+    module = _load(monkeypatch, tmp_path)
+    wiki = _mounted_wiki(monkeypatch, tmp_path, embed_server.url)
+    stored = wiki / ".wiki" / "embeddings.json"
+
+    module._refresh_wiki()
+    assert embed_server.inputs == ["title: Jane Doe | text: Prefers 30-minute video calls before noon Eastern.",
+                                   "title: Bob Li | text: Allergic to shellfish."]
+    first = stored.read_bytes()
+
+    embed_server.inputs.clear()
+    module._refresh_wiki()
+    assert embed_server.inputs == []
+    assert stored.read_bytes() == first
+
+    edited = json.loads(json.dumps(_WIKI_CHUNKS))
+    edited["chunks"][1]["text"] = "Allergic to peanuts."
+    (wiki / ".wiki" / "chunks.json").write_text(json.dumps(edited))
+    module._refresh_wiki()
+    assert embed_server.inputs == ["title: Bob Li | text: Allergic to peanuts."]
+    assert len(json.loads(stored.read_text())["vectors"]) == 2, "the stale vector is dropped"
+    assert [c["text"] for c in module._wiki["corpus"]["chunks"]] == [
+        "Prefers 30-minute video calls before noon Eastern.", "Allergic to peanuts."]
+
+
+def test_a_failed_wiki_refresh_keeps_the_last_corpus_and_logs_nothing_from_the_wiki(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, embed_server: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    module = _load(monkeypatch, tmp_path)
+    wiki = _mounted_wiki(monkeypatch, tmp_path, embed_server.url)
+    module._refresh_wiki()
+    corpus = module._wiki["corpus"]
+    (wiki / ".wiki" / "chunks.json").write_text('{"chunks": [{"page": "sk-from-the-wiki-abcdefgh"')
+    with caplog.at_level("INFO"):
+        module._refresh_wiki()
+    assert module._wiki["corpus"] is corpus
+    assert "JSONDecodeError" in caplog.text and "sk-from-the-wiki" not in caplog.text
+
+
+def test_a_wiki_that_was_never_indexed_is_an_empty_corpus(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, embed_server: Any
+) -> None:
+    module = _load(monkeypatch, tmp_path)
+    wiki = _mounted_wiki(monkeypatch, tmp_path, embed_server.url)
+    module._refresh_wiki()
+    assert module._wiki["corpus"] is not None
+    (wiki / ".wiki" / "chunks.json").unlink()
+    embed_server.inputs.clear()
+    module._refresh_wiki()
+    # None, not the previous corpus: an absent index is a state, unlike a failure, which keeps the last one.
+    assert module._wiki["corpus"] is None and embed_server.inputs == []
+
+
 def test_mirror_sent_appends_an_assistant_turn_to_the_target_chat(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
 ) -> None:
