@@ -6557,7 +6557,11 @@ def test_recall_reaches_for_the_agents_own_last_words_when_the_reply_is_thin(
     # The window can open mid-label, with no opener or mark in sight.
     "...Elm represents Sam; >>>Spruce<<< represents Daniel. Current speaker: "
     ">>>Spruce<<< (peer Plow agent representing Daniel).] Yep, I'm here.",
-], ids=["tool-call-json", "label-at-window-start", "window-opens-mid-label"])
+    # A roster long enough that the window sees neither field name, only
+    # mapping entries.
+    "...Willow represents Ana; Aspen represents Bo; >>>Spruce<<< represents Daniel; "
+    "Alder represents Eve; Elm represents Sam; Birch represents Fay; Cedar represents Gus...",
+], ids=["tool-call-json", "label-at-window-start", "window-opens-mid-label", "window-inside-a-long-roster"])
 def test_recall_skips_snippet_windows_that_are_not_what_anyone_said(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, noise: str
 ) -> None:
