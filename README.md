@@ -349,10 +349,14 @@ hook appends up to five of the owner's wiki facts nearest the turn, by
 embedding, to turns where recall reaches every chat (the owner's DM, a trusted
 room). `wiki index` writes the facts to `.wiki/chunks.json`; a background
 refresh embeds any fact it has no vector for and stores the vectors beside the
-wiki in `.wiki/embeddings.json`, so agents sharing a wiki share its vectors. A
-refresh that cannot reach the wiki or the embedder keeps the last corpus, and
-the block says when it was synced. The turn's own embedding is not caught: a
-failure is logged by Hermes and the turn keeps chat recall.
+wiki in `.wiki/embeddings.json`, so agents sharing a wiki share its vectors —
+every agent embeds every chunk, whether or not it may recall it. A refresh
+that cannot reach the wiki or the embedder keeps the last corpus, and the
+block says when it was synced. The turn's own embedding is not caught: a
+failure is logged by Hermes and the turn keeps chat recall. Each wiki chunk is
+stamped with its root's writer, and a turn only ever recalls a `shared` root
+plus the one root `WIKI_WRITER` names, so material kept under an owner
+exception on one agent's own root never reaches another agent's turn.
 
 ### What a group thread is called
 
