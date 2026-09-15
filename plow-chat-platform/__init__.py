@@ -3285,7 +3285,7 @@ _RECALL_TAIL_SCAN = 10
 # that overlaps a label has too little message left to be worth recalling.
 _RECALL_NOISE = re.compile(
     r'"(?:call_id|response_item_id|arguments|tool_call_id)"\s*:'
-    r"|\[Untrusted |" + re.escape(_UNTRUSTED_MARK) + r"|Agent mappings: | represents |Current speaker: ")
+    r"|\[Untrusted |" + re.escape(_UNTRUSTED_MARK) + r"|Humans: |Agent mappings: | represents |Current speaker: ")
 
 
 def _recall_body(text):
