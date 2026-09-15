@@ -68,9 +68,11 @@ from ._transport import (
     _lines_fact,
     _NO_IDENTITY,
     _one_line,
+    _handle_key,
     _owner_fact,
     _owner_handle,
     _owner_identity,
+    _owner_participant,
     _participant_identity,
     _refresh_identity,
     _represented_member,
@@ -4287,7 +4289,7 @@ def _plow_name_contact(args, **_kwargs):
                            "error": "this requires an active turn; nothing was recorded"})
     handle = str(args.get("handle") or "").strip()
     body = {k: args[k] for k in ("display_name", "relationship") if args.get(k) is not None}
-    if not turn.get("owner") and handle == turn.get("owner_handle"):
+    if not turn.get("owner") and turn.get("owner_handle") and _handle_key(handle) == _handle_key(turn["owner_handle"]):
         return json.dumps({"success": False,
                            "error": "your owner's own name comes from them: this requires the "
                                     "owner's own active turn, nothing was recorded"})

@@ -2387,7 +2387,9 @@ def _authority_case_name_a_contact(module: Any, monkeypatch: pytest.MonkeyPatch,
     assert display["success"] is (turn is not None)
     # No chat id rides along: the contact book is keyed by handle, not by room.
     assert record == ([("+15550000002", {"display_name": "Abby"})] if turn else [])
-    for body in ({"display_name": "Abby", "relationship": "wife"}, {"handle": "+15550000001", "display_name": "Sam"}):
+    for body in ({"display_name": "Abby", "relationship": "wife"},
+                 {"handle": "+15550000001", "display_name": "Sam"},
+                 {"handle": "+1 (555) 000-0001", "display_name": "Sam"}):   # canonically the owner
         record.clear()
         args = {"handle": "+15550000002", **body}
         out = json.loads(module._plow_name_contact(args))

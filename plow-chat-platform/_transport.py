@@ -7,6 +7,7 @@ plow-pbc/hermes-plugin-plow#109. Policy stays with the platform that owns it.
 """
 import asyncio
 import contextvars
+import re
 import logging
 import os
 
@@ -264,6 +265,14 @@ def _owner_handle(chat):
     write target against to refuse a non-owner turn renaming the owner."""
     owner = _owner_participant(chat)
     return owner.get("provider_key") if owner else None
+
+
+def _handle_key(handle):
+    """Plow's `membership_key`, as far as a comparison needs it: a phone is its
+    digits, anything else is case-folded -- so `+1 (555) 000-0001` and
+    `SAM@example.com` are the owner's handles, not a way around the guard."""
+    handle = (handle or "").strip()
+    return re.sub(r"\D", "", handle) if re.fullmatch(r"\+?[\d()\s.-]+", handle) else handle.casefold()
 
 
 def _owner_identity(chat):
