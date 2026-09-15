@@ -27,6 +27,11 @@ The directory is named for the plugin id so the install can be a directory copy:
 > as possibly-delivered and declines the retry that would have worked. It fails
 > safe, never sending a duplicate, but deploy that API change before pinning
 > this plugin or recoverable invites are silently dropped.
+> A sent invite requires the send endpoint's response to carry
+> `{"status":"sent","sent":[{"message_id","body"}]}`
+> ([`plow-pbc/plow#1974`](https://github.com/plow-pbc/plow/issues/1974)): against
+> an older API the plugin reads the send as delivery-unknown and never silences
+> the turn, so that API change deploys before `PLOW_CHAT_PLUGIN_SHA` moves.
 > This plugin also requires a Plow API that serves agent-invite consent,
 > `/v1/auth/agent-invites/opportunities`,
 > `/v1/auth/agent-invites/opportunities/{opportunity_uid}/send`,
@@ -170,12 +175,13 @@ that named the token on every turn marked a solo owner DM silent-capable and
 would have swallowed an owner's answer that happened to end in it.
 
 One exception rides with it: a tool that *posts* to the chat is itself the
-answer. A successful `plow_send_sequence` has already delivered the turn's
-reply, so the guard drops the prose that follows — the rule says so, or a
-model that finished its tools first would have its answer suppressed. That
-drop is lifted again by a later message or goal wake for the same chat: once
-one arrives the lifecycle is ambiguous, and a duplicated line of intro prose
-is the price of never losing the reply the wake was queued for.
+answer. A successful `plow_send_sequence` and a `plow_offer_invite` that sent
+the invite have each already delivered the turn's reply, so the guard drops
+the prose that follows — the rule says so, or a model that finished its tools
+first would have its answer suppressed. That drop is lifted again by a later
+message or goal wake for the same chat: once one arrives the lifecycle is
+ambiguous, and a duplicated line of intro prose is the price of never losing
+the reply the wake was queued for.
 
 `plugin.yaml` is the authority on this list; the table is a reader's summary.
 
