@@ -1354,7 +1354,7 @@ class PlowChatAdapter(BasePlatformAdapter):
         self._goal_locks = {}                 # chat uid -> its load-modify-save lock
         self._goal_paced = False              # pacing runs only inside a live socket session
         self._active_turn = _ACTIVE_TURN
-        self._sequence_turns = {}
+        self._live_turns = {}
         self._sequence_locks = {}
         self._sequences = {}
 
@@ -1541,7 +1541,7 @@ class PlowChatAdapter(BasePlatformAdapter):
         self._inbound.clear()
         for task in tuple(self._sequences):
             task.cancel()
-        self._sequence_turns.clear()
+        self._live_turns.clear()
         self._goal_pause_wakes()
         self._mark_disconnected()
 
@@ -1596,7 +1596,7 @@ class PlowChatAdapter(BasePlatformAdapter):
         # means the later start silently strips the earlier turn of the
         # ownership its running sequence is still checking. The dict holds the
         # turn itself, so the id stays unique for as long as it is a key.
-        self._sequence_turns[id(turn)] = turn
+        self._live_turns[id(turn)] = turn
 
     async def on_processing_complete(self, event, outcome):
         chat_uid = event.source.chat_id
@@ -1609,7 +1609,7 @@ class PlowChatAdapter(BasePlatformAdapter):
         # reached for the chat's entry instead would retire whichever turn
         # started last and cancel the sequence it still has in flight.
         if turn is not None:
-            self._sequence_turns.pop(id(turn), None)
+            self._live_turns.pop(id(turn), None)
         for task, owner in tuple(self._sequences.items()):
             if owner is turn:
                 task.cancel()
@@ -1620,7 +1620,7 @@ class PlowChatAdapter(BasePlatformAdapter):
         # Chat-global, unlike everything above it: a goal wake and an inbound
         # turn can both be live here, so stopping on the first completion
         # strips the survivor of its indicator for the rest of its run.
-        if not any(t.get("chat_uid") == chat_uid for t in self._sequence_turns.values()):
+        if not any(t.get("chat_uid") == chat_uid for t in self._live_turns.values()):
             self.pause_typing_for_chat(chat_uid)
             await self._stop_typing_quietly(chat_uid)
         try:
@@ -1921,12 +1921,13 @@ class PlowChatAdapter(BasePlatformAdapter):
         # processing lifecycle ends. The shared registry reaches the model's
         # turn even when this handoff runs in a separate socket task.
         # Once ambiguous, leave suppression disabled for the whole lifecycle:
-        # a sequence may start either before or after the handoff. Allowing
-        # duplicate intro prose is preferable to losing the queued reply.
-        for turn in self._sequence_turns.values():
+        # a sequence or a sent invite may start either before or after the
+        # handoff. Allowing duplicate intro prose is preferable to losing the
+        # queued reply.
+        for turn in self._live_turns.values():
             if turn["chat_uid"] == event.source.chat_id:
                 turn["inbound_handed_off"] = True
-                turn["sequence_completed"] = False
+                turn["reply_delivered"] = False
         await self.handle_message(event)
 
     async def _goal_after_turn(self, chat_uid, event, said):
@@ -2028,8 +2029,8 @@ class PlowChatAdapter(BasePlatformAdapter):
 
     def _message_guard(self, chat_id):
         """The one gate every outbound message passes: inside the grant,
-        inside the member turn's chat, and not a second copy of a reply a
-        sequence already delivered. None means go.
+        inside the member turn's chat, and not a second copy of a reply
+        already delivered. None means go.
 
         Whether a message is this agent's to send at all is the model's
         judgement, made from the channel prompt and answered with the
@@ -2039,14 +2040,15 @@ class PlowChatAdapter(BasePlatformAdapter):
         if refused is not None:
             return refused
         turn = self._active_turn.get()
-        # A completed sequence already delivered this turn's reply, so the
-        # trailing prose the model adds after it is the same duplicate the
-        # sentinel drop in send() exists to stop. Keyed on the sequence's own turn
-        # rather than the chat, and invalidated by the next inbound handoff
-        # even when Hermes recurses before ending this processing lifecycle.
-        if (turn and turn.get("sequence_completed") and id(turn) in self._sequence_turns
+        # A tool call -- a sequence or a sent invite -- already delivered this
+        # turn's reply, so the trailing prose the model adds after it is the
+        # same duplicate the sentinel drop in send() exists to stop. Keyed on
+        # that reply's own turn rather than the chat, and invalidated by the
+        # next inbound handoff even when Hermes recurses before ending this
+        # processing lifecycle.
+        if (turn and turn.get("reply_delivered") and id(turn) in self._live_turns
                 and chat_id == turn["chat_uid"]):
-            log.debug("[plow_chat] suppressed post-sequence reply for %s", chat_id)
+            log.debug("[plow_chat] suppressed post-reply prose for %s", chat_id)
             return SendResult(success=True)
         return None
 
@@ -2326,8 +2328,8 @@ class PlowChatAdapter(BasePlatformAdapter):
             )
             # Plow's bubble IS this turn's reply; anything the model adds after it
             # narrates what the invitee can already see (plow#1974). Same
-            # suppression, and same handoff escape, as a completed sequence.
-            turn["sequence_completed"] = not turn.get("inbound_handed_off")
+            # suppression, and same handoff escape, as `send_sequence` uses.
+            turn["reply_delivered"] = not turn.get("inbound_handed_off")
             return {
                 "sent_in_thread": "\n".join(message["body"] for message in sent),
                 "note": "This message is already in the thread. Your reply for this turn is done.",
@@ -2465,7 +2467,7 @@ class PlowChatAdapter(BasePlatformAdapter):
 
     def _sequence_guard(self, turn):
         chat_uid = turn.get("chat_uid")
-        if (id(turn) not in self._sequence_turns or not turn.get("owner")
+        if (id(turn) not in self._live_turns or not turn.get("owner")
                 or not turn.get("dm") or not _owner_dm(self._chats.get(chat_uid, {}))
                 or self._send_guard(chat_uid) is not None):
             raise ValueError("sequence requires the current solo owner DM within the grant")
@@ -2582,8 +2584,7 @@ class PlowChatAdapter(BasePlatformAdapter):
         # the owner after a partial delivery.
         # An event queued before or during delivery belongs to a later model turn,
         # even if Hermes keeps using this processing lifecycle for its reply.
-        turn["sequence_completed"] = (receipt["success"]
-                                      and not turn.get("inbound_handed_off"))
+        turn["reply_delivered"] = receipt["success"] and not turn.get("inbound_handed_off")
         if not receipt["success"]:
             receipt["instruction"] = "Do not replay the sequence; inspect chat history before sending remaining items."
         return receipt

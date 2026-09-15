@@ -2922,6 +2922,7 @@ def _invite_turn(**overrides: Any) -> dict[str, Any]:
 INVITE_SEND_CALL = ("POST", "/v1/auth/agent-invites/opportunities/agi_1/send", None)
 INVITE_BODY = ("Alex said I can invite you. Text 7NYJA to +1 650-555-0100 and you'll "
                "get your own Plow agent, with $100 in credits to start.")
+INVITE_SENT = {"status": "sent", "sent": [{"message_id": "msg_invite", "body": INVITE_BODY}]}
 
 
 def test_member_turn_can_start_fixed_invite_workflow(
@@ -3116,7 +3117,7 @@ async def test_deferred_answer_is_semantically_classified_and_persisted(
 
     async def resume(context: dict[str, Any]) -> list[dict[str, Any]]:
         resumed.append(context)
-        return [{"message_id": "msg_invite", "body": INVITE_BODY}]
+        return INVITE_SENT["sent"]
 
     monkeypatch.setattr(adapter, "set_invite_consent", persist, raising=False)
     monkeypatch.setattr(adapter, "resume_invite", resume, raising=False)
@@ -3274,7 +3275,7 @@ async def test_resolved_consent_sends_once_or_stays_declined(
                     "owner_name": "Alex",
                     "praise": "I love Plow. This is amazing.",
                 }
-            return {"status": "sent", "sent": [{"message_id": "msg_invite", "body": INVITE_BODY}]}
+            return INVITE_SENT
         return {"status": "disabled"}
 
     monkeypatch.setattr(adapter, "_tool_json", api)
@@ -3302,7 +3303,7 @@ async def test_resolved_consent_sends_once_or_stays_declined(
     # trailing prose -- exactly the bubble plow#1974 was filed over -- as
     # this turn's final reply (Hermes marks a turn-final reply `notify`).
     module._ACTIVE_TURN.set(turn)
-    adapter._sequence_turns[id(turn)] = turn
+    adapter._live_turns[id(turn)] = turn
     http = _ChatResourceHTTP(_Resp({"uid": "msg_trailing"}))
     monkeypatch.setattr(module.aiohttp, "ClientSession", lambda *a, **k: http)
     trailing = await adapter.send("cht_b", "Sent! You should get an invite shortly 🎉",
@@ -3406,7 +3407,7 @@ async def test_only_fresh_approval_resumes_original_thread(
 
     async def api(method: str, path: str, *, body: Any = None) -> dict[str, Any]:
         api_calls.append((method, path, body))
-        return {"status": "sent", "sent": [{"message_id": "msg_invite", "body": INVITE_BODY}]}
+        return INVITE_SENT
 
     monkeypatch.setattr(adapter, "_tool_json", api)
     context = {
@@ -3418,7 +3419,7 @@ async def test_only_fresh_approval_resumes_original_thread(
     resumed = await adapter.resume_invite(context)
 
     if hours_old == 23:
-        assert resumed == [{"message_id": "msg_invite", "body": INVITE_BODY}]
+        assert resumed == INVITE_SENT["sent"]
         assert api_calls == [INVITE_SEND_CALL]
     else:
         assert resumed == []
@@ -6982,7 +6983,7 @@ def _sequence_fixture(monkeypatch, tmp_path):
     adapter._chats['cht_a']['participants'] = [dict(type='member', role='owner', uid='owner')]
     turn = dict(chat_uid='cht_a', owner=True, dm=True, authority=True)
     module._ACTIVE_TURN.set(turn)
-    adapter._sequence_turns[id(turn)] = turn
+    adapter._live_turns[id(turn)] = turn
     root = tmp_path / 'assets'
     root.mkdir(mode=0o755)
     # Explicit mode rather than the runner's umask: _sequence_stat rejects a
@@ -7099,7 +7100,7 @@ async def test_sequence_requires_a_live_solo_owner_turn(monkeypatch, tmp_path, f
     elif forbidden == 'peer': adapter._chats['cht_a']['participants'].append(dict(type='agent', relationship='peer'))
     elif forbidden == 'no_owner': adapter._chats['cht_a']['participants'][0]['role'] = 'member'
     elif forbidden == 'grant': adapter.chat_uids = frozenset()
-    elif forbidden == 'ended': adapter._sequence_turns.clear()
+    elif forbidden == 'ended': adapter._live_turns.clear()
     assert not (await adapter.send_sequence({'items': _intro_items()}, turn))['success']
     assert not http.calls
 
@@ -7259,7 +7260,7 @@ async def test_completed_sequence_suppresses_final_reply_only_in_its_live_turn(m
         assert (await adapter.send('cht_a', tail)).success
     assert http.posts == 1, 'successful sequence must suppress even a substantive final process note'
     assert tail not in caplog.text, 'the suppressed body is owner prose, not log material'
-    assert 'suppressed post-sequence reply for cht_a' in caplog.text
+    assert 'suppressed post-reply prose for cht_a' in caplog.text
 
     adapter.chat_uids = adapter.chat_uids | {'cht_b'}
     # cht_b is a cross-chat target; seat the owner there and stub the refresh
@@ -7274,12 +7275,12 @@ async def test_completed_sequence_suppresses_final_reply_only_in_its_live_turn(m
 
     event = SimpleNamespace(source=SimpleNamespace(chat_id='cht_a'))
     await adapter.on_processing_complete(event, None)
-    assert not adapter._sequence_turns
+    assert not adapter._live_turns
     posts = http.posts
     assert (await adapter.send('cht_a', 'Between turns', metadata={'notify': True})).success
     next_turn = dict(chat_uid='cht_a', owner=True, dm=True, authority=True)
     adapter._active_turn.set(next_turn)
-    adapter._sequence_turns[id(next_turn)] = next_turn
+    adapter._live_turns[id(next_turn)] = next_turn
     assert (await adapter.send('cht_a', 'Next turn', metadata={'notify': True})).success
     assert http.posts == posts + 2
 
@@ -7294,8 +7295,8 @@ async def test_queued_inbound_reply_before_processing_complete(
     module, adapter, turn, root, http = _sequence_fixture(monkeypatch, tmp_path)
     _mark_anchored(adapter, 'cht_a')
     handed_off = []
-    other_turn = dict(chat_uid='cht_b', sequence_completed=True)
-    adapter._sequence_turns[id(other_turn)] = other_turn
+    other_turn = dict(chat_uid='cht_b', reply_delivered=True)
+    adapter._live_turns[id(other_turn)] = other_turn
 
     async def queue_in_hermes(event):
         handed_off.append(event)
@@ -7344,9 +7345,9 @@ async def test_queued_inbound_reply_before_processing_complete(
         assert http.calls[-1][2]['json'] == {'body': intro_tail}
 
     assert len(handed_off) == 1
-    assert other_turn['sequence_completed'], 'handoff must not invalidate another chat'
+    assert other_turn['reply_delivered'], 'handoff must not invalidate another chat'
     assert adapter._active_turn.get() is turn
-    assert adapter._sequence_turns[id(turn)] is turn
+    assert adapter._live_turns[id(turn)] is turn
     reply = 'Sacramento, Pacific time, got it. Sports?'
     assert (await adapter.send('cht_a', reply, metadata={'notify': True})).success
     delivered += 1
@@ -7494,7 +7495,7 @@ async def test_overlapping_turns_keep_their_own_sequence_ownership(monkeypatch, 
     """
     module, adapter, first, root, http = _sequence_fixture(monkeypatch, tmp_path)
     second = dict(chat_uid='cht_a', owner=True, dm=True)
-    adapter._sequence_turns[id(second)] = second
+    adapter._live_turns[id(second)] = second
     running = asyncio.get_running_loop().create_future()
     task = asyncio.ensure_future(running)
     adapter._sequences[task] = second
@@ -7504,7 +7505,7 @@ async def test_overlapping_turns_keep_their_own_sequence_ownership(monkeypatch, 
     event = SimpleNamespace(source=SimpleNamespace(chat_id='cht_a'), message_id='', text='')
     await adapter.on_processing_complete(event, None)
 
-    assert adapter._sequence_turns.get(id(second)) is second, "the older turn evicted its successor"
+    assert adapter._live_turns.get(id(second)) is second, "the older turn evicted its successor"
     assert not task.cancelled(), "the older turn cancelled its successor's sequence"
     task.cancel()
 
