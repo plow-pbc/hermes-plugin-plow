@@ -37,13 +37,8 @@ optional_env:
     secret: false
     password: false
   - name: PLOW_WIKI_EMBED_URL
-    description: "Ollama base URL that embeds the owner's wiki for recall (e.g. http://<ollama-host>:11434). With WIKI_PATH or PLOW_MCP_URL set, turns in the owner's DM and trusted rooms carry the nearest wiki facts"
+    description: "Ollama base URL that embeds the owner's wiki for recall (e.g. http://<ollama-host>:11434). With PLOW_MCP_URL set, turns in the owner's DM and trusted rooms carry the nearest wiki facts"
     prompt: "Wiki embedding server URL"
-    secret: false
-    password: false
-  - name: WIKI_PATH
-    description: "A mounted plow-wiki folder; when set, wiki recall reads it directly instead of through the owner's Mac"
-    prompt: "Mounted wiki path"
     secret: false
     password: false
   - name: WIKI_WRITER
