@@ -129,7 +129,7 @@ URL in git.
 | `PLOW_HOME_CHANNEL` | yes | the home chat, `cht_…` — where cron and default output land, and must be a phone-line chat (the line's `provider_type` is `imessage`). Must be inside the credential's grant; a grant without it refuses to connect |
 | `PLOW_API_BASE` | no | API base, default `https://api.plow.co` (no `/v1` suffix) |
 | `PLOW_MCP_URL` | no | the Mac relay URL plow-init exports when the account has a Mac; when set, the plugin adds a system-prompt section that makes the Mac the default for owner work |
-| `PLOW_WIKI_EMBED_URL` | no | Ollama base URL that embeds the owner's wiki for recall (e.g. `http://<ollama-host>:11434`); with `PLOW_MCP_URL` set, every Plow Chat turn carries the nearest wiki facts |
+| `PLOW_WIKI_EMBED_URL` | no | Ollama base URL that embeds the owner's wiki for recall (e.g. `http://<ollama-host>:11434`); with `PLOW_MCP_URL` set, turns in the owner's DM and trusted rooms carry the nearest wiki facts |
 | `WIKI_WRITER` | no | this agent's writer name in the wiki's `wiki.toml`; wiki recall reaches `shared` roots plus the roots this agent writes — unset reaches `shared` roots only |
 
 Diagnostics — agent status frames, 💾 background-review posts, ⏳ long-running
@@ -347,8 +347,8 @@ afterwards.
 
 With `PLOW_WIKI_EMBED_URL` and `PLOW_MCP_URL` set, a second `pre_llm_call`
 hook appends up to five of the owner's wiki facts nearest the turn, by
-embedding, to every Plow Chat turn: the room's prompt decides what the agent may
-share, not what it knows. `wiki index` writes the facts to `.wiki/chunks.json`; a background
+embedding, to turns where recall reaches every chat (the owner's DM, a trusted
+room). `wiki index` writes the facts to `.wiki/chunks.json`; a background
 refresh embeds any fact it has no vector for and stores the vectors in
 `~/Plow/wiki.recall/embeddings.json`, beside the wiki rather than inside it so
 `wiki snapshot` never commits them, so agents sharing a wiki share its vectors —
