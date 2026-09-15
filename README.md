@@ -207,6 +207,16 @@ distinct turns. The ack is the burst's last uid, so a restart mid-burst
 backfills the whole burst; a hand-off that fails is retried where it sits, with
 the rest of the chat waiting behind it.
 
+A message that lands while the agent is mid-run waits for that run and gets its
+own turn (the image sets `busy_input_mode: queue`), so a group's asides never
+redirect the owner's task. The owner's own DM is the exception: every word there
+is addressed to the agent, so a non-command text message from the owner is
+queued as the next turn and the running task is interrupted — including an
+in-flight Latch browser call. Words only: a turn that reaches hermes carrying
+media, captioned or not, stays on its media queue, which is hermes's own
+photo-burst behaviour. Hermes also skips the interrupt while subagents or
+context compression are running; `/stop` stays the escape hatch everywhere.
+
 Inline replies carry the quoted sender, time, and body as untrusted turn data,
 with a part label only for media. If the reply has no attachments of its own,
 the adapter delivers the quoted parent's media through the normal attachment

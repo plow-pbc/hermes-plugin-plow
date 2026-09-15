@@ -114,6 +114,13 @@ def _load(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, *, deferred_q
 
         async def handle_message(self, event: Any) -> None: ...
 
+        # base.py:1806 / run_adapters.py:1473-1478 -- the runner binds itself to
+        # every adapter it creates, before it wires any handler.
+        gateway_runner: Any = None
+
+        def set_busy_session_handler(self, handler: Any) -> None:
+            self._busy_session_handler = handler
+
         def _mark_connected(self) -> None: ...
         def _mark_disconnected(self) -> None: ...
 
@@ -916,8 +923,8 @@ async def test_burst_invite_operation_uses_oldest_uncheckpointed_uid(
         "display_name": "Taylor",
     }
     burst = [
-        SimpleNamespace(uid="msg_first", sender=sender, starts_slash_command=False, reply_to=None),
-        SimpleNamespace(uid="msg_tail", sender=sender, starts_slash_command=False, reply_to=None),
+        SimpleNamespace(uid="msg_first", sender=sender, starts_slash_command=False, has_text=True, reply_to=None),
+        SimpleNamespace(uid="msg_tail", sender=sender, starts_slash_command=False, has_text=True, reply_to=None),
     ]
 
     await adapter._deliver(
@@ -1991,7 +1998,7 @@ async def test_next_inbound_turn_refreshes_current_trust_before_prompt_selection
     handled = _capture_events(monkeypatch, adapter)
 
     await adapter._deliver(
-        [SimpleNamespace(uid="msg_refresh", sender={"type": "member", "uid": "mem_member", "role": "member", "display_name": "Daniel"}, starts_slash_command=False, reply_to=None)],
+        [SimpleNamespace(uid="msg_refresh", sender={"type": "member", "uid": "mem_member", "role": "member", "display_name": "Daniel"}, starts_slash_command=False, has_text=True, reply_to=None)],
         [([], [], "what is on the calendar?")],
         "cht_a",
     )
@@ -2018,7 +2025,7 @@ async def test_current_trust_refresh_failure_is_fail_closed_and_keeps_cache(
 
     with pytest.raises(RuntimeError, match="HTTP 503"):
         await adapter._deliver(
-            [SimpleNamespace(uid="msg_failed", sender={"type": "member", "uid": "mem_owner", "role": "owner", "display_name": "Sam"}, starts_slash_command=False, reply_to=None)],
+            [SimpleNamespace(uid="msg_failed", sender={"type": "member", "uid": "mem_owner", "role": "owner", "display_name": "Sam"}, starts_slash_command=False, has_text=True, reply_to=None)],
             [([], [], "calendar")],
             "cht_a",
         )
@@ -7657,7 +7664,7 @@ async def test_queued_inbound_reply_before_processing_complete(
             await adapter._goal_fire('cht_a', dict(generation='queued', text='Learn the city'))
         else:
             await adapter._deliver(
-                [SimpleNamespace(uid='msg_city', starts_slash_command=False, reply_to=None,
+                [SimpleNamespace(uid='msg_city', starts_slash_command=False, has_text=True, reply_to=None,
                                  sender=dict(type='member', role='owner', uid='owner'))],
                 [([], [], 'Sacramento')], 'cht_a',
             )
@@ -7882,3 +7889,81 @@ async def test_recall_searches_what_was_said_not_the_rendered_prompt(
     terms = module._recall_query(handled[0].recall_text).removeprefix("{content} : (").removesuffix(")")
     assert "untrusted" not in terms, "the fence is not a search term"
     assert terms.split(" OR ")[0] in expected.lower()
+
+
+async def test_only_the_owners_own_dm_text_interrupts_a_busy_run(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+) -> None:
+    """#194: the image queues every mid-run message, so an owner texting
+    "stop" mid-task waited for the task. In the owner's own DM the text is
+    queued as the next turn AND the run is interrupted; a group message, a
+    member's, a command, and anything carrying media -- captioned or bare --
+    keep the queue, and so does a run whose subagents the gateway will not
+    abort. A caption must not claim the marker: hermes takes a turn with media
+    off the interrupt path itself, so the promise would never be kept."""
+    module = _load(monkeypatch, tmp_path)
+    adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
+    adapter._set_reach([_dm_chat(), _chat("cht_g", group=True)])
+    _mark_anchored(adapter, "cht_a", "cht_g")
+    handled = _capture_events(monkeypatch, adapter)
+
+    async def fetch(item: Any, kind: str) -> str:
+        # The failing one stands for a part hermes never sees as media: its note
+        # lands in `text`, so the turn types as TEXT.
+        return "" if item["filename"] == "gone.png" else "/cache/photo.png"
+
+    monkeypatch.setattr(module, "_fetch_attachment", fetch)
+    module.INBOUND_DEBOUNCE_SECONDS = 0.05   # the fetch yields; a zero window would close on it
+    for event_id, chat, role, body, parts in (
+            ("e1", "cht_a", "owner", "stop, do X", None),
+            ("e2", "cht_a", "owner", "/model", None),
+            ("e3", "cht_g", "owner", "lol", None),
+            ("e4", "cht_g", "member", "hi", None),
+            ("e5", "cht_a", "owner", "", [_attachment()]),
+            ("e6", "cht_a", "owner", "", [_attachment(filename="gone.png")]),
+            ("e7", "cht_a", "owner", "stop, do X", [_attachment()])):
+        await adapter._on_frame(
+            _envelope(event_id, chat, f"m_{event_id}", role=role, body=body, attachments=parts), object())
+        await _settle(adapter)             # one burst per frame, whoever spoke last
+    assert [(_turn_body(e.text), e.interrupts_run) for e in handled] == [
+        ("stop, do X", True), ("/model", False), ("lol", False), ("hi", False),
+        ("(attachment)", False), ("[attachment: image/png unavailable]", False),
+        ("stop, do X", False),
+    ]
+
+    calls: list[tuple[str, str]] = []
+    agent = SimpleNamespace(interrupt=lambda text: calls.append(("interrupt", text)))
+
+    class Runner:
+        mode = "interrupt"
+
+        async def busy(self, event: Any, session_key: str) -> bool:
+            return False                        # the gateway's queue-mode text branch
+
+        def _peek_session_state(self, session_key: str) -> Any:
+            return SimpleNamespace(turn=SimpleNamespace(agent=agent))
+
+        async def _resolve_busy_steer_or_redirect(self, event: Any, key: str, mode: str, running: Any) -> Any:
+            return SimpleNamespace(effective_mode=self.mode, redirected=False)
+
+        def _queue_or_replace_pending_event(self, session_key: str, event: Any) -> None:
+            calls.append(("queue", event.text))
+
+        async def _interrupt_running_agent_for_busy_event(self, event: Any, adapter_: Any, running: Any) -> None:
+            running.interrupt(event.text)
+
+    runner = Runner()
+    adapter.gateway_runner = runner
+    adapter.set_busy_session_handler(runner.busy)
+    busy = adapter._busy_session_handler
+    for event in handled[1:]:
+        assert await busy(event, "k") is False
+    assert calls == []
+    assert await busy(handled[0], "k") is True
+    assert calls == [("queue", handled[0].text), ("interrupt", handled[0].text)]
+
+    calls.clear()
+    runner.mode = "queue"                       # demoted: subagents or compression in flight
+    assert await busy(handled[0], "k") is True
+    assert calls == [("queue", handled[0].text)]
