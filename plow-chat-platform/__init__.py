@@ -3527,7 +3527,10 @@ def _wiki_recall(session_id, user_message, platform, **_kwargs):
         corpus, synced = _wiki["corpus"], _wiki["fetched_at"]
     if not corpus or not corpus["chunks"]:
         return None
-    writer = os.environ.get("WIKI_WRITER")
+    # Defaulted, not compared with `is not None`: WIKI_WRITER unset must never
+    # let a None-writer chunk (a still-partial `wiki.toml` stamp) read as this
+    # agent's own root just because both sides are Python's absence value.
+    writer = os.environ.get("WIKI_WRITER", "shared")
     allowed = {i for i, chunk in enumerate(corpus["chunks"]) if chunk["writer"] in ("shared", writer)}
     if not allowed:
         return None

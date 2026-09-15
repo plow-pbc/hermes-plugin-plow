@@ -6785,6 +6785,11 @@ def test_wiki_recall_only_ranks_shared_chunks_and_this_agents_own_writer(
     chunks = json.loads(json.dumps(_WIKI_CHUNKS))
     chunks["chunks"].append({"page": "str/operations/jane-access", "title": "Jane Doe", "writer": "str",
                              "text": "Jane's door code is 4321."})
+    # A still-partial wiki.toml stamp -- writer null, not "shared" -- must
+    # never read as this (or any) agent's own root just because an unset
+    # WIKI_WRITER and a null writer are both Python's None.
+    chunks["chunks"].append({"page": "people/jane-legacy", "title": "Jane Doe", "writer": None,
+                             "text": "Jane's unstamped legacy note."})
     wiki = tmp_path / "wiki"
     (wiki / ".wiki").mkdir(parents=True)
     (wiki / ".wiki" / "chunks.json").write_text(json.dumps(chunks))
@@ -6798,6 +6803,7 @@ def test_wiki_recall_only_ranks_shared_chunks_and_this_agents_own_writer(
     out = module._wiki_recall(session_id="s", user_message="When does Jane like to meet for a call?",
                               platform=module.PLATFORM_NAME)
     assert ("door code" in out["context"]) is carries_secret
+    assert "legacy note" not in out["context"]
 
 
 def test_wiki_recall_reads_and_writes_the_wiki_through_the_mac_relay(
