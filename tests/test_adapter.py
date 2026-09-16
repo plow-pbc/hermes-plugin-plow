@@ -6369,10 +6369,9 @@ def test_latch_section_renders_only_when_a_mac_is_connected(
                  "end to end", "plow_history",
                  # Hermes drops Latch's MCP instructions, so this fallback must
                  # carry the browser-verification ownership rationale itself.
-                 "owner's authorized assistant",
-                 "human principal",
-                 "not whether the assistant software is human",
-                 "Complete it with the browser tools and continue",
+                 "verifies the owner whose browser and account you are using",
+                 "not whether you are human",
+                 "Complete it and continue",
                  # Measured on a real agent with the real Latch tool list
                  # (2026-09-11): three prompt variants that stated the rule
                  # mid-section went 0/4 on a first-turn Mac read; the same
@@ -6383,8 +6382,14 @@ def test_latch_section_renders_only_when_a_mac_is_connected(
                  # A/B on the real tool list (2026-09-11): the deferral above got the
                  # agent to call plow_list_skills and then answer "no" over the
                  # manifest; the listing has to be read as a table of contents.
-                 "read it with plow_read_skill and do what it says in the same turn",
-                 "until a plow_ tool has looked"):
+                 "plow_read_skill it and do what it says this turn",
+                 "until a plow_ tool has looked",
+                 # A Plow deploy drops the Mac link for ~2 min several times a
+                 # day. The model must read a missing plow_ tool or a server
+                 # error as Plow restarting, retry next turn, and only send the
+                 # owner to Latch after two 'not connected' turns apart.
+                 "restarts several times a day", "retry in a minute", "two turns",
+                 ):
         assert must in text
     assert "mcp__plow__" not in text, "the server key differs between installs; name the tool prefix only"
     assert "not your owner" in text
