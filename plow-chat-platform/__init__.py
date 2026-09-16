@@ -19,6 +19,7 @@ import pathlib
 import re
 import stat
 import struct
+import sys
 import threading
 import time
 import urllib.error
@@ -956,6 +957,31 @@ def _latch_section(_session_info: Mapping[str, Any]) -> str:
     return LATCH_PROMPT if os.environ.get("PLOW_MCP_URL") else ""
 
 
+# Hermes' MCP client gives a dropped server five quick retries (~30 s) and
+# then parks it for 300 s with its tools deregistered. A Plow API deploy
+# drops the Mac's relay socket for ~2 min several times a day, so a parked
+# Latch is the ordinary state an owner's next message finds -- and the API
+# is long back by then. Reconnect it here, before Hermes snapshots this
+# turn's tools (agent/turn_context._refresh_mcp_tools_between_turns runs
+# after this hook), so the turn has its plow_ tools instead of "Unknown
+# tool". Private Hermes names, pinned by the base image; any miss logs and
+# the turn proceeds without the Mac, as it would have anyway.
+def _wake_mac_link() -> None:
+    url = os.environ.get("PLOW_MCP_URL")
+    if not url or "tools.mcp_tool" not in sys.modules:
+        return
+    try:
+        from tools import mcp_tool as core
+        from tools.mcp_tool_loop import _signal_reconnect_and_wait
+        with core._lock:
+            parked = [srv for srv in core._servers.values()
+                      if srv._config.get("url") == url and (srv._was_parked or srv.session is None)]
+        for srv in parked:
+            _signal_reconnect_and_wait(srv.name, srv, op_description="plow_chat turn start", timeout=15.0)
+    except Exception:  # noqa: BLE001 - a Hermes without these names still gets its turn
+        log.warning("plow_chat: could not wake the Latch MCP server before the turn", exc_info=True)
+
+
 # The Mac's own skill manifest, rendered into the trusted prompt. Latch
 # publishes one description per skill ("Read and send the owner's iMessages
 # ... rather than answering that you cannot see their messages"), and each is
@@ -1619,6 +1645,8 @@ class PlowChatAdapter(BasePlatformAdapter):
                               retryable=False)
 
     async def on_processing_start(self, event):
+        # Off the loop: the wait polls with time.sleep, up to 15 s.
+        await asyncio.to_thread(_wake_mac_link)
         chat_uid = event.source.chat_id
         # Hermes builds its own events and swallows a raise here, so an
         # unstamped event is a speakerless wake read from nothing that can raise.

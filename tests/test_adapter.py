@@ -5249,6 +5249,61 @@ async def test_turn_open_reads_the_sentinel_contract_off_the_prompt(
         await adapter.on_processing_complete(event, None)
 
 
+@pytest.mark.parametrize(("mac", "parked", "session", "expected"), [
+    (True, True, None, ["plow"]),      # parked after a Plow deploy: reconnect now
+    (True, False, None, ["plow"]),     # mid-reconnect with no session yet: nudge it
+    (True, False, object(), []),       # healthy: leave it alone
+    (False, True, None, []),           # no Mac on this account: nothing to wake
+], ids=["parked", "dead-session", "healthy", "no-mac"])
+async def test_a_parked_latch_link_reconnects_before_the_turn(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
+    mac: bool, parked: bool, session: Any, expected: list[str],
+) -> None:
+    """A Plow API deploy drops the Mac's relay socket for ~2 min; Hermes'
+    MCP client gives up in ~30 s and parks for 5 min, deregistering the
+    plow_ tools. The owner's next message arrives well after the API is
+    back, so the turn's first act is to reconnect the parked server and
+    wait for its session -- Hermes' turn-start refresh then lands the
+    tools in this very turn instead of an "Unknown tool" reply."""
+    module = _load(monkeypatch, tmp_path)
+    url = "https://api.plow.co/v1/relay/devices/u/mcp"
+    if mac:
+        monkeypatch.setenv("PLOW_MCP_URL", url)
+    else:
+        monkeypatch.delenv("PLOW_MCP_URL", raising=False)
+    latch = SimpleNamespace(name="plow", _config={"url": url}, _was_parked=parked, session=session)
+    other = SimpleNamespace(name="gbrain", _config={"url": "https://gbrain.example/mcp"}, _was_parked=True,
+                            session=None)
+    core = types.ModuleType("tools.mcp_tool")
+    core._lock = threading.Lock()  # type: ignore[attr-defined]
+    core._servers = {("plow", None): latch, ("gbrain", None): other}  # type: ignore[attr-defined]
+    loop_mod = types.ModuleType("tools.mcp_tool_loop")
+    woken: list[str] = []
+
+    def signal(server_name: str, srv: Any, *, op_description: str, timeout: float) -> bool:
+        assert srv is latch and timeout > 0 and op_description
+        woken.append(server_name)
+        srv.session = object()
+        return True
+
+    loop_mod._signal_reconnect_and_wait = signal  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "tools", types.ModuleType("tools"))
+    monkeypatch.setitem(sys.modules, "tools.mcp_tool", core)
+    monkeypatch.setitem(sys.modules, "tools.mcp_tool_loop", loop_mod)
+
+    adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
+    adapter._set_reach([_chat("cht_a")])
+    event = SimpleNamespace(
+        source=SimpleNamespace(chat_id="cht_a", chat_type="dm", user_id="u", role_authorized=True),
+        message_id="msg_1", channel_prompt=module.OWNER_CHANNEL_PROMPT, authority=True, recall_everywhere=True)
+    await adapter.on_processing_start(event)
+    try:
+        assert woken == expected
+        assert adapter._active_turn.get()["chat_uid"] == "cht_a"  # the turn still opened
+    finally:
+        await adapter.on_processing_complete(event, None)
+
+
 @pytest.mark.parametrize(("chat_uid", "group", "trusted", "authority"),
                          [("cht_b", False, False, True), ("cht_b", True, False, False),
                           ("cht_b", True, True, False), ("cht_gone", True, True, False)],
