@@ -505,8 +505,20 @@ Outbound files the model emits go through Hermes' `send_image_file` /
 `send_voice` / `send_video` / `send_document` hooks, which this adapter
 implements as the Plow contract — declare the attachment, PUT the bytes to the
 provider's upload URL with exactly the headers Plow returned, then send the
-message with `attachment_uids`. Content types are limited to what the provider
-accepts; a `415` from the declare comes back as the send's error.
+message with `attachment_uids`. `send_voice` instead posts
+`{"attachment_uid": "att_…"}` to `POST /v1/chats/{chat_id}/voicememo` for native
+iMessage voice-memo playback. A non-empty caption follows as a separate text
+message after the memo succeeds. Caption failures are logged and preserve the
+memo's successful receipt; an uncertain memo delivery sends no caption and
+retains the same delivery-unknown result as ordinary messages. Content types
+are limited to what the provider accepts; a `415` from the declare comes back
+as the send's error. Audio sent through `send_document` remains a regular file
+attachment.
+
+Voice memos require [`plow-pbc/plow#2012`](https://github.com/plow-pbc/plow/pull/2012)
+to be deployed before the plugin pin advances. There is no fallback to the
+generic attachment route when the voice-memo route is unavailable.
+
 The `plow_chat` platform hint is what tells the model this path exists
 (`MEDIA:/absolute/path/to/file`); without it an agent sees only `plow_send_sequence`
 and concludes files cannot be sent (#156).
