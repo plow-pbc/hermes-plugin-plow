@@ -2555,15 +2555,23 @@ class _VoiceHTTP(_ChatResourceHTTP):
         return _Resp({})
 
 
-@pytest.mark.parametrize("caption", [None, "", "  \n", "  Here is the summary.  "])
-async def test_send_voice_only_posts_nonempty_caption_after_memo(monkeypatch, tmp_path, caption):
+def _voice_case(monkeypatch, tmp_path, memo, caption):
     module = _load(monkeypatch, tmp_path)
     adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
     adapter._active_turn.set(_OWNER_DM)
     audio = tmp_path / "summary.mp3"
     audio.write_bytes(b"audio")
-    http = _VoiceHTTP(_Resp({"uid": "msg_voice"}, 201), _Resp({"uid": "msg_caption"}, 201))
+    http = _VoiceHTTP(memo, caption)
     monkeypatch.setattr(module.aiohttp, "ClientSession", lambda: http)
+    return module, adapter, audio, http
+
+
+@pytest.mark.parametrize("caption", [None, "", "  \n", "  Here is the summary.  "])
+async def test_send_voice_only_posts_nonempty_caption_after_memo(monkeypatch, tmp_path, caption):
+    module, adapter, audio, http = _voice_case(
+        monkeypatch, tmp_path, _Resp({"uid": "msg_voice"}, 201), _Resp({"uid": "msg_caption"}, 201))
+    replies = []
+    monkeypatch.setattr(adapter, "_goal_note_reply", lambda chat_id, body: replies.append(body))
 
     result = await adapter.send_voice("cht_a", str(audio), caption=caption)
 
@@ -2575,19 +2583,15 @@ async def test_send_voice_only_posts_nonempty_caption_after_memo(monkeypatch, tm
         ("post", f"{module.BASE}/v1/chats/cht_a/voicememo", {"attachment_uid": "att_voice"}),
     ] + ([("post", f"{module.BASE}/v1/chats/cht_a/messages", {"body": caption.strip()})]
          if caption and caption.strip() else [])
+    assert replies == ["(sent summary.mp3)"] + (
+        ["Here is the summary."] if caption and caption.strip() else [])
 
 
 @pytest.mark.parametrize("status", [404, 409, 408, 424, 503])
 async def test_send_voice_failure_never_sends_caption(monkeypatch, tmp_path, status):
-    module = _load(monkeypatch, tmp_path)
-    adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
-    adapter._active_turn.set(_OWNER_DM)
-    audio = tmp_path / "summary.mp3"
-    audio.write_bytes(b"audio")
     unknown = status in (408, 424, 503)
     response = _NoBodyResp({}, status) if unknown else _Resp({"detail": "rejected"}, status)
-    http = _VoiceHTTP(response, _Resp({"uid": "msg_caption"}, 201))
-    monkeypatch.setattr(module.aiohttp, "ClientSession", lambda: http)
+    _, adapter, audio, http = _voice_case(monkeypatch, tmp_path, response, _Resp({"uid": "msg_caption"}, 201))
 
     result = await adapter.send_voice("cht_a", str(audio), caption="Here is the summary.")
 
@@ -2607,13 +2611,7 @@ async def test_send_voice_failure_never_sends_caption(monkeypatch, tmp_path, sta
 async def test_send_voice_keeps_memo_receipt_when_caption_fails(
     monkeypatch, tmp_path, caplog, caption_response,
 ):
-    module = _load(monkeypatch, tmp_path)
-    adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
-    adapter._active_turn.set(_OWNER_DM)
-    audio = tmp_path / "summary.mp3"
-    audio.write_bytes(b"audio")
-    http = _VoiceHTTP(_Resp({"uid": "msg_voice"}, 201), caption_response)
-    monkeypatch.setattr(module.aiohttp, "ClientSession", lambda: http)
+    _, adapter, audio, http = _voice_case(monkeypatch, tmp_path, _Resp({"uid": "msg_voice"}, 201), caption_response)
     replies = []
     monkeypatch.setattr(adapter, "_goal_note_reply", lambda chat_id, body: replies.append(body))
 
