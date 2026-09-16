@@ -2605,6 +2605,38 @@ async def test_send_voice_failure_never_sends_caption(monkeypatch, tmp_path, sta
     assert http.calls[-1][1].endswith("/voicememo")
 
 
+async def test_voice_delivery_unknown_suppresses_failure_notice_once(monkeypatch, tmp_path):
+    module, adapter, audio, http = _voice_case(
+        monkeypatch, tmp_path, _NoBodyResp({}, 424), _Resp({"uid": "msg_notice"}, 201))
+    adapter._set_reach([_chat("cht_a")])
+    notice = "⚠️ Couldn't deliver the audio attachment."
+
+    async def notify(self, chat_id, media_path, *, is_voice=False, metadata=None):
+        # The gateway's base hook sends a notice without receiving the send result.
+        await self.send(chat_id, notice, metadata=metadata)
+
+    monkeypatch.setattr(module.BasePlatformAdapter, "_notify_media_delivery_failure", notify, raising=False)
+    result = await adapter.send_voice("cht_a", str(audio))
+    assert result.success is False and result.raw_response == {"delivery_unknown": True}
+    await adapter._notify_media_delivery_failure("cht_a", str(audio), is_voice=True)
+    assert len(http.calls) == 3, "only declare, upload, and one memo POST; no failure notice or retry"
+
+    # The marker is consumed, so another notification is not silently dropped.
+    await adapter._notify_media_delivery_failure("cht_a", str(audio), is_voice=True)
+    assert http.calls[-1][1].endswith("/messages")
+    assert http.calls[-1][2]["json"] == {"body": notice}
+
+    http.response = _Resp({"detail": "rejected"}, 409)
+    result = await adapter.send_voice("cht_a", str(audio))
+    assert result.success is False and result.raw_response is None
+    await adapter._notify_media_delivery_failure("cht_a", str(audio), is_voice=True)
+    assert [url.rsplit("/", 1)[-1] for _, url, _ in http.calls] == [
+        "attachments", "voice", "voicememo", "messages",
+        "attachments", "voice", "voicememo", "messages",
+    ]
+    assert http.calls[-1][2]["json"] == {"body": notice}
+
+
 @pytest.mark.parametrize("caption_response", [
     _Resp({"detail": "rejected"}, 403), _NoBodyResp({}, 503), TimeoutError(),
 ])

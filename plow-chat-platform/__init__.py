@@ -1367,6 +1367,7 @@ class PlowChatAdapter(BasePlatformAdapter):
         self._live_turns = {}
         self._sequence_locks = {}
         self._sequences = {}
+        self._unknown_voice_sends: set[tuple[str, str]] = set()
 
     def _checkpoint_path(self, chat_uid):
         if chat_uid == self._configured_home_chat_uid:
@@ -2664,7 +2665,20 @@ class PlowChatAdapter(BasePlatformAdapter):
         return await self._send_attachment(chat_id, image_path, caption=caption)
 
     async def send_voice(self, chat_id, audio_path, caption=None, **_kwargs):
-        return await self._send_attachment(chat_id, audio_path, caption=caption, voice=True)
+        key = (chat_id, audio_path)
+        self._unknown_voice_sends.discard(key)
+        result = await self._send_attachment(chat_id, audio_path, caption=caption, voice=True)
+        if (result.raw_response or {}).get("delivery_unknown") is True:
+            self._unknown_voice_sends.add(key)
+        return result
+
+    async def _notify_media_delivery_failure(self, chat_id, media_path, *, is_voice=False, metadata=None):
+        # The gateway passes no send result to this hook; consume its marker once.
+        key = (chat_id, media_path)
+        if key in self._unknown_voice_sends:
+            self._unknown_voice_sends.remove(key)
+            return
+        await super()._notify_media_delivery_failure(chat_id, media_path, is_voice=is_voice, metadata=metadata)
 
     async def send_video(self, chat_id, video_path, caption=None, **_kwargs):
         return await self._send_attachment(chat_id, video_path, caption=caption)
