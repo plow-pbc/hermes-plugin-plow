@@ -2483,6 +2483,11 @@ _BOOK_INDEX = {"15550000001": {"display_name": "Sam", "relationship": None},
     ("member aliases a known handle", False, "+15550000002",
      [{"handle": "+15550000002", "display_name": "Pat", "same_person_as": "+1 (555) 000-0001"}],
      {"+15550000002": {"display_name": "Pat"}}),
+    # Nor a bare handle known only on another chat's roster -- not in this
+    # room, and not in the book, but not up for grabs either.
+    ("member aliases a handle known only elsewhere", False, "+15550000002",
+     [{"handle": "+15550000002", "display_name": "Pat", "same_person_as": "+15559990000"}],
+     {"+15550000002": {"display_name": "Pat"}}),
     # An alias with no digit does not look like a phone, so it is dropped too.
     ("alias must contain a digit to look like a phone", False, "+15550000002",
      [{"handle": "+15550000002", "display_name": "Pat", "same_person_as": "-------"}],
@@ -2521,6 +2526,8 @@ def test_only_the_speakers_own_facts_reach_the_book(
     book = {k: dict(v) for k, v in _BOOK_INDEX.items()}
     if not owner and speaker == "+15550000003":
         known["15550000003"] = "+15550000003"
+    if case == "member aliases a handle known only elsewhere":
+        known["15559990000"] = "+15559990000"   # a bare member of some other chat, not this one
     out = module._admit_people_facts(facts, owner=owner, speaker_handle=speaker,
                                      owner_handle="+15550000001", known=known, book=book)
     assert out == expected, case
@@ -2555,24 +2562,42 @@ def _people_adapter(module: Any, monkeypatch: pytest.MonkeyPatch, chats: list[di
     return adapter, written
 
 
-@pytest.mark.parametrize("owner, spoken, facts, expected", [
+def _bare_member_chat(uid: str, handle: str) -> dict[str, Any]:
+    """A group chat whose only non-owner member is the given bare handle --
+    the shape a member's alias must not be able to reach into."""
+    chat = _chat(uid, group=True)
+    chat["participants"][2]["provider_key"] = handle
+    return chat
+
+
+@pytest.mark.parametrize("owner, spoken, facts, expected, chats", [
     (True, "Hey Patrick - sorry for the delay!",
      [{"handle": "+15550000002", "display_name": "Patrick"}],
-     [("+15550000002", {"display_name": "Patrick"})]),
+     [("+15550000002", {"display_name": "Patrick"})],
+     [_chat("cht_a"), _chat("cht_b", group=True)]),
     (False, "This is Patrick Salyer, psalyer@mayfield.com",
      [{"handle": "+15550000002", "display_name": "Patrick Salyer", "same_person_as": "psalyer@mayfield.com"}],
-     [("+15550000002", {"display_name": "Patrick Salyer"}), ("psalyer@mayfield.com", {"display_name": "Patrick Salyer"})]),
-    (False, "Sam's wife is Abby", [{"handle": "+15550000001", "relationship": "husband of Abby"}], []),
+     [("+15550000002", {"display_name": "Patrick Salyer"}), ("psalyer@mayfield.com", {"display_name": "Patrick Salyer"})],
+     [_chat("cht_a"), _chat("cht_b", group=True)]),
+    (False, "Sam's wife is Abby", [{"handle": "+15550000001", "relationship": "husband of Abby"}], [],
+     [_chat("cht_a"), _chat("cht_b", group=True)]),
+    # A member's alias may not reach a bare handle that is a stranger to this
+    # room but a member of another chat the owner reaches.
+    (False, "my other number is +15559990000",
+     [{"handle": "+15550000002", "display_name": "Pat", "same_person_as": "+15559990000"}],
+     [("+15550000002", {"display_name": "Pat"})],
+     [_chat("cht_a"), _chat("cht_b", group=True), _bare_member_chat("cht_c", "+15559990000")]),
 ])
 async def test_what_a_speaker_says_about_people_lands_in_the_book(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
     owner: bool, spoken: str, facts: list[dict[str, Any]], expected: list[tuple[str, dict[str, Any]]],
+    chats: list[dict[str, Any]],
 ) -> None:
     """A turn's own words are classified and the admitted facts are written --
     with nobody choosing to call a tool."""
     module = _load(monkeypatch, tmp_path)
     module._plugin_llm = _PeopleLlm(facts)
-    adapter, written = _people_adapter(module, monkeypatch, [_chat("cht_a"), _chat("cht_b", group=True)], _BOOK[:1])
+    adapter, written = _people_adapter(module, monkeypatch, chats, _BOOK[:1])
     turn = {"chat_uid": "cht_b", "owner": owner, "recall_text": spoken,
             "speaker_handle": "+15550000001" if owner else "+15550000002"}
     await module._capture_people_turn(adapter, adapter._chats["cht_b"], turn)

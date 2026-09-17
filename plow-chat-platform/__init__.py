@@ -4546,7 +4546,8 @@ def _admit_people_facts(facts, *, owner, speaker_handle, owner_handle, known, bo
     relationship -- who someone is to the owner is the owner's to say. A
     handle nobody knows is dropped rather than invented; an alias must look
     like a handle and takes the same name as the row it aliases -- and, when
-    a member gives it, must be a handle nobody yet knows.
+    a member gives it, must be a handle nobody yet knows -- on no roster and
+    not in the book.
     """
     speaker_key = _handle_key(speaker_handle)
     owner_key = _handle_key(owner_handle)
@@ -4574,7 +4575,8 @@ def _admit_people_facts(facts, *, owner, speaker_handle, owner_handle, known, bo
         name = body.get("display_name") or current.get("display_name")
         if alias and name and _is_handle(alias):
             alias_key = _handle_key(alias)
-            if alias_key != key and (owner or alias_key not in known) and not book.get(alias_key, {}).get("display_name"):
+            if (alias_key != key and (owner or (alias_key not in known and alias_key not in book))
+                    and not book.get(alias_key, {}).get("display_name")):
                 writes[alias] = {"display_name": name}
     return writes
 
@@ -4617,8 +4619,13 @@ async def _capture_people_turn(adapter, chat, turn):
     """Classify the speaker's words against the people they may name, admit
     what this speaker may write, and write it. Returns the writes."""
     members = [p for p in chat.get("participants", []) if p.get("type") == "member"]
-    known = {_handle_key(p["provider_key"]): p["provider_key"] for p in members}
     people = [f"{_participant_identity(p)} ({p['provider_key']})" for p in members]
+    # A member's alias must name a handle nobody knows anywhere -- every
+    # roster in reach, not just this room -- even though the classifier
+    # itself only ever sees this room's own people.
+    rooms = [chat] if turn["owner"] else list(adapter._chats.values())
+    known = {_handle_key(p["provider_key"]): p["provider_key"]
+             for room in rooms for p in room.get("participants", []) if p.get("type") == "member"}
     book = {}
     if turn["owner"]:
         # The owner may name anyone in their book, roster row or not: a DM is
