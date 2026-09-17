@@ -2645,6 +2645,10 @@ def test_the_hook_is_silent_without_a_speaker_or_words(
     adapter = _live_tool(module, monkeypatch, "contacts", result=_BOOK)
     module._ACTIVE_TURN.set(turn)
     assert module._capture_people("s1", "Hey Patrick", module.PLATFORM_NAME) is None
+    # Drain the adapter loop before asserting: a wrongly scheduled coroutine
+    # would have recorded its call by the time this sleep completes, since
+    # _PeopleLlm.acomplete_structured appends to calls before any await.
+    asyncio.run_coroutine_threadsafe(asyncio.sleep(0), module._live[1]).result(timeout=1)
     assert module._plugin_llm.calls == []
 
 
