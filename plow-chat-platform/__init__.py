@@ -1151,7 +1151,15 @@ def _backfill_bare_handles(adapter, loop, bare):
                 log.warning("[plow_chat] contact store %s skipped: %s", store, output.strip()[:200])
                 continue
             rows.extend(json.loads(output or "[]"))
-        for handle, name in _resolve_handles(rows, bare).items():
+        resolved = _resolve_handles(rows, bare)
+        # Bare was decided before the relay round trips; a capture in that
+        # window is a person's own word for their name, and the Mac's card
+        # fills an empty row only.
+        named = {_handle_key(r["provider_key"]) for r in asyncio.run_coroutine_threadsafe(
+            adapter.contacts(), loop).result(timeout=30) if r.get("display_name")}
+        for handle, name in resolved.items():
+            if _handle_key(handle) in named:
+                continue
             asyncio.run_coroutine_threadsafe(
                 adapter.name_contact(handle, {"display_name": name}), loop).result(timeout=30)
     except Exception as exc:  # noqa: BLE001 - a name is cosmetic; reach is not
