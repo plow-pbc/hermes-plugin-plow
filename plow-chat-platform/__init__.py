@@ -4544,15 +4544,22 @@ def _plow_name_contact(args, **_kwargs):
         "error": "not recorded on this turn: a member may name only their own bare handle, "
                  "and a relationship is the owner's to say",
     })
+    # An own-handle relationship refusal addresses whoever is on this turn:
+    # the owner is never told to "ask the owner" about their own handle.
+    own_handle_refusal = json.dumps({
+        "success": False,
+        "error": "a relationship never lands on your own handle; nothing was recorded",
+    })
     # A clear ("") is an owner overwrite, mirroring the matrix's own rule that
     # a relationship never lands on the owner's own handle, cleared or set.
     owner_handle = turn.get("owner_handle")
     clears = {k for k, v in body.items() if v == ""}
     sets = {k: v for k, v in body.items() if v != ""}
+    own_handle = _handle_key(handle) == _handle_key(owner_handle)
     if clears and not turn.get("owner"):
         return generic_refusal
-    if "relationship" in clears and _handle_key(handle) == _handle_key(owner_handle):
-        return generic_refusal
+    if "relationship" in clears and own_handle:
+        return own_handle_refusal
     if _live is None:
         return json.dumps({"success": False, "error": "the Plow Chat gateway is not connected; nothing was recorded"})
     adapter, loop = _live
@@ -4567,6 +4574,11 @@ def _plow_name_contact(args, **_kwargs):
             })
         known = {_handle_key(handle): handle}
         book = {_handle_key(r["provider_key"]): r for r in book_rows}
+
+        def admit(facts, book):
+            return _admit_people_facts(facts, owner=turn.get("owner"), speaker_handle=turn.get("speaker_handle"),
+                                       owner_handle=owner_handle, known=known, book=book).get(handle, {})
+
         current = book.get(_handle_key(handle), {})
         changed = {k: v for k, v in sets.items() if _one_line(v) != (current.get(k) or "")}
         # Two different questions: `allowed` asks pure provenance -- who may
@@ -4576,13 +4588,8 @@ def _plow_name_contact(args, **_kwargs):
         # `admitted` asks what actually changes, against the real book, so a
         # genuine restatement never trips the overwrite gate a real change
         # would. May-write and may-overwrite are different rules.
-        allowed = _admit_people_facts([{"handle": handle, **sets}], owner=turn.get("owner"),
-                                      speaker_handle=turn.get("speaker_handle"),
-                                      owner_handle=owner_handle, known=known, book={}).get(handle, {})
-        admitted = (_admit_people_facts([{"handle": handle, **changed}], owner=turn.get("owner"),
-                                        speaker_handle=turn.get("speaker_handle"),
-                                        owner_handle=owner_handle, known=known, book=book).get(handle, {})
-                    if changed else {})
+        allowed = admit([{"handle": handle, **sets}], {})
+        admitted = admit([{"handle": handle, **changed}], book) if changed else {}
         if set(allowed) != set(sets) or set(admitted) != set(changed):
             # A field missing from `allowed` never had a claim at all (wrong
             # field type, or a member naming a handle that is not their own);
@@ -4593,6 +4600,8 @@ def _plow_name_contact(args, **_kwargs):
             provenance_missing = set(sets) - set(allowed)
             overwrite_missing = set(changed) - set(admitted)
             if provenance_missing == {"relationship"}:
+                if own_handle:
+                    return own_handle_refusal
                 return json.dumps({
                     "success": False,
                     "error": "relationship not recorded: it is the owner's to say -- drop it or ask the owner",

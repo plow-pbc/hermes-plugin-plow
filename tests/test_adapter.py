@@ -2428,7 +2428,9 @@ def _authority_case_name_a_contact(module: Any, monkeypatch: pytest.MonkeyPatch,
     assert display["success"] is authorized
     assert record == ([("+15550000002", {"display_name": "Abby"})] if authorized else [])
     record.clear()
-    module._ACTIVE_TURN.set(turn and {**turn, "owner_handle": "+15550000001"})
+    # The owner fixtures already carry owner_handle; only a member turn needs
+    # the owner seated here to test a write against a roster that has one.
+    module._ACTIVE_TURN.set(turn if turn is None or turn["owner"] else {**turn, "owner_handle": "+15550000001"})
     owner_turn = bool(turn) and turn["owner"]
     display = json.loads(module._plow_name_contact(
         {"handle": "+15550000002", "display_name": "Abby", "relationship": "wife"}))
@@ -2511,17 +2513,19 @@ def test_name_a_contact_clears_and_restates_through_the_matrix(
     assert "not recorded on this turn" in member_clear["error"]
     assert record == []
 
-    # A relationship never clears on the owner's own handle either.
+    # A relationship never clears on the owner's own handle either -- and the
+    # message addresses the owner themselves, not a member who isn't here.
     module._ACTIVE_TURN.set(_OWNER_DM)
     own_handle_clear = json.loads(module._plow_name_contact({"handle": "+15550000001", "relationship": ""}))
     assert not own_handle_clear["success"]
-    assert "not recorded on this turn" in own_handle_clear["error"]
+    assert own_handle_clear["error"] == "a relationship never lands on your own handle; nothing was recorded"
     assert record == []
 
-    # Nor does a relationship *set* land there -- cleared or set, never.
+    # Nor does a relationship *set* land there -- cleared or set, never --
+    # with the same owner-addressed message, not the member's.
     own_handle_set = json.loads(module._plow_name_contact({"handle": "+15550000001", "relationship": "self"}))
     assert not own_handle_set["success"]
-    assert "relationship not recorded" in own_handle_set["error"]
+    assert own_handle_set["error"] == "a relationship never lands on your own handle; nothing was recorded"
     assert record == []
 
     # The owner repeats the book's current relationship while genuinely
@@ -3418,6 +3422,28 @@ def test_naming_reports_unconfirmed_write_on_network_error(
 
     assert out["success"] is False
     assert expected in out["error"]
+
+
+def test_naming_reports_a_failed_contact_book_read(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
+) -> None:
+    """A failed book read is not evidence anything was written -- it gets its
+    own message, and name_contact is never even reached."""
+    module = _load(monkeypatch, tmp_path)
+    record: list[Any] = []
+    adapter = _live_tool(module, monkeypatch, "name_contact", record=record)
+
+    async def contacts() -> list[dict[str, Any]]:
+        raise TimeoutError("no response")
+
+    adapter.contacts = contacts
+    module._ACTIVE_TURN.set(_OWNER_DM)
+
+    out = json.loads(module._plow_name_contact({"handle": "+15550000002", "display_name": "Abby"}))
+
+    assert out == {"success": False,
+                   "error": "could not read the contact book; nothing was recorded; retrying is safe"}
+    assert record == []
 
 
 # The contact book as the server serves it: the owner's own row first.

@@ -261,8 +261,10 @@ def _owner_participant(chat):
 
 def _owner_handle(chat):
     """The owner's own handle off this chat's roster, or None when the chat
-    carries no owner participant. What `_plow_name_contact` compares a turn's
-    write target against to refuse a non-owner turn renaming the owner."""
+    carries no owner participant. Stamped onto every turn, owner or member,
+    so `_admit_people_facts`'s provenance rule can tell the owner's own
+    handle from anyone else's -- a relationship never lands on it, set or
+    cleared, and a member's word never reaches it."""
     owner = _owner_participant(chat)
     return owner.get("provider_key") if owner else None
 
