@@ -2461,6 +2461,15 @@ def _authority_case_name_a_contact(module: Any, monkeypatch: pytest.MonkeyPatch,
         assert not other_handle["success"]
         assert "not recorded on this turn" in other_handle["error"]
         assert record == []
+        record.clear()
+        # Naming the owner's own handle isn't the member's own handle either
+        # -- the refusal must still point at the owner, not misname it as
+        # the member's "own handle".
+        owner_relationship = json.loads(module._plow_name_contact(
+            {"handle": "+15550000001", "relationship": "dad"}))
+        assert not owner_relationship["success"]
+        assert "owner's to say" in owner_relationship["error"]
+        assert record == []
     for body in ({"handle": "+15550000001", "display_name": "Sam"},
                  {"handle": "+1 (555) 000-0001", "display_name": "Sam"}):   # canonically the owner
         record.clear()

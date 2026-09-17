@@ -4600,7 +4600,7 @@ def _plow_name_contact(args, **_kwargs):
             provenance_missing = set(sets) - set(allowed)
             overwrite_missing = set(changed) - set(admitted)
             if provenance_missing == {"relationship"}:
-                if own_handle:
+                if own_handle and turn.get("owner"):
                     return own_handle_refusal
                 return json.dumps({
                     "success": False,
