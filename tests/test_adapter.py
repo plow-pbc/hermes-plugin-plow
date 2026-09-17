@@ -1728,6 +1728,29 @@ async def test_authority_selects_the_prompt(
     await adapter.on_processing_complete(event, None)
 
 
+@pytest.mark.parametrize("user_id, expected", [
+    ("mem_owner_cht_b", "+15550000001"),   # the owner's own turn
+    ("mem_other_cht_b", "+15550000002"),   # a member's turn
+    ("plow_goal", None),                   # a wake: nobody spoke
+])
+async def test_every_turn_carries_the_speakers_handle(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, user_id: str, expected: str | None
+) -> None:
+    """The capture hook names people from what the SPEAKER said, so the turn
+    record says who that is as a handle -- the key the contact book uses --
+    or None on a wake, which has no speaker to learn from."""
+    module = _load(monkeypatch, tmp_path)
+    adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
+    adapter._set_reach([_chat("cht_a"), _chat("cht_b", group=True)])
+    event = SimpleNamespace(
+        source=SimpleNamespace(chat_id="cht_b", chat_type="group", user_id=user_id,
+                               role_authorized=user_id == "mem_owner_cht_b"),
+        message_id="msg_1", authority=True, recall_everywhere=False, channel_prompt="",
+    )
+    await adapter.on_processing_start(event)
+    assert adapter._active_turn.get()["speaker_handle"] == expected
+
+
 # What an owner turn is told about its own owner. Both name the OWNER, whose
 # name their own agent may carry as prompt authority; the inviter's name for
 # themselves may not, and is asserted separately below.
@@ -2947,6 +2970,7 @@ def _invite_turn(**overrides: Any) -> dict[str, Any]:
         "recall_everywhere": False,
         "no_reply_ok": False,
         "recall_text": None,
+        "speaker_handle": "+17035550123",
         "participant_uid": "cp_taylor",
         "participant_identity": "Taylor",
         "source_message_id": "msg_delight_1",
@@ -3061,7 +3085,7 @@ def test_invite_workflow_reports_delivery_failure(
             None,
             "missing",
             {"chat_uid": "cht_b", "owner": False, "dm": False, "authority": False, "recall_everywhere": False,
-             "no_reply_ok": False, "recall_text": None,
+             "no_reply_ok": False, "recall_text": None, "speaker_handle": None,
              "source_message_id": "msg_delight_1", "owner_handle": "+15550000001"},
             id="missing-participant",
         ),
@@ -3092,6 +3116,7 @@ def test_invite_workflow_reports_delivery_failure(
                 participant_identity="+17035550124",
                 triggered_at=mock.ANY,
                 owner_handle="+15550000001",
+                speaker_handle="+17035550124",
             ),
             id="phone-fallback",
         ),
@@ -7830,7 +7855,7 @@ async def test_a_later_turn_start_does_not_strip_the_running_turn(monkeypatch, t
     assert (await adapter.send_sequence({'items': [dict(type='text', body='Opening')]}, first))['success']
 
     event = SimpleNamespace(
-        source=SimpleNamespace(chat_id='cht_a', role_authorized=True, chat_type='dm'),
+        source=SimpleNamespace(chat_id='cht_a', role_authorized=True, chat_type='dm', user_id='owner'),
         channel_prompt='', message_id='', text='', authority=True, recall_everywhere=True)
     await adapter.on_processing_start(event)
     second = adapter._active_turn.get()

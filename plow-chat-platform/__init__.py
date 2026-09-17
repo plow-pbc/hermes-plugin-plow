@@ -1637,17 +1637,19 @@ class PlowChatAdapter(BasePlatformAdapter):
                 getattr(event, "invite_operation_message_id", event.message_id)
             ) if event.message_id else None,
         }
+        chat = self._chats.get(chat_uid, {})
+        participant = next(
+            (item for item in chat.get("participants", [])
+             if item.get("type") == "member" and item.get("uid") == event.source.user_id),
+            None,
+        )
+        # Who spoke, as the key the contact book uses; None on a wake or
+        # setup turn, which has no speaker to learn anything from.
+        turn["speaker_handle"] = participant.get("provider_key") if participant else None
         if not turn["owner"]:
             # A member turn may still name someone -- but never the owner's own
             # handle; `_plow_name_contact` checks a member's target against this.
-            turn["owner_handle"] = _owner_handle(self._chats.get(chat_uid, {}))
-            participant = next(
-                (
-                    item for item in self._chats.get(chat_uid, {}).get("participants", [])
-                    if item.get("type") == "member" and item.get("uid") == event.source.user_id
-                ),
-                None,
-            )
+            turn["owner_handle"] = _owner_handle(chat)
             if participant is not None:
                 identity = _participant_identity(participant)
                 if identity:
