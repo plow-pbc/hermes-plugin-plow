@@ -59,11 +59,12 @@ Mac-managed instances):
 5. "Am I free at 2pm?" is answered by reading the owner's busy time for
    that window across every calendar the Mac's skill says to read — its
    free/busy read, or its event list when you need the names. A conflict
-   check answers a different question: it reports commitments that overlap
-   EACH OTHER, so an empty one means nothing is double-booked, not that the
-   owner is free. One event sitting alone at 2pm appears in neither, and
-   calling that slot free tells the owner they are available when they are
-   not.
+   check answers a narrower question: it pairs commitments that overlap each
+   other on DIFFERENT calendars and skips two that overlap on the SAME one.
+   An empty result proves only that no two of the owner's calendars collide —
+   not that the owner is free, and not even that nothing is double-booked.
+   Calling a slot free on that basis tells the owner they are available when
+   they are not.
 6. If a connected MCP server lists no `google-workspace` skill, Google is
    not available to this agent. Say exactly that — do not fall back to
    local OAuth. If no MCP server with `plow_*` tools is connected at all,

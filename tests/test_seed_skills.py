@@ -75,12 +75,14 @@ def test_the_owners_mac_skill_claims_every_question_about_the_owners_world() -> 
 def test_the_google_skill_sends_availability_to_a_busy_time_read() -> None:
     """An agent asked "am I free at 2pm" ran the conflict check, got nothing
     back and said the slot was free; the owner had a commitment there on a
-    shared calendar. A conflict check reports commitments that overlap each
-    other, so a lone event is in neither its result nor the answer."""
+    shared calendar. A conflict check pairs commitments across calendars and
+    skips same-calendar pairs, so an empty result settles neither
+    availability nor double-booking."""
     body = (ROOT / "seed-skills/productivity/google-workspace/SKILL.md").read_text()
     assert '"Am I free at 2pm?"' in body
     assert "free/busy read" in body
-    assert "not that the\n   owner is free" in body
+    assert "skips two that overlap on the SAME one" in body
+    assert "not that the owner is free, and not even that nothing is double-booked" in body.replace("\n   ", " ")
     # The conflict-override rule keeps its own step; availability is a
     # separate one, and each has to survive an edit to the other.
     assert body.index("--confirm-conflict") < body.index('"Am I free at 2pm?"')
