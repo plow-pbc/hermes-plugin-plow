@@ -4411,6 +4411,55 @@ PLOW_NAME_CONTACT_SCHEMA = {
 }
 
 
+_PHONE_SHAPE = re.compile(r"\+?[\d()\s.-]{7,}")
+
+
+def _is_handle(text):
+    """A phone or an email -- the two shapes the contact book is keyed by."""
+    return "@" in text or bool(_PHONE_SHAPE.fullmatch(text))
+
+
+def _admit_people_facts(facts, *, owner, speaker_handle, owner_handle, known, book):
+    """What the classifier proposed, reduced to what this speaker may write.
+
+    The owner's words name anyone the roster or book knows, and overwrite:
+    "current" means the latest owner statement wins. A member's words reach
+    only their own row, fill only empty fields, and never carry a
+    relationship -- who someone is to the owner is the owner's to say. A
+    handle nobody knows is dropped rather than invented; an alias must look
+    like a handle and takes the same name as the row it aliases.
+    """
+    speaker_key = _handle_key(speaker_handle)
+    owner_key = _handle_key(owner_handle)
+    writes = {}
+    for fact in facts:
+        if not isinstance(fact, dict):
+            continue
+        key = _handle_key(_one_line(fact.get("handle")))
+        if not key or key not in known or (not owner and key != speaker_key):
+            continue
+        current = book.get(key, {})
+        body = {}
+        for field in ("display_name", "relationship"):
+            value = _one_line(fact.get(field))
+            if not value or value == (current.get(field) or ""):
+                continue
+            if field == "relationship" and (not owner or key == owner_key):
+                continue
+            if not owner and current.get(field):
+                continue
+            body[field] = value
+        if body:
+            writes[known[key]] = body
+        alias = _one_line(fact.get("same_person_as"))
+        name = body.get("display_name") or current.get("display_name")
+        if alias and name and _is_handle(alias):
+            alias_key = _handle_key(alias)
+            if alias_key != key and not book.get(alias_key, {}).get("display_name"):
+                writes[alias] = {"display_name": name}
+    return writes
+
+
 def _plow_contacts(_args, **_kwargs):
     """Read the owner's contact book -- the only source of names off a roster.
 

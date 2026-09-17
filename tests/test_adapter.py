@@ -2438,6 +2438,64 @@ def _authority_case_name_a_contact(module: Any, monkeypatch: pytest.MonkeyPatch,
             assert record == []
 
 
+_PEOPLE_ROSTER = {"15550000001": "+15550000001", "15550000002": "+15550000002"}
+_BOOK_INDEX = {"15550000001": {"display_name": "Sam", "relationship": None},
+               "15550000003": {"display_name": "Abby", "relationship": None}}
+
+
+@pytest.mark.parametrize("case, owner, speaker, facts, expected", [
+    # The owner names a bare member from "Hey Patrick".
+    ("owner names a member", True, "+15550000001",
+     [{"handle": "+15550000002", "display_name": "Patrick"}],
+     {"+15550000002": {"display_name": "Patrick"}}),
+    # The owner states a relationship for someone already in the book (a DM: no roster row).
+    ("owner states a relationship", True, "+15550000001",
+     [{"handle": "+15550000003", "relationship": "wife"}],
+     {"+15550000003": {"relationship": "wife"}}),
+    # Later owner words overwrite: the book said wife, the owner now says cousin.
+    ("owner overwrites", True, "+15550000001",
+     [{"handle": "+15550000003", "display_name": "Abby", "relationship": "cousin"}],
+     {"+15550000003": {"relationship": "cousin"}}),
+    # A handle nobody knows is dropped, not invented.
+    ("owner names a stranger", True, "+15550000001",
+     [{"handle": "+15559999999", "display_name": "Nobody"}], {}),
+    # The owner's own handle takes a name, never a relationship.
+    ("owner's own row", True, "+15550000001",
+     [{"handle": "+15550000001", "display_name": "Samuel", "relationship": "self"}],
+     {"+15550000001": {"display_name": "Samuel"}}),
+    # A member names themself and gives their email: both rows, same name.
+    ("member names self", False, "+15550000002",
+     [{"handle": "+15550000002", "display_name": "Patrick Salyer", "same_person_as": "p@mayfield.com"}],
+     {"+15550000002": {"display_name": "Patrick Salyer"}, "p@mayfield.com": {"display_name": "Patrick Salyer"}}),
+    # A member may not label anyone else, nor themself with a relationship.
+    ("member labels others", False, "+15550000002",
+     [{"handle": "+15550000001", "display_name": "Sammy"},
+      {"handle": "+15550000002", "relationship": "investor"}], {}),
+    # A member fills empties only: Abby is named, a member cannot rename her.
+    ("member cannot rename a named row", False, "+15550000003",
+     [{"handle": "+15550000003", "display_name": "Abigail"}], {}),
+    # An alias that is not a handle is dropped.
+    ("alias must be a handle", False, "+15550000002",
+     [{"handle": "+15550000002", "display_name": "Pat", "same_person_as": "Patrick S."}],
+     {"+15550000002": {"display_name": "Pat"}}),
+])
+def test_only_the_speakers_own_facts_reach_the_book(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
+    case: str, owner: bool, speaker: str, facts: list[dict[str, Any]], expected: dict[str, dict[str, str]],
+) -> None:
+    """The classifier proposes; this decides. The owner's words set anything
+    for anyone known and overwrite; a member's words fill their own empty
+    row and nothing else; nobody invents a handle."""
+    module = _load(monkeypatch, tmp_path)
+    known = dict(_PEOPLE_ROSTER, **{"15550000003": "+15550000003"}) if owner else dict(_PEOPLE_ROSTER)
+    book = {k: dict(v) for k, v in _BOOK_INDEX.items()}
+    if not owner and speaker == "+15550000003":
+        known["15550000003"] = "+15550000003"
+    out = module._admit_people_facts(facts, owner=owner, speaker_handle=speaker,
+                                     owner_handle="+15550000001", known=known, book=book)
+    assert out == expected, case
+
+
 def _authority_case_read_the_book(module: Any, monkeypatch: pytest.MonkeyPatch, turn: dict[str, Any] | None, authorized: bool) -> None:
     """The mirror of naming's gate: a no-turn cron caller reads, where it refuses to write."""
     record: list[Any] = []
