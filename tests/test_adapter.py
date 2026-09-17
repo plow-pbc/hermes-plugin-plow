@@ -2698,7 +2698,8 @@ async def test_bare_handles_are_named_from_the_owners_mac_after_a_reach_refresh(
             return {"body": _SKILL_BODY}
         if arguments["argv"][0] == "/usr/bin/find":
             return {"status": "completed", "exit_code": 0, "output": "\n".join(_STORES) + "\n"}
-        # The same card in both stores -- the root and its iCloud source -- is one person, not two.
+        if arguments["argv"][3] == _STORES[1]:   # a sync source on another schema version: skipped, not fatal
+            return {"status": "completed", "exit_code": 1, "output": "Parse error: no such column: ZOWNER\n"}
         rows = [{"name": "Patrick Salyer", "phone": "+17143933614", "email": None}]
         return {"status": "completed", "exit_code": 0, "output": json.dumps(rows)}
 
@@ -2726,16 +2727,23 @@ async def test_bare_handles_are_named_from_the_owners_mac_after_a_reach_refresh(
     assert module._backfill["tried_at"] == tried_at and len(relay_calls) == 4
 
 
-async def test_backfill_leaves_the_listing_alone_when_the_mac_is_unreachable(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+def _mac_offline(*a: Any, **k: Any) -> dict[str, Any]:
+    raise OSError("mac offline")
+
+
+def _mac_without_stores(url: str, token: str, name: str, arguments: dict[str, Any], timeout: float) -> dict[str, Any]:
+    if name == "plow_read_skill":
+        return {"body": _SKILL_BODY}
+    return {"status": "completed", "exit_code": 1, "output": f"find: {_STORE_DIR}: No such file or directory\n"}
+
+
+@pytest.mark.parametrize("relay", [_mac_offline, _mac_without_stores])
+async def test_backfill_leaves_the_listing_alone_when_the_mac_cannot_answer(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, relay: Any
 ) -> None:
     module = _load(monkeypatch, tmp_path)
     monkeypatch.setenv("PLOW_MCP_URL", "https://relay.example/mcp")
     monkeypatch.setenv("PLOW_AGENT_TOKEN", "t")
-
-    def relay(*a: Any, **k: Any) -> dict[str, Any]:
-        raise OSError("mac offline")
-
     monkeypatch.setattr(module, "_relay_call", relay)
     adapter, written = _people_adapter(module, monkeypatch, [_chat("cht_a")], [])
     done = threading.Event()
