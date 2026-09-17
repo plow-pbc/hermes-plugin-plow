@@ -5738,22 +5738,30 @@ async def test_turn_open_reads_the_sentinel_contract_off_the_prompt(
         await adapter.on_processing_complete(event, None)
 
 
+def _install_mcp_tools(monkeypatch, servers, signal):
+    core = types.ModuleType("tools.mcp_tool")
+    core._lock = threading.Lock()  # type: ignore[attr-defined]
+    core._servers = servers  # type: ignore[attr-defined]
+    loop_mod = types.ModuleType("tools.mcp_tool_loop")
+    loop_mod._signal_reconnect_and_wait = signal  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "tools", types.ModuleType("tools"))
+    monkeypatch.setitem(sys.modules, "tools.mcp_tool", core)
+    monkeypatch.setitem(sys.modules, "tools.mcp_tool_loop", loop_mod)
+
+
 @pytest.mark.parametrize(("mac", "parked", "session", "expected"), [
     (True, True, None, ["plow"]),      # parked after a Plow deploy: reconnect now
     (True, False, None, ["plow"]),     # mid-reconnect with no session yet: nudge it
     (True, False, object(), []),       # healthy: leave it alone
     (False, True, None, []),           # no Mac on this account: nothing to wake
 ], ids=["parked", "dead-session", "healthy", "no-mac"])
-async def test_a_parked_latch_link_reconnects_before_the_turn(
+async def test_a_turn_schedules_a_background_latch_reconnect(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
     mac: bool, parked: bool, session: Any, expected: list[str],
 ) -> None:
-    """A Plow API deploy drops the Mac's relay socket for ~2 min; Hermes'
-    MCP client gives up in ~30 s and parks for 5 min, deregistering the
-    plow_ tools. The owner's next message arrives well after the API is
-    back, so the turn's first act is to reconnect the parked server and
-    wait for its session -- Hermes' turn-start refresh then lands the
-    tools in this very turn instead of an "Unknown tool" reply."""
+    """Turn start schedules a best-effort reconnect for a parked Latch link.
+    The current turn does not wait; a later turn can use the restored tools.
+    Healthy links and unrelated MCP servers are left alone."""
     module = _load(monkeypatch, tmp_path)
     url = "https://api.plow.co/v1/relay/devices/u/mcp"
     if mac:
@@ -5763,10 +5771,6 @@ async def test_a_parked_latch_link_reconnects_before_the_turn(
     latch = SimpleNamespace(name="plow", _config={"url": url}, _was_parked=parked, session=session)
     other = SimpleNamespace(name="gbrain", _config={"url": "https://gbrain.example/mcp"}, _was_parked=True,
                             session=None)
-    core = types.ModuleType("tools.mcp_tool")
-    core._lock = threading.Lock()  # type: ignore[attr-defined]
-    core._servers = {("plow", None): latch, ("gbrain", None): other}  # type: ignore[attr-defined]
-    loop_mod = types.ModuleType("tools.mcp_tool_loop")
     woken: list[str] = []
 
     def signal(server_name: str, srv: Any, *, op_description: str, timeout: float) -> bool:
@@ -5775,10 +5779,7 @@ async def test_a_parked_latch_link_reconnects_before_the_turn(
         srv.session = object()
         return True
 
-    loop_mod._signal_reconnect_and_wait = signal  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "tools", types.ModuleType("tools"))
-    monkeypatch.setitem(sys.modules, "tools.mcp_tool", core)
-    monkeypatch.setitem(sys.modules, "tools.mcp_tool_loop", loop_mod)
+    _install_mcp_tools(monkeypatch, {("plow", None): latch, ("gbrain", None): other}, signal)
 
     adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
     adapter._set_reach([_chat("cht_a")])
@@ -5811,10 +5812,6 @@ async def test_a_parked_mac_costs_the_turn_no_wall_clock(
     url = "https://mac.example/mcp"
     monkeypatch.setenv("PLOW_MCP_URL", url)
     latch = SimpleNamespace(name="plow", _config={"url": url}, _was_parked=True, session=None)
-    core = types.ModuleType("tools.mcp_tool")
-    core._lock = threading.Lock()  # type: ignore[attr-defined]
-    core._servers = {("plow", None): latch}  # type: ignore[attr-defined]
-    loop_mod = types.ModuleType("tools.mcp_tool_loop")
     entered, release, woken = threading.Event(), threading.Event(), []
 
     def signal(server_name: str, srv: Any, *, op_description: str, timeout: float) -> bool:
@@ -5823,10 +5820,7 @@ async def test_a_parked_mac_costs_the_turn_no_wall_clock(
         woken.append(server_name)
         return True
 
-    loop_mod._signal_reconnect_and_wait = signal  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "tools", types.ModuleType("tools"))
-    monkeypatch.setitem(sys.modules, "tools.mcp_tool", core)
-    monkeypatch.setitem(sys.modules, "tools.mcp_tool_loop", loop_mod)
+    _install_mcp_tools(monkeypatch, {("plow", None): latch}, signal)
 
     adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
     adapter._set_reach([_chat("cht_a")])
