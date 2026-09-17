@@ -2482,6 +2482,19 @@ _BOOK_INDEX = {"15550000001": {"display_name": "Sam", "relationship": None},
     ("member aliases a known handle", False, "+15550000002",
      [{"handle": "+15550000002", "display_name": "Pat", "same_person_as": "+1 (555) 000-0001"}],
      {"+15550000002": {"display_name": "Pat"}}),
+    # An alias with no digit does not look like a phone, so it is dropped too.
+    ("alias must contain a digit to look like a phone", False, "+15550000002",
+     [{"handle": "+15550000002", "display_name": "Pat", "same_person_as": "-------"}],
+     {"+15550000002": {"display_name": "Pat"}}),
+    # Two facts about the same handle in one call merge, they don't clobber each other.
+    ("two facts about one handle merge", True, "+15550000001",
+     [{"handle": "+15550000002", "display_name": "Patrick"},
+      {"handle": "+15550000002", "relationship": "friend"}],
+     {"+15550000002": {"display_name": "Patrick", "relationship": "friend"}}),
+    # An alias never overwrites a row the book already has a name for.
+    ("alias may not overwrite an already-named row", True, "+15550000001",
+     [{"handle": "+15550000002", "display_name": "Patrick", "same_person_as": "+15550000003"}],
+     {"+15550000002": {"display_name": "Patrick"}}),
 ])
 def test_only_the_speakers_own_facts_reach_the_book(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,

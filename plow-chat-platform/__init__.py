@@ -4411,7 +4411,7 @@ PLOW_NAME_CONTACT_SCHEMA = {
 }
 
 
-_PHONE_SHAPE = re.compile(r"\+?[\d()\s.-]{7,}")
+_PHONE_SHAPE = re.compile(r"\+?(?=[\d()\s.-]*\d)[\d()\s.-]{7,}")
 
 
 def _is_handle(text):
@@ -4451,7 +4451,7 @@ def _admit_people_facts(facts, *, owner, speaker_handle, owner_handle, known, bo
                 continue
             body[field] = value
         if body:
-            writes[known[key]] = body
+            writes.setdefault(known[key], {}).update(body)
         alias = _one_line(fact.get("same_person_as"))
         name = body.get("display_name") or current.get("display_name")
         if alias and name and _is_handle(alias):
