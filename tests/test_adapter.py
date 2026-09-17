@@ -2464,10 +2464,11 @@ _BOOK_INDEX = {"15550000001": {"display_name": "Sam", "relationship": None},
     ("owner's own row", True, "+15550000001",
      [{"handle": "+15550000001", "display_name": "Samuel", "relationship": "self"}],
      {"+15550000001": {"display_name": "Samuel"}}),
-    # A member names themself and gives their email: both rows, same name.
-    ("member names self", False, "+15550000002",
+    # A member names themself; the email they claim as theirs is not taken on
+    # their word -- an alias lands a name on a handle nobody has verified.
+    ("member names self, their alias is dropped", False, "+15550000002",
      [{"handle": "+15550000002", "display_name": "Patrick Salyer", "same_person_as": "p@mayfield.com"}],
-     {"+15550000002": {"display_name": "Patrick Salyer"}, "p@mayfield.com": {"display_name": "Patrick Salyer"}}),
+     {"+15550000002": {"display_name": "Patrick Salyer"}}),
     # A member may not label anyone else, nor themself with a relationship.
     ("member labels others", False, "+15550000002",
      [{"handle": "+15550000001", "display_name": "Sammy"},
@@ -2476,30 +2477,16 @@ _BOOK_INDEX = {"15550000001": {"display_name": "Sam", "relationship": None},
     ("member cannot rename a named row", False, "+15550000003",
      [{"handle": "+15550000003", "display_name": "Abigail"}], {}),
     # An alias that is not a handle is dropped.
-    ("alias must be a handle", False, "+15550000002",
+    ("alias must be a handle", True, "+15550000001",
      [{"handle": "+15550000002", "display_name": "Pat", "same_person_as": "Patrick S."}],
      {"+15550000002": {"display_name": "Pat"}}),
-    # A member's alias may not reach a handle the roster already knows -- the owner's included.
-    ("member aliases a known handle", False, "+15550000002",
-     [{"handle": "+15550000002", "display_name": "Pat", "same_person_as": "+1 (555) 000-0001"}],
-     {"+15550000002": {"display_name": "Pat"}}),
-    # Nor a bare handle known only on another chat's roster -- not in this
-    # room, and not in the book, but not up for grabs either.
-    ("member aliases a handle known only elsewhere", False, "+15550000002",
-     [{"handle": "+15550000002", "display_name": "Pat", "same_person_as": "+15559990000"}],
-     {"+15550000002": {"display_name": "Pat"}}),
-    # Nor a handle the book only holds a relationship for -- unnamed there is
-    # not unclaimed.
-    ("member aliases a bare book row with no name", False, "+15550000002",
-     [{"handle": "+15550000002", "display_name": "Pat", "same_person_as": "+15559998888"}],
-     {"+15550000002": {"display_name": "Pat"}}),
     # An alias with no digit does not look like a phone, so it is dropped too.
-    ("alias must contain a digit to look like a phone", False, "+15550000002",
+    ("alias must contain a digit to look like a phone", True, "+15550000001",
      [{"handle": "+15550000002", "display_name": "Pat", "same_person_as": "-------"}],
      {"+15550000002": {"display_name": "Pat"}}),
     # Punctuation pads the character count but the digit count decides: six
     # digits behind two dashes still is not a phone.
-    ("alias with 7+ characters but fewer than 7 digits is not a phone", False, "+15550000002",
+    ("alias with 7+ characters but fewer than 7 digits is not a phone", True, "+15550000001",
      [{"handle": "+15550000002", "display_name": "Pat", "same_person_as": "12-34-56"}],
      {"+15550000002": {"display_name": "Pat"}}),
     # Two facts about the same handle in one call merge, they don't clobber each other.
@@ -2519,7 +2506,7 @@ _BOOK_INDEX = {"15550000001": {"display_name": "Sam", "relationship": None},
      {"+15550000002": {"display_name": "Pat"}}),
     # A same-call fact that only carries an alias still picks up the name a
     # separate fact about the same handle just gave, not a stale empty one.
-    ("member's alias fact picks up the name a separate fact in the same call gave", False, "+15550000002",
+    ("an alias fact picks up the name a separate fact in the same call gave", True, "+15550000001",
      [{"handle": "+15550000002", "display_name": "Patrick"},
       {"handle": "+15550000002", "same_person_as": "p@mayfield.com"}],
      {"+15550000002": {"display_name": "Patrick"}, "p@mayfield.com": {"display_name": "Patrick"}}),
@@ -2574,42 +2561,25 @@ def _people_adapter(module: Any, monkeypatch: pytest.MonkeyPatch, chats: list[di
     return adapter, written
 
 
-def _bare_member_chat(uid: str, handle: str) -> dict[str, Any]:
-    """A group chat whose only non-owner member is the given bare handle --
-    the shape a member's alias must not be able to reach into."""
-    chat = _chat(uid, group=True)
-    chat["participants"][2]["provider_key"] = handle
-    return chat
-
-
-@pytest.mark.parametrize("owner, spoken, facts, expected, chats", [
+@pytest.mark.parametrize("owner, spoken, facts, expected", [
     (True, "Hey Patrick - sorry for the delay!",
      [{"handle": "+15550000002", "display_name": "Patrick"}],
-     [("+15550000002", {"display_name": "Patrick"})],
-     [_chat("cht_a"), _chat("cht_b", group=True)]),
+     [("+15550000002", {"display_name": "Patrick"})]),
+    # A member's own name lands; the email they claim as theirs does not.
     (False, "This is Patrick Salyer, psalyer@mayfield.com",
      [{"handle": "+15550000002", "display_name": "Patrick Salyer", "same_person_as": "psalyer@mayfield.com"}],
-     [("+15550000002", {"display_name": "Patrick Salyer"}), ("psalyer@mayfield.com", {"display_name": "Patrick Salyer"})],
-     [_chat("cht_a"), _chat("cht_b", group=True)]),
-    (False, "Sam's wife is Abby", [{"handle": "+15550000001", "relationship": "husband of Abby"}], [],
-     [_chat("cht_a"), _chat("cht_b", group=True)]),
-    # A member's alias may not reach a bare handle that is a stranger to this
-    # room but a member of another chat the owner reaches.
-    (False, "my other number is +15559990000",
-     [{"handle": "+15550000002", "display_name": "Pat", "same_person_as": "+15559990000"}],
-     [("+15550000002", {"display_name": "Pat"})],
-     [_chat("cht_a"), _chat("cht_b", group=True), _bare_member_chat("cht_c", "+15559990000")]),
+     [("+15550000002", {"display_name": "Patrick Salyer"})]),
+    (False, "Sam's wife is Abby", [{"handle": "+15550000001", "relationship": "husband of Abby"}], []),
 ])
 async def test_what_a_speaker_says_about_people_lands_in_the_book(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
     owner: bool, spoken: str, facts: list[dict[str, Any]], expected: list[tuple[str, dict[str, Any]]],
-    chats: list[dict[str, Any]],
 ) -> None:
     """A turn's own words are classified and the admitted facts are written --
     with nobody choosing to call a tool."""
     module = _load(monkeypatch, tmp_path)
     module._plugin_llm = _PeopleLlm(facts)
-    adapter, written = _people_adapter(module, monkeypatch, chats, _BOOK[:1])
+    adapter, written = _people_adapter(module, monkeypatch, [_chat("cht_a"), _chat("cht_b", group=True)], _BOOK[:1])
     turn = {"chat_uid": "cht_b", "owner": owner, "recall_text": spoken,
             "speaker_handle": "+15550000001" if owner else "+15550000002"}
     await module._capture_people_turn(adapter, adapter._chats["cht_b"], turn)

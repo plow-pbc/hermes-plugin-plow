@@ -4544,10 +4544,10 @@ def _admit_people_facts(facts, *, owner, speaker_handle, owner_handle, known, bo
     "current" means the latest owner statement wins. A member's words reach
     only their own row, fill only empty fields, and never carry a
     relationship -- who someone is to the owner is the owner's to say. A
-    handle nobody knows is dropped rather than invented; an alias must look
-    like a handle and takes the same name as the row it aliases -- and, when
-    a member gives it, must be a handle nobody yet knows -- on no roster and
-    not in the book.
+    handle nobody knows is dropped rather than invented. An alias -- another
+    handle for the same person -- is the owner's to give: it lands a name on a
+    handle nobody has verified, and a member's word for which handles are
+    theirs is exactly the claim that cannot be checked.
     """
     speaker_key = _handle_key(speaker_handle)
     owner_key = _handle_key(owner_handle)
@@ -4571,12 +4571,11 @@ def _admit_people_facts(facts, *, owner, speaker_handle, owner_handle, known, bo
             body[field] = value
         if body:
             writes.setdefault(known[key], {}).update(body)
-        alias = _one_line(fact.get("same_person_as"))
+        alias = _one_line(fact.get("same_person_as")) if owner else ""
         name = body.get("display_name") or current.get("display_name")
         alias_key = _handle_key(alias) if alias else ""
         if (alias and name and ("@" in alias or (alias_key.isdigit() and len(alias_key) >= 7))
-                and alias_key != key and (owner or (alias_key not in known and alias_key not in book))
-                and not book.get(alias_key, {}).get("display_name")):
+                and alias_key != key and not book.get(alias_key, {}).get("display_name")):
             writes[alias] = {"display_name": name}
     return writes
 
@@ -4620,12 +4619,7 @@ async def _capture_people_turn(adapter, chat, turn):
     what this speaker may write, and write it. Returns the writes."""
     members = [p for p in chat.get("participants", []) if p.get("type") == "member"]
     people = [f"{_participant_identity(p)} ({p['provider_key']})" for p in members]
-    # A member's alias must name a handle nobody knows anywhere -- every
-    # roster in reach, not just this room -- even though the classifier
-    # itself only ever sees this room's own people.
-    rooms = [chat] if turn["owner"] else list(adapter._chats.values())
-    known = {_handle_key(p["provider_key"]): p["provider_key"]
-             for room in rooms for p in room.get("participants", []) if p.get("type") == "member"}
+    known = {_handle_key(p["provider_key"]): p["provider_key"] for p in members}
     book = {}
     if turn["owner"]:
         # The owner may name anyone in their book, roster row or not: a DM is
