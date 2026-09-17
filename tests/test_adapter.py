@@ -2478,6 +2478,10 @@ _BOOK_INDEX = {"15550000001": {"display_name": "Sam", "relationship": None},
     ("alias must be a handle", False, "+15550000002",
      [{"handle": "+15550000002", "display_name": "Pat", "same_person_as": "Patrick S."}],
      {"+15550000002": {"display_name": "Pat"}}),
+    # A member's alias may not reach a handle the roster already knows -- the owner's included.
+    ("member aliases a known handle", False, "+15550000002",
+     [{"handle": "+15550000002", "display_name": "Pat", "same_person_as": "+1 (555) 000-0001"}],
+     {"+15550000002": {"display_name": "Pat"}}),
 ])
 def test_only_the_speakers_own_facts_reach_the_book(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,

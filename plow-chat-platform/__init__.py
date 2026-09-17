@@ -4427,7 +4427,8 @@ def _admit_people_facts(facts, *, owner, speaker_handle, owner_handle, known, bo
     only their own row, fill only empty fields, and never carry a
     relationship -- who someone is to the owner is the owner's to say. A
     handle nobody knows is dropped rather than invented; an alias must look
-    like a handle and takes the same name as the row it aliases.
+    like a handle and takes the same name as the row it aliases -- and, when
+    a member gives it, must be a handle nobody yet knows.
     """
     speaker_key = _handle_key(speaker_handle)
     owner_key = _handle_key(owner_handle)
@@ -4455,7 +4456,7 @@ def _admit_people_facts(facts, *, owner, speaker_handle, owner_handle, known, bo
         name = body.get("display_name") or current.get("display_name")
         if alias and name and _is_handle(alias):
             alias_key = _handle_key(alias)
-            if alias_key != key and not book.get(alias_key, {}).get("display_name"):
+            if alias_key != key and (owner or alias_key not in known) and not book.get(alias_key, {}).get("display_name"):
                 writes[alias] = {"display_name": name}
     return writes
 
