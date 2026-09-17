@@ -4529,14 +4529,6 @@ PLOW_NAME_CONTACT_SCHEMA = {
 }
 
 
-_PHONE_SHAPE = re.compile(r"\+?(?=[\d()\s.-]*\d)[\d()\s.-]{7,}")
-
-
-def _is_handle(text):
-    """A phone or an email -- the two shapes the contact book is keyed by."""
-    return "@" in text or bool(_PHONE_SHAPE.fullmatch(text))
-
-
 def _admit_people_facts(facts, *, owner, speaker_handle, owner_handle, known, book):
     """What the classifier proposed, reduced to what this speaker may write.
 
@@ -4573,11 +4565,11 @@ def _admit_people_facts(facts, *, owner, speaker_handle, owner_handle, known, bo
             writes.setdefault(known[key], {}).update(body)
         alias = _one_line(fact.get("same_person_as"))
         name = body.get("display_name") or current.get("display_name")
-        if alias and name and _is_handle(alias):
-            alias_key = _handle_key(alias)
-            if (alias_key != key and (owner or (alias_key not in known and alias_key not in book))
-                    and not book.get(alias_key, {}).get("display_name")):
-                writes[alias] = {"display_name": name}
+        alias_key = _handle_key(alias) if alias else ""
+        if (alias and name and ("@" in alias or (alias_key.isdigit() and len(alias_key) >= 7))
+                and alias_key != key and (owner or (alias_key not in known and alias_key not in book))
+                and not book.get(alias_key, {}).get("display_name")):
+            writes[alias] = {"display_name": name}
     return writes
 
 
