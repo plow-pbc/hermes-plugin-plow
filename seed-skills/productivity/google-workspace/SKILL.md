@@ -1,7 +1,7 @@
 ---
 name: google-workspace
 description: "Gmail and Google Calendar through the owner's Mac."
-version: 2.5.0
+version: 2.6.0
 ---
 
 # Google Workspace — through the owner's Mac
@@ -56,7 +56,15 @@ Mac-managed instances):
    with the owner's authority can fix a time, so from any other turn the
    override is blocked and nothing is booked — ask the owner, or a human
    in a trusted group, to confirm.
-5. If a connected MCP server lists no `google-workspace` skill, Google is
+5. "Am I free at 2pm?" is answered by reading the owner's busy time for
+   that window across every calendar the Mac's skill says to read — its
+   free/busy read, or its event list when you need the names. A conflict
+   check answers a different question: it reports commitments that overlap
+   EACH OTHER, so an empty one means nothing is double-booked, not that the
+   owner is free. One event sitting alone at 2pm appears in neither, and
+   calling that slot free tells the owner they are available when they are
+   not.
+6. If a connected MCP server lists no `google-workspace` skill, Google is
    not available to this agent. Say exactly that — do not fall back to
    local OAuth. If no MCP server with `plow_*` tools is connected at all,
    that is not the same thing: Latch is unreachable, so say the owner's Mac

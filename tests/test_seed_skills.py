@@ -70,3 +70,17 @@ def test_the_owners_mac_skill_claims_every_question_about_the_owners_world() -> 
     assert body.index("plow_list_skills") < body.index("plow_read_skill") < body.index("Do what the skill says")
     assert "A request is not work done" in body
     assert "google-workspace" in body, "its rules apply on top of the Mac's where both cover the ask"
+
+
+def test_the_google_skill_sends_availability_to_a_busy_time_read() -> None:
+    """An agent asked "am I free at 2pm" ran the conflict check, got nothing
+    back and said the slot was free; the owner had a commitment there on a
+    shared calendar. A conflict check reports commitments that overlap each
+    other, so a lone event is in neither its result nor the answer."""
+    body = (ROOT / "seed-skills/productivity/google-workspace/SKILL.md").read_text()
+    assert '"Am I free at 2pm?"' in body
+    assert "free/busy read" in body
+    assert "not that the\n   owner is free" in body
+    # The conflict-override rule keeps its own step; availability is a
+    # separate one, and each has to survive an edit to the other.
+    assert body.index("--confirm-conflict") < body.index('"Am I free at 2pm?"')
