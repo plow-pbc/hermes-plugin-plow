@@ -2488,9 +2488,19 @@ _BOOK_INDEX = {"15550000001": {"display_name": "Sam", "relationship": None},
     ("member aliases a handle known only elsewhere", False, "+15550000002",
      [{"handle": "+15550000002", "display_name": "Pat", "same_person_as": "+15559990000"}],
      {"+15550000002": {"display_name": "Pat"}}),
+    # Nor a handle the book only holds a relationship for -- unnamed there is
+    # not unclaimed.
+    ("member aliases a bare book row with no name", False, "+15550000002",
+     [{"handle": "+15550000002", "display_name": "Pat", "same_person_as": "+15559998888"}],
+     {"+15550000002": {"display_name": "Pat"}}),
     # An alias with no digit does not look like a phone, so it is dropped too.
     ("alias must contain a digit to look like a phone", False, "+15550000002",
      [{"handle": "+15550000002", "display_name": "Pat", "same_person_as": "-------"}],
+     {"+15550000002": {"display_name": "Pat"}}),
+    # Punctuation pads the character count but the digit count decides: six
+    # digits behind two dashes still is not a phone.
+    ("alias with 7+ characters but fewer than 7 digits is not a phone", False, "+15550000002",
+     [{"handle": "+15550000002", "display_name": "Pat", "same_person_as": "12-34-56"}],
      {"+15550000002": {"display_name": "Pat"}}),
     # Two facts about the same handle in one call merge, they don't clobber each other.
     ("two facts about one handle merge", True, "+15550000001",
@@ -2528,6 +2538,8 @@ def test_only_the_speakers_own_facts_reach_the_book(
         known["15550000003"] = "+15550000003"
     if case == "member aliases a handle known only elsewhere":
         known["15559990000"] = "+15559990000"   # a bare member of some other chat, not this one
+    if case == "member aliases a bare book row with no name":
+        book["15559998888"] = {"relationship": "friend"}   # no display_name: still a claimed row
     out = module._admit_people_facts(facts, owner=owner, speaker_handle=speaker,
                                      owner_handle="+15550000001", known=known, book=book)
     assert out == expected, case
