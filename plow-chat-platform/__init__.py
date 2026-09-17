@@ -4548,7 +4548,7 @@ def _plow_name_contact(args, **_kwargs):
     # never told to "ask the owner" about their own handle.
     own_handle = owner and key == owner_key
     own_relationship = "a relationship never lands on your own handle; nothing was recorded"
-    clears = {k for k, v in body.items() if v == ""}
+    clears = [k for k, v in body.items() if v == ""]
     sets = {k: v for k, v in body.items() if v != ""}
     for field in clears:
         if not may(field, clear=True):
