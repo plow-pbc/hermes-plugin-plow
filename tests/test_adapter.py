@@ -2495,6 +2495,12 @@ _BOOK_INDEX = {"15550000001": {"display_name": "Sam", "relationship": None},
     ("alias may not overwrite an already-named row", True, "+15550000001",
      [{"handle": "+15550000002", "display_name": "Patrick", "same_person_as": "+15550000003"}],
      {"+15550000002": {"display_name": "Patrick"}}),
+    # A member fills their own empty field once per call: the second same-call
+    # fact sees it already filled, not the stale book row.
+    ("member states their name twice in one call, the first fills it", False, "+15550000002",
+     [{"handle": "+15550000002", "display_name": "Pat"},
+      {"handle": "+15550000002", "display_name": "Patrick"}],
+     {"+15550000002": {"display_name": "Pat"}}),
 ])
 def test_only_the_speakers_own_facts_reach_the_book(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,

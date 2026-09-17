@@ -4439,7 +4439,7 @@ def _admit_people_facts(facts, *, owner, speaker_handle, owner_handle, known, bo
         key = _handle_key(_one_line(fact.get("handle")))
         if not key or key not in known or (not owner and key != speaker_key):
             continue
-        current = book.get(key, {})
+        current = {**book.get(key, {}), **writes.get(known[key], {})}
         body = {}
         for field in ("display_name", "relationship"):
             value = _one_line(fact.get(field))
