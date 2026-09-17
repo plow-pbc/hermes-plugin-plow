@@ -2708,6 +2708,8 @@ async def test_bare_handles_are_named_from_the_owners_mac_after_a_reach_refresh(
                                        [{"provider_key": "+15550000001", "display_name": "Sam", "relationship": None, "role": "owner"}])
     chat = _chat("cht_b", group=True)
     chat["participants"][2]["provider_key"] = "+17143933614"
+    chat["participants"].append({"type": "member", "uid": "mem_chu_cht_b", "role": "member",
+                                 "display_name": "Chu", "provider_key": "+15550000003"})
     done = threading.Event()
     monkeypatch.setattr(module, "_backfill_done", done.set)   # test seam: fires after the thread finishes
     monkeypatch.setattr(module, "_backfill", {"tried_at": 0.0, "lock": threading.Lock()})
@@ -2718,7 +2720,10 @@ async def test_bare_handles_are_named_from_the_owners_mac_after_a_reach_refresh(
     sweep, *queries = (arguments for _, arguments in relay_calls[1:])
     assert sweep["argv"][:2] == ["/usr/bin/find", _STORE_DIR]
     assert [q["argv"][:4] for q in queries] == [["/usr/bin/sqlite3", "-readonly", "-json", s] for s in _STORES]
-    assert "3933614" in queries[0]["argv"][-1]   # the query carries the handle's digits, not a wildcard sweep
+    # The query carries the bare handle's digits -- not a wildcard sweep, and
+    # never the owner's or an already-named member's: empty names only.
+    sql = queries[0]["argv"][-1]
+    assert "3933614" in sql and "0000001" not in sql and "0000003" not in sql
     # What the owner's approval dialog, the adversarial reviewer and the audit log show.
     assert all(a["read_paths"] == [_STORE_DIR] and a["goal"] == module.BACKFILL_GOAL for a in (sweep, *queries))
     # The listing tool refreshes reach on every call; within BACKFILL_RETRY_S the Mac is not asked again.

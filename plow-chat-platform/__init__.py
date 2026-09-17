@@ -1125,8 +1125,8 @@ def _resolve_handles(rows, handles):
 
 def _backfill_bare_handles(adapter, loop, bare):
     """Resolve bare handles on the owner's Mac and fill the empty names."""
-    url, token = os.environ["PLOW_MCP_URL"], os.environ["PLOW_AGENT_TOKEN"]
     try:
+        url, token = os.environ["PLOW_MCP_URL"], os.environ["PLOW_AGENT_TOKEN"]
         body = _relay_call(url, token, "plow_read_skill", {"name": "contacts"}, WIKI_RELAY_TIMEOUT_S)["body"]
         store_dir = _contacts_store_dir(body)
 
