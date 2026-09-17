@@ -1056,8 +1056,9 @@ def test_guest_turn_is_not_tool_blocked(
     adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
     turn = adapter._active_turn.set({"chat_uid": "cht_b", "owner": False})
     try:
-        assert set(hooks) == {"pre_tool_call", "pre_llm_call", "transform_tool_result"}
+        assert set(hooks) == {"pre_tool_call", "pre_llm_call", "post_llm_call", "transform_tool_result"}
         assert hooks["pre_llm_call"] is module._recall
+        assert hooks["post_llm_call"] is module._capture_people
         assert hooks["pre_tool_call"](
             tool_name="mcp__latch__plow_run_command",
             args={"argv": ["plow-gog", "gmail", "search", "newer_than:7d"]},
@@ -2523,6 +2524,115 @@ def test_only_the_speakers_own_facts_reach_the_book(
     out = module._admit_people_facts(facts, owner=owner, speaker_handle=speaker,
                                      owner_handle="+15550000001", known=known, book=book)
     assert out == expected, case
+
+
+class _PeopleLlm:
+    def __init__(self, facts: list[dict[str, Any]] | Exception) -> None:
+        self.facts = facts
+        self.calls: list[dict[str, Any]] = []
+
+    async def acomplete_structured(self, **kwargs: Any) -> Any:
+        self.calls.append(kwargs)
+        if isinstance(self.facts, Exception):
+            raise self.facts
+        return SimpleNamespace(parsed={"facts": self.facts})
+
+
+def _people_adapter(module: Any, monkeypatch: pytest.MonkeyPatch, chats: list[dict[str, Any]],
+                    book: list[dict[str, Any]]) -> tuple[Any, list[tuple[str, dict[str, Any]]]]:
+    adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
+    adapter._set_reach(chats)
+    written: list[tuple[str, dict[str, Any]]] = []
+
+    async def contacts() -> list[dict[str, Any]]:
+        return book
+
+    async def name_contact(handle: str, body: dict[str, Any]) -> dict[str, Any]:
+        written.append((handle, body))
+        return {"provider_key": handle, **body}
+
+    adapter.contacts, adapter.name_contact = contacts, name_contact
+    return adapter, written
+
+
+@pytest.mark.parametrize("owner, spoken, facts, expected", [
+    (True, "Hey Patrick - sorry for the delay!",
+     [{"handle": "+15550000002", "display_name": "Patrick"}],
+     [("+15550000002", {"display_name": "Patrick"})]),
+    (False, "This is Patrick Salyer, psalyer@mayfield.com",
+     [{"handle": "+15550000002", "display_name": "Patrick Salyer", "same_person_as": "psalyer@mayfield.com"}],
+     [("+15550000002", {"display_name": "Patrick Salyer"}), ("psalyer@mayfield.com", {"display_name": "Patrick Salyer"})]),
+    (False, "Sam's wife is Abby", [{"handle": "+15550000001", "relationship": "husband of Abby"}], []),
+])
+async def test_what_a_speaker_says_about_people_lands_in_the_book(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
+    owner: bool, spoken: str, facts: list[dict[str, Any]], expected: list[tuple[str, dict[str, Any]]],
+) -> None:
+    """A turn's own words are classified and the admitted facts are written --
+    with nobody choosing to call a tool."""
+    module = _load(monkeypatch, tmp_path)
+    module._plugin_llm = _PeopleLlm(facts)
+    adapter, written = _people_adapter(module, monkeypatch, [_chat("cht_a"), _chat("cht_b", group=True)], _BOOK[:1])
+    turn = {"chat_uid": "cht_b", "owner": owner, "recall_text": spoken,
+            "speaker_handle": "+15550000001" if owner else "+15550000002"}
+    await module._capture_people_turn(adapter, adapter._chats["cht_b"], turn)
+    assert written == expected
+    # The classifier saw the speaker's words and the people it may name -- never the agent's reply.
+    prompt_text = module._plugin_llm.calls[0]["input"][0]["text"]
+    assert spoken in prompt_text and "+15550000002" in prompt_text
+
+
+async def test_the_owners_dm_words_reach_someone_in_the_book_but_not_the_room(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """"abby is my wife" is said in the owner's DM, where Abby has no roster
+    row: the book is what the classifier gets to name her from."""
+    module = _load(monkeypatch, tmp_path)
+    module._plugin_llm = _PeopleLlm([{"handle": "+15550000002", "relationship": "wife"}])
+    adapter, written = _people_adapter(module, monkeypatch, [_dm_chat()], _BOOK)
+    turn = {"chat_uid": "cht_a", "owner": True, "recall_text": "abby is my wife", "speaker_handle": "+15550000001"}
+    await module._capture_people_turn(adapter, adapter._chats["cht_a"], turn)
+    assert written == []            # the book already says wife: nothing to change
+    assert "Abby (+15550000002)" in module._plugin_llm.calls[0]["input"][0]["text"]
+
+
+async def test_a_members_turn_never_shows_the_classifier_the_owners_book(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    module = _load(monkeypatch, tmp_path)
+    module._plugin_llm = _PeopleLlm([])
+    adapter, _written = _people_adapter(module, monkeypatch, [_chat("cht_a"), _chat("cht_b", group=True)], _BOOK)
+    turn = {"chat_uid": "cht_b", "owner": False, "recall_text": "hi", "speaker_handle": "+15550000002"}
+    await module._capture_people_turn(adapter, adapter._chats["cht_b"], turn)
+    assert "Abby" not in module._plugin_llm.calls[0]["input"][0]["text"]
+
+
+@pytest.mark.parametrize("turn", [
+    None,
+    {"chat_uid": "cht_b", "owner": True, "recall_text": "Hey Patrick", "speaker_handle": None},   # a wake
+    {"chat_uid": "cht_b", "owner": True, "recall_text": "", "speaker_handle": "+15550000001"},     # nothing said
+])
+def test_the_hook_is_silent_without_a_speaker_or_words(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, turn: dict[str, Any] | None
+) -> None:
+    module = _load(monkeypatch, tmp_path)
+    module._plugin_llm = _PeopleLlm([{"handle": "+15550000002", "display_name": "Patrick"}])
+    adapter = _live_tool(module, monkeypatch, "contacts", result=_BOOK)
+    module._ACTIVE_TURN.set(turn)
+    assert module._capture_people("s1", "Hey Patrick", module.PLATFORM_NAME) is None
+    assert module._plugin_llm.calls == []
+
+
+async def test_a_failing_classifier_writes_nothing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    module = _load(monkeypatch, tmp_path)
+    module._plugin_llm = _PeopleLlm(RuntimeError("down"))
+    adapter, written = _people_adapter(module, monkeypatch, [_chat("cht_a"), _chat("cht_b", group=True)], _BOOK)
+    turn = {"chat_uid": "cht_b", "owner": True, "recall_text": "Hey Patrick", "speaker_handle": "+15550000001"}
+    with pytest.raises(RuntimeError):
+        await module._capture_people_turn(adapter, adapter._chats["cht_b"], turn)
+    assert written == []
 
 
 def _authority_case_read_the_book(module: Any, monkeypatch: pytest.MonkeyPatch, turn: dict[str, Any] | None, authorized: bool) -> None:
