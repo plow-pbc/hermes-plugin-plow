@@ -484,7 +484,17 @@ the channel prompt, which instead states generically that a roster
 relationship is a recorded label, not a verified fact. Every roster-bearing prompt
 also tells the agent that a row still showing a bare handle — its owner's
 included — is a name to look up in those sources and record with the tool,
-never one to guess out of mail, calendar or memory. `plow_contacts` reads the
+never one to guess out of mail, calendar or memory.
+
+The agent no longer has to choose to do that: after every turn, a small
+structured side call reads what the speaker said against the people they may
+name and writes the admitted facts — the owner's words name anyone the roster
+or book knows and overwrite; a member's words fill only their own empty row and
+never a relationship. A reach refresh also resolves still-bare handles against
+the owner's macOS Contacts through the Latch relay and fills empty names where
+exactly one person matches.
+
+`plow_contacts` reads the
 book back, owner's row first, for the turns that have no roster at all — a
 Hermes-cron turn carries no chat, and this is where its owner's own name comes
 from; it reads on a turn with the owner's authority or with no active turn at
