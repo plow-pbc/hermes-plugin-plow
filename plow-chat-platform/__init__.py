@@ -1804,10 +1804,11 @@ class PlowChatAdapter(BasePlatformAdapter):
         # Who spoke, as the key the contact book uses; None on a wake or
         # setup turn, which has no speaker to learn anything from.
         turn["speaker_handle"] = participant.get("provider_key") if participant else None
+        # plow_name_contact's provenance matrix needs the owner's own handle
+        # on every turn, not just a member's -- a relationship never lands on
+        # the owner's own handle, owner turn or not.
+        turn["owner_handle"] = _owner_handle(chat)
         if not turn["owner"]:
-            # A member turn may still name someone -- but never the owner's own
-            # handle; `_plow_name_contact` checks a member's target against this.
-            turn["owner_handle"] = _owner_handle(chat)
             if participant is not None:
                 identity = _participant_identity(participant)
                 if identity:
@@ -4538,7 +4539,7 @@ def _plow_name_contact(args, **_kwargs):
     if not handle or not body:
         return json.dumps({"success": False,
                            "error": "a handle, and display_name or relationship, are required"})
-    refused = json.dumps({
+    generic_refusal = json.dumps({
         "success": False,
         "error": "not recorded on this turn: a member may name only their own bare handle, "
                  "and a relationship is the owner's to say",
@@ -4549,35 +4550,64 @@ def _plow_name_contact(args, **_kwargs):
     clears = {k for k, v in body.items() if v == ""}
     sets = {k: v for k, v in body.items() if v != ""}
     if clears and not turn.get("owner"):
-        return refused
+        return generic_refusal
     if "relationship" in clears and _handle_key(handle) == _handle_key(owner_handle):
-        return refused
+        return generic_refusal
     if _live is None:
         return json.dumps({"success": False, "error": "the Plow Chat gateway is not connected; nothing was recorded"})
     adapter, loop = _live
-    try:
-        current = requested = {}
-        if sets:
+    current = admitted = {}
+    if sets:
+        try:
             book_rows = asyncio.run_coroutine_threadsafe(adapter.contacts(), loop).result(timeout=30)
-            known = {_handle_key(handle): handle}
-            book = {_handle_key(r["provider_key"]): r for r in book_rows}
-            current = book.get(_handle_key(handle), {})
-            requested = {k: v for k, v in sets.items() if v != (current.get(k) or "")}
-            # A field whose value already matches the book is a no-op the
-            # matrix itself would silently drop -- indistinguishable, to it,
-            # from an authority violation. Probe those fields with a value
-            # guaranteed to differ so the matrix's own rules run for real;
-            # only `requested`'s real values are ever written below.
-            probed = {k: v + "\u0001" for k, v in sets.items() if k not in requested}
-            writes = _admit_people_facts([{"handle": handle, **requested, **probed}], owner=turn.get("owner"),
-                                         speaker_handle=turn.get("speaker_handle"),
-                                         owner_handle=owner_handle, known=known, book=book)
-            if set(writes.get(handle, {})) != set(sets):
-                return refused
-        write_body = {**requested, **{k: "" for k in clears}}
-        if not write_body:
-            return json.dumps({"success": True, "display_name": current.get("display_name"),
-                               "relationship": current.get("relationship")})
+        except Exception:  # noqa: BLE001 - a failed read is not evidence anything was written
+            return json.dumps({
+                "success": False,
+                "error": "could not read the contact book; nothing was recorded; retrying is safe",
+            })
+        known = {_handle_key(handle): handle}
+        book = {_handle_key(r["provider_key"]): r for r in book_rows}
+        current = book.get(_handle_key(handle), {})
+        changed = {k: v for k, v in sets.items() if _one_line(v) != (current.get(k) or "")}
+        # Two different questions: `allowed` asks pure provenance -- who may
+        # say this field at all -- with the book blanked so neither the
+        # matrix's no-op check nor its fill-only-empty overwrite gate can
+        # mask an authority violation behind a value that happens to match.
+        # `admitted` asks what actually changes, against the real book, so a
+        # genuine restatement never trips the overwrite gate a real change
+        # would. May-write and may-overwrite are different rules.
+        allowed = _admit_people_facts([{"handle": handle, **sets}], owner=turn.get("owner"),
+                                      speaker_handle=turn.get("speaker_handle"),
+                                      owner_handle=owner_handle, known=known, book={}).get(handle, {})
+        admitted = (_admit_people_facts([{"handle": handle, **changed}], owner=turn.get("owner"),
+                                        speaker_handle=turn.get("speaker_handle"),
+                                        owner_handle=owner_handle, known=known, book=book).get(handle, {})
+                    if changed else {})
+        if set(allowed) != set(sets) or set(admitted) != set(changed):
+            # A field missing from `allowed` never had a claim at all (wrong
+            # field type, or a member naming a handle that is not their own);
+            # one missing only from `admitted` is a real change the overwrite
+            # gate refused (already filled, member). Only the second kind
+            # names display_name specifically -- the first is the generic
+            # wrong-handle refusal regardless of which field it was.
+            provenance_missing = set(sets) - set(allowed)
+            overwrite_missing = set(changed) - set(admitted)
+            if provenance_missing == {"relationship"}:
+                return json.dumps({
+                    "success": False,
+                    "error": "relationship not recorded: it is the owner's to say -- drop it or ask the owner",
+                })
+            if not provenance_missing and overwrite_missing == {"display_name"}:
+                return json.dumps({
+                    "success": False,
+                    "error": "display_name not recorded: once set, only the owner may rename it",
+                })
+            return generic_refusal
+    write_body = {**admitted, **{k: "" for k in clears}}
+    if not write_body:
+        return json.dumps({"success": True, "display_name": current.get("display_name"),
+                           "relationship": current.get("relationship")})
+    try:
         data = asyncio.run_coroutine_threadsafe(
             adapter.name_contact(handle, write_body), loop).result(timeout=30)
     except _PlowSendError as exc:

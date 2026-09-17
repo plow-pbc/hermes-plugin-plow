@@ -63,8 +63,10 @@ IDENTITY = {"signup": SIGNUP, "number": NUMBER, "agent": AGENT, "lines": LINES}
 # (a cron run), as `_authority` derives them -- see the prompt matrix. The
 # trusted-group member is the one shape where `owner` and `authority` diverge;
 # the owner in a discretion group, where `authority` and recall diverge.
-_OWNER_DM = {"chat_uid": "cht_a", "owner": True, "dm": True, "authority": True, "recall_everywhere": True}
-_OWNER_GROUP = {"chat_uid": "cht_g", "owner": True, "dm": False, "authority": True, "recall_everywhere": False}
+_OWNER_DM = {"chat_uid": "cht_a", "owner": True, "dm": True, "authority": True, "recall_everywhere": True,
+            "owner_handle": "+15550000001"}
+_OWNER_GROUP = {"chat_uid": "cht_g", "owner": True, "dm": False, "authority": True, "recall_everywhere": False,
+                "owner_handle": "+15550000001"}
 _TRUSTED_MEMBER = {"chat_uid": "cht_t", "owner": False, "dm": False, "authority": True, "recall_everywhere": True}
 _DISCRETION_MEMBER = {"chat_uid": "cht_b", "owner": False, "dm": False, "authority": False,
                       "recall_everywhere": False}
@@ -2450,7 +2452,7 @@ def _authority_case_name_a_contact(module: Any, monkeypatch: pytest.MonkeyPatch,
         own_relationship = json.loads(module._plow_name_contact(
             {"handle": "+15550000003", "relationship": "friend"}))
         assert not own_relationship["success"]
-        assert "not recorded on this turn" in own_relationship["error"]
+        assert "relationship not recorded" in own_relationship["error"]
         assert record == []
         record.clear()
         other_handle = json.loads(module._plow_name_contact({"handle": "+15550000002", "display_name": "Abby"}))
@@ -2490,24 +2492,36 @@ def test_name_a_contact_clears_and_restates_through_the_matrix(
     adapter.contacts = contacts
 
     # The owner clears a member's relationship.
-    module._ACTIVE_TURN.set({**_OWNER_DM, "owner_handle": "+15550000001"})
+    module._ACTIVE_TURN.set(_OWNER_DM)
     cleared = json.loads(module._plow_name_contact({"handle": "+15550000002", "relationship": ""}))
     assert cleared["success"]
     assert record == [("+15550000002", {"relationship": ""})]
     record.clear()
 
+    # ...and a member's display_name, the same way.
+    another_display_clear = json.loads(module._plow_name_contact({"handle": "+15550000002", "display_name": ""}))
+    assert another_display_clear["success"]
+    assert record == [("+15550000002", {"display_name": ""})]
+    record.clear()
+
     # A member may never clear anything, own row or not.
-    module._ACTIVE_TURN.set({**_TRUSTED_MEMBER, "owner_handle": "+15550000001", "speaker_handle": "+15550000002"})
+    module._ACTIVE_TURN.set({**_TRUSTED_MEMBER, "speaker_handle": "+15550000002"})
     member_clear = json.loads(module._plow_name_contact({"handle": "+15550000002", "display_name": ""}))
     assert not member_clear["success"]
     assert "not recorded on this turn" in member_clear["error"]
     assert record == []
 
     # A relationship never clears on the owner's own handle either.
-    module._ACTIVE_TURN.set({**_OWNER_DM, "owner_handle": "+15550000001"})
+    module._ACTIVE_TURN.set(_OWNER_DM)
     own_handle_clear = json.loads(module._plow_name_contact({"handle": "+15550000001", "relationship": ""}))
     assert not own_handle_clear["success"]
     assert "not recorded on this turn" in own_handle_clear["error"]
+    assert record == []
+
+    # Nor does a relationship *set* land there -- cleared or set, never.
+    own_handle_set = json.loads(module._plow_name_contact({"handle": "+15550000001", "relationship": "self"}))
+    assert not own_handle_set["success"]
+    assert "relationship not recorded" in own_handle_set["error"]
     assert record == []
 
     # The owner repeats the book's current relationship while genuinely
@@ -2519,13 +2533,32 @@ def test_name_a_contact_clears_and_restates_through_the_matrix(
     assert record == [("+15550000002", {"display_name": "Abigail"})]
     record.clear()
 
+    # A trailing space is still the same name once normalised: satisfied by
+    # construction, nothing reaches the adapter.
+    trailing_space = json.loads(module._plow_name_contact({"handle": "+15550000002", "display_name": "Abby "}))
+    assert trailing_space["success"]
+    assert record == []
+
     # A member restating that exact same relationship value is still refused
     # for authority -- a no-op is never a backdoor around who may say it.
-    module._ACTIVE_TURN.set({**_TRUSTED_MEMBER, "owner_handle": "+15550000001", "speaker_handle": "+15550000002"})
+    module._ACTIVE_TURN.set({**_TRUSTED_MEMBER, "speaker_handle": "+15550000002"})
     member_restated = json.loads(module._plow_name_contact(
         {"handle": "+15550000002", "relationship": "wife"}))
     assert not member_restated["success"]
-    assert "not recorded on this turn" in member_restated["error"]
+    assert "relationship not recorded" in member_restated["error"]
+    assert record == []
+
+    # A member may fill only their own *empty* field: overwriting their own
+    # already-filled display_name is refused, by name, once set.
+    member_overwrite = json.loads(module._plow_name_contact({"handle": "+15550000002", "display_name": "Patrick"}))
+    assert not member_overwrite["success"]
+    assert "display_name not recorded" in member_overwrite["error"]
+    assert record == []
+
+    # But restating that same already-filled name is a no-op, not an
+    # overwrite -- may-write and may-overwrite are different questions.
+    member_restate_name = json.loads(module._plow_name_contact({"handle": "+15550000002", "display_name": "Abby"}))
+    assert member_restate_name["success"]
     assert record == []
 
 
