@@ -1528,6 +1528,10 @@ class PlowChatAdapter(BasePlatformAdapter):
         self._goal_locks = {}                 # chat uid -> its load-modify-save lock
         self._goal_paced = False              # pacing runs only inside a live socket session
         self._active_turn = _ACTIVE_TURN
+        # The turn-start Mac wake, scheduled and never awaited. Held so it is
+        # not garbage-collected mid-flight, and so a wake already running is
+        # not joined by a second one on the next turn.
+        self._mac_wake = None
         self._live_turns = {}
         self._sequence_locks = {}
         self._sequences = {}
@@ -1773,8 +1777,16 @@ class PlowChatAdapter(BasePlatformAdapter):
                               retryable=False)
 
     async def on_processing_start(self, event):
-        # Off the loop: the wait polls with time.sleep, up to 15 s.
-        await asyncio.to_thread(_wake_mac_link)
+        # Scheduled, NOT awaited. The wait polls with time.sleep for up to 15 s,
+        # and a Mac that is off keeps its server parked, so awaiting it spent
+        # that on every message of every owner who has never paired one -- paid
+        # before the model is even asked. The reconnect still happens, on its
+        # own time; a turn that starts before it lands is the case the prompt
+        # already covers, telling the model a missing plow_ tool means Plow is
+        # restarting. One at a time: a wake still in flight is the wake this
+        # turn wanted, so a second would only queue behind it.
+        if self._mac_wake is None or self._mac_wake.done():
+            self._mac_wake = asyncio.create_task(asyncio.to_thread(_wake_mac_link))
         chat_uid = event.source.chat_id
         # Hermes builds its own events and swallows a raise here, so an
         # unstamped event is a speakerless wake read from nothing that can raise.

@@ -5787,10 +5787,72 @@ async def test_a_parked_latch_link_reconnects_before_the_turn(
         message_id="msg_1", channel_prompt=module.OWNER_CHANNEL_PROMPT, authority=True, recall_everywhere=True)
     await adapter.on_processing_start(event)
     try:
+        # The wake is scheduled, not awaited, so the assertion joins it here --
+        # the turn did not.
+        if adapter._mac_wake is not None:
+            await adapter._mac_wake
         assert woken == expected
         assert adapter._active_turn.get()["chat_uid"] == "cht_a"  # the turn still opened
     finally:
         await adapter.on_processing_complete(event, None)
+
+
+async def test_a_parked_mac_costs_the_turn_no_wall_clock(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
+) -> None:
+    """The turn opens while the wake is still blocked.
+
+    A Mac that is off keeps its server parked, and the wake polls for up to
+    15 s -- which used to be 15 s in front of every message from an owner who
+    has never paired one. The reconnect is still signalled; it just no longer
+    happens between the message and the model.
+    """
+    module = _load(monkeypatch, tmp_path)
+    url = "https://mac.example/mcp"
+    monkeypatch.setenv("PLOW_MCP_URL", url)
+    latch = SimpleNamespace(name="plow", _config={"url": url}, _was_parked=True, session=None)
+    core = types.ModuleType("tools.mcp_tool")
+    core._lock = threading.Lock()  # type: ignore[attr-defined]
+    core._servers = {("plow", None): latch}  # type: ignore[attr-defined]
+    loop_mod = types.ModuleType("tools.mcp_tool_loop")
+    entered, release, woken = threading.Event(), threading.Event(), []
+
+    def signal(server_name: str, srv: Any, *, op_description: str, timeout: float) -> bool:
+        entered.set()
+        release.wait(5)          # stands in for a parked server's poll
+        woken.append(server_name)
+        return True
+
+    loop_mod._signal_reconnect_and_wait = signal  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "tools", types.ModuleType("tools"))
+    monkeypatch.setitem(sys.modules, "tools.mcp_tool", core)
+    monkeypatch.setitem(sys.modules, "tools.mcp_tool_loop", loop_mod)
+
+    adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
+    adapter._set_reach([_chat("cht_a")])
+    event = SimpleNamespace(
+        source=SimpleNamespace(chat_id="cht_a", chat_type="dm", user_id="u", role_authorized=True),
+        message_id="msg_1", channel_prompt=module.OWNER_CHANNEL_PROMPT, authority=True, recall_everywhere=True)
+
+    await adapter.on_processing_start(event)
+    try:
+        # Returned with the wake still inside `signal`: the turn is open and
+        # the reconnect has not finished.
+        assert adapter._active_turn.get()["chat_uid"] == "cht_a"
+        # Awaited, not `Event.wait`: the wake runs on the loop this test is
+        # also on, and blocking it would stop the very task being waited for.
+        for _ in range(500):
+            if entered.is_set():
+                break
+            await asyncio.sleep(0.01)
+        assert entered.is_set(), "the reconnect was never signalled"
+        assert woken == [], "the turn waited for the wake"
+    finally:
+        release.set()
+        if adapter._mac_wake is not None:
+            await adapter._mac_wake
+        await adapter.on_processing_complete(event, None)
+    assert woken == ["plow"], "the reconnect still happens, off the turn"
 
 
 @pytest.mark.parametrize(("chat_uid", "group", "trusted", "authority"),
