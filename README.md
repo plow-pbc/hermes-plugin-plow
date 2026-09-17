@@ -472,7 +472,8 @@ The owner may also tell the agent what to call a person and who that person is
 to the owner — `wife`, `landlord` — through `plow_name_contact`, which `PUT`s
 `/v1/contacts/{handle}`. The book is keyed by handle, not by chat, so one name
 follows the person into every thread they are in; naming the owner's own handle
-sets their account name, and a relationship on their own handle is refused.
+sets their account name — never cleared — and a relationship on their own
+handle is refused.
 The tool and the passive capture below share one provenance rule: the
 owner's own turn may write a display name and a relationship for anyone
 they can name, while a member's own turn may only fill their own

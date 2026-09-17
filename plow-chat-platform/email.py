@@ -34,6 +34,7 @@ from ._transport import (
     _refresh_identity,
     _self_agent_line,
     _serve,
+    _speaker_participant,
     _socket,
     _split,
     _ticket,
@@ -221,12 +222,14 @@ class PlowEmailAdapter(BasePlatformAdapter):
         # alone; `email` keeps the Latch mail gate shut -- a reply here goes out
         # from this line, never their Gmail.
         owner = bool(event.source.role_authorized)
-        # `plow_name_contact` is a tool shared with the chat platform; a
-        # non-owner sender on this line must be refused the same way a
-        # non-owner chat turn is, so it needs the same owner_handle to check.
+        # `plow_name_contact` is a tool shared with the chat platform, and its
+        # provenance rule reads the same two handles off this thread's roster:
+        # whose turn it is, and the owner's own.
         chat = self._chats.get(event.source.chat_id, {})
+        speaker = _speaker_participant(chat, event.source.user_id)
         _ACTIVE_TURN.set({"chat_uid": event.source.chat_id, "owner": owner,
                           "dm": False, "authority": owner, "email": True,
+                          "speaker_handle": speaker.get("provider_key") if speaker else None,
                           "owner_handle": _owner_handle(chat)})
 
     async def on_processing_complete(self, event, outcome):

@@ -2483,15 +2483,45 @@ def _authority_case_name_a_contact(module: Any, monkeypatch: pytest.MonkeyPatch,
             assert record == []
 
 
+_MEMBER_OWN_ROW = {**_TRUSTED_MEMBER, "speaker_handle": "+15550000002"}
+
+
+@pytest.mark.parametrize(("turn", "args", "success", "error", "written"), [
+    pytest.param(_OWNER_DM, {"handle": "+15550000002", "relationship": ""}, True, None, {"relationship": ""},
+                 id="owner clears a relationship"),
+    pytest.param(_OWNER_DM, {"handle": "+15550000002", "display_name": ""}, True, None, {"display_name": ""},
+                 id="owner clears a name"),
+    pytest.param(_MEMBER_OWN_ROW, {"handle": "+15550000002", "display_name": ""}, False, "not recorded on this turn",
+                 None, id="a member never clears, own row or not"),
+    pytest.param(_OWNER_DM, {"handle": "+15550000001", "relationship": ""}, False,
+                 "a relationship never lands on your own handle", None, id="own handle: relationship clear"),
+    pytest.param(_OWNER_DM, {"handle": "+15550000001", "relationship": "self"}, False,
+                 "a relationship never lands on your own handle", None, id="own handle: relationship set"),
+    pytest.param(_OWNER_DM, {"handle": "+15550000001", "display_name": ""}, False, "never cleared", None,
+                 id="own handle: the account name never clears"),
+    pytest.param(_OWNER_DM, {"handle": "+15550000002", "relationship": "wife", "display_name": "Abigail"}, True, None,
+                 {"display_name": "Abigail"}, id="a restated field is satisfied, the changed one written"),
+    pytest.param(_OWNER_DM, {"handle": "+15550000002", "display_name": "Abby "}, True, None, None,
+                 id="a trailing space is still a restatement"),
+    pytest.param(_MEMBER_OWN_ROW, {"handle": "+15550000002", "relationship": "wife"}, False,
+                 "relationship not recorded", None, id="a member restating a relationship is refused for authority"),
+    pytest.param(_MEMBER_OWN_ROW, {"handle": "+15550000002", "display_name": "Patrick"}, False,
+                 "display_name not recorded", None, id="a member fills only an empty name"),
+    pytest.param(_MEMBER_OWN_ROW, {"handle": "+15550000002", "display_name": "Abby"}, True, None, None,
+                 id="a member restating their own name is a no-op, not an overwrite"),
+])
 def test_name_a_contact_clears_and_restates_through_the_matrix(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, turn: dict[str, Any], args: dict[str, str],
+    success: bool, error: str | None, written: dict[str, str] | None,
 ) -> None:
     """A clear ("") is an owner overwrite, gated the same way a set is: only
-    the owner's own turn may clear anything, and a relationship never clears
-    on the owner's own handle either. A field whose requested value already
-    matches the book is satisfied without reaching the adapter -- unless the
-    speaker was never authorized to write it at all, in which case a no-op
-    is still refused for authority, not silently treated as nothing to do."""
+    the owner's own turn may clear anything, and nothing clears on the owner's
+    own handle -- a relationship never lands there, and their name is their
+    account name. A field whose requested value already matches the book is
+    satisfied without reaching the adapter -- unless the speaker was never
+    authorized to write it at all, in which case a no-op is still refused for
+    authority, not silently treated as nothing to do. An own-handle refusal
+    addresses the owner themselves, never "ask the owner"."""
     module = _load(monkeypatch, tmp_path)
     record: list[Any] = []
     adapter = _live_tool(module, monkeypatch, "name_contact",
@@ -2501,78 +2531,12 @@ def test_name_a_contact_clears_and_restates_through_the_matrix(
         return _BOOK   # Abby's row already carries display_name "Abby", relationship "wife"
 
     adapter.contacts = contacts
-
-    # The owner clears a member's relationship.
-    module._ACTIVE_TURN.set(_OWNER_DM)
-    cleared = json.loads(module._plow_name_contact({"handle": "+15550000002", "relationship": ""}))
-    assert cleared["success"]
-    assert record == [("+15550000002", {"relationship": ""})]
-    record.clear()
-
-    # ...and a member's display_name, the same way.
-    another_display_clear = json.loads(module._plow_name_contact({"handle": "+15550000002", "display_name": ""}))
-    assert another_display_clear["success"]
-    assert record == [("+15550000002", {"display_name": ""})]
-    record.clear()
-
-    # A member may never clear anything, own row or not.
-    module._ACTIVE_TURN.set({**_TRUSTED_MEMBER, "speaker_handle": "+15550000002"})
-    member_clear = json.loads(module._plow_name_contact({"handle": "+15550000002", "display_name": ""}))
-    assert not member_clear["success"]
-    assert "not recorded on this turn" in member_clear["error"]
-    assert record == []
-
-    # A relationship never clears on the owner's own handle either -- and the
-    # message addresses the owner themselves, not a member who isn't here.
-    module._ACTIVE_TURN.set(_OWNER_DM)
-    own_handle_clear = json.loads(module._plow_name_contact({"handle": "+15550000001", "relationship": ""}))
-    assert not own_handle_clear["success"]
-    assert own_handle_clear["error"] == "a relationship never lands on your own handle; nothing was recorded"
-    assert record == []
-
-    # Nor does a relationship *set* land there -- cleared or set, never --
-    # with the same owner-addressed message, not the member's.
-    own_handle_set = json.loads(module._plow_name_contact({"handle": "+15550000001", "relationship": "self"}))
-    assert not own_handle_set["success"]
-    assert own_handle_set["error"] == "a relationship never lands on your own handle; nothing was recorded"
-    assert record == []
-
-    # The owner repeats the book's current relationship while genuinely
-    # changing display_name: the restatement is satisfied by construction,
-    # only the real change reaches the adapter.
-    restated = json.loads(module._plow_name_contact(
-        {"handle": "+15550000002", "relationship": "wife", "display_name": "Abigail"}))
-    assert restated["success"]
-    assert record == [("+15550000002", {"display_name": "Abigail"})]
-    record.clear()
-
-    # A trailing space is still the same name once normalised: satisfied by
-    # construction, nothing reaches the adapter.
-    trailing_space = json.loads(module._plow_name_contact({"handle": "+15550000002", "display_name": "Abby "}))
-    assert trailing_space["success"]
-    assert record == []
-
-    # A member restating that exact same relationship value is still refused
-    # for authority -- a no-op is never a backdoor around who may say it.
-    module._ACTIVE_TURN.set({**_TRUSTED_MEMBER, "speaker_handle": "+15550000002"})
-    member_restated = json.loads(module._plow_name_contact(
-        {"handle": "+15550000002", "relationship": "wife"}))
-    assert not member_restated["success"]
-    assert "relationship not recorded" in member_restated["error"]
-    assert record == []
-
-    # A member may fill only their own *empty* field: overwriting their own
-    # already-filled display_name is refused, by name, once set.
-    member_overwrite = json.loads(module._plow_name_contact({"handle": "+15550000002", "display_name": "Patrick"}))
-    assert not member_overwrite["success"]
-    assert "display_name not recorded" in member_overwrite["error"]
-    assert record == []
-
-    # But restating that same already-filled name is a no-op, not an
-    # overwrite -- may-write and may-overwrite are different questions.
-    member_restate_name = json.loads(module._plow_name_contact({"handle": "+15550000002", "display_name": "Abby"}))
-    assert member_restate_name["success"]
-    assert record == []
+    module._ACTIVE_TURN.set(turn)
+    out = json.loads(module._plow_name_contact(args))
+    assert out["success"] is success
+    if error:
+        assert error in out["error"]
+    assert record == ([(args["handle"], written)] if written else [])
 
 
 _PEOPLE_ROSTER = {"15550000001": "+15550000001", "15550000002": "+15550000002"}

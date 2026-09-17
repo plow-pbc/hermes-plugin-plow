@@ -78,6 +78,7 @@ from ._transport import (
     _refresh_identity,
     _represented_member,
     _self_agent_line,
+    _speaker_participant,
     _serve,
     _socket,
     _split,
@@ -175,9 +176,10 @@ _RELATIONSHIP_FACT = (
 # across every thread, so a handle still bare next turn is a tell that the
 # agent never recorded it.
 _NAME_FACT = (
-    "If anyone in the roster shows as a bare handle, name it with plow_name_contact from what "
-    "your owner called them, your owner's own contacts, or what they say about their own handle; "
-    "when a person gives another handle of theirs, record the same name on it. "
+    "If anyone in the roster shows as a bare handle, name it with plow_name_contact -- on your "
+    "owner's turn, anyone, from what your owner called them or your owner's own contacts, and "
+    "the same name on any other handle a person gives as theirs; on a member's turn, only what "
+    "they say about their own handle. "
     f"{_NEVER_GUESS}"
 )
 # The one shape third-party text arrives in: bracketed, named for what it is,
@@ -1796,13 +1798,7 @@ class PlowChatAdapter(BasePlatformAdapter):
             ) if event.message_id else None,
         }
         chat = self._chats.get(chat_uid, {})
-        participant = next(
-            (item for item in chat.get("participants", [])
-             if item.get("type") == "member" and item.get("uid") == event.source.user_id),
-            None,
-        )
-        # Who spoke, as the key the contact book uses; None on a wake or
-        # setup turn, which has no speaker to learn anything from.
+        participant = _speaker_participant(chat, event.source.user_id)
         turn["speaker_handle"] = participant.get("provider_key") if participant else None
         # plow_name_contact's provenance matrix needs the owner's own handle
         # on every turn, not just a member's -- a relationship never lands on
@@ -4522,13 +4518,11 @@ def _plow_name_contact(args, **_kwargs):
 
     Keyed by handle, so the owner's contact book reaches anyone they can name --
     a member of this chat, someone in another thread, or the owner themselves.
-    Routed through `_admit_people_facts`, the same provenance rule the
-    passive-capture hook uses: the owner may write, overwrite, or clear a
-    display name and a relationship for any handle they can name; a member
-    may only fill their own empty display_name -- never a relationship,
-    never a clear, and never another person's row, since who someone is to
-    the owner is the owner's to say. No active turn at all refuses: a
-    turn-less write has nobody to have asked.
+    Gated field by field by `_may_write_contact_field`, the same provenance
+    rule the passive-capture hook applies; a write the rule would trim is
+    refused whole, with the field and the next step named, never silently
+    narrowed. No active turn at all refuses: a turn-less write has nobody to
+    have asked.
     """
     turn = _ACTIVE_TURN.get()
     if turn is None:
@@ -4539,80 +4533,56 @@ def _plow_name_contact(args, **_kwargs):
     if not handle or not body:
         return json.dumps({"success": False,
                            "error": "a handle, and display_name or relationship, are required"})
-    generic_refusal = json.dumps({
-        "success": False,
-        "error": "not recorded on this turn: a member may name only their own bare handle, "
-                 "and a relationship is the owner's to say",
-    })
-    # An own-handle relationship refusal addresses whoever is on this turn:
-    # the owner is never told to "ask the owner" about their own handle.
-    own_handle_refusal = json.dumps({
-        "success": False,
-        "error": "a relationship never lands on your own handle; nothing was recorded",
-    })
-    # A clear ("") is an owner overwrite, mirroring the matrix's own rule that
-    # a relationship never lands on the owner's own handle, cleared or set.
-    owner_handle = turn.get("owner_handle")
+    owner, key, owner_key = turn.get("owner"), _handle_key(handle), _handle_key(turn.get("owner_handle"))
+
+    def refused(error):
+        return json.dumps({"success": False, "error": error})
+
+    def may(field, **overwrite):
+        return _may_write_contact_field(field, owner=owner, target=key, owner_handle=owner_key,
+                                        speaker=_handle_key(turn.get("speaker_handle")), **overwrite)
+
+    generic = ("not recorded on this turn: a member may name only their own bare handle, "
+               "and a relationship is the owner's to say")
+    # An own-handle refusal addresses whoever is on this turn: the owner is
+    # never told to "ask the owner" about their own handle.
+    own_handle = owner and key == owner_key
+    own_relationship = "a relationship never lands on your own handle; nothing was recorded"
     clears = {k for k, v in body.items() if v == ""}
     sets = {k: v for k, v in body.items() if v != ""}
-    own_handle = _handle_key(handle) == _handle_key(owner_handle)
-    if clears and not turn.get("owner"):
-        return generic_refusal
-    if "relationship" in clears and own_handle:
-        return own_handle_refusal
+    for field in clears:
+        if not may(field, clear=True):
+            if not own_handle:
+                return refused(generic)
+            return refused(own_relationship if field == "relationship"
+                           else "your own name is set here, never cleared; nothing was recorded")
+    # Who may say a field at all is asked before what would change, so a
+    # member restating a relationship is refused for authority, never
+    # satisfied as a no-op: the tool is not an oracle for the book.
+    denied = [field for field in sets if not may(field)]
+    if denied == ["relationship"]:
+        return refused(own_relationship if own_handle else
+                       "relationship not recorded: it is the owner's to say -- drop it or ask the owner")
+    if denied:
+        return refused(generic)
     if _live is None:
-        return json.dumps({"success": False, "error": "the Plow Chat gateway is not connected; nothing was recorded"})
+        return refused("the Plow Chat gateway is not connected; nothing was recorded")
     adapter, loop = _live
-    current = admitted = {}
+    current = {}
     if sets:
         try:
-            book_rows = asyncio.run_coroutine_threadsafe(adapter.contacts(), loop).result(timeout=30)
+            book = asyncio.run_coroutine_threadsafe(adapter.contacts(), loop).result(timeout=30)
         except Exception:  # noqa: BLE001 - a failed read is not evidence anything was written
-            return json.dumps({
-                "success": False,
-                "error": "could not read the contact book; nothing was recorded; retrying is safe",
-            })
-        known = {_handle_key(handle): handle}
-        book = {_handle_key(r["provider_key"]): r for r in book_rows}
-
-        def admit(facts, book):
-            return _admit_people_facts(facts, owner=turn.get("owner"), speaker_handle=turn.get("speaker_handle"),
-                                       owner_handle=owner_handle, known=known, book=book).get(handle, {})
-
-        current = book.get(_handle_key(handle), {})
-        changed = {k: v for k, v in sets.items() if _one_line(v) != (current.get(k) or "")}
-        # Two different questions: `allowed` asks pure provenance -- who may
-        # say this field at all -- with the book blanked so neither the
-        # matrix's no-op check nor its fill-only-empty overwrite gate can
-        # mask an authority violation behind a value that happens to match.
-        # `admitted` asks what actually changes, against the real book, so a
-        # genuine restatement never trips the overwrite gate a real change
-        # would. May-write and may-overwrite are different rules.
-        allowed = admit([{"handle": handle, **sets}], {})
-        admitted = admit([{"handle": handle, **changed}], book) if changed else {}
-        if set(allowed) != set(sets) or set(admitted) != set(changed):
-            # A field missing from `allowed` never had a claim at all (wrong
-            # field type, or a member naming a handle that is not their own);
-            # one missing only from `admitted` is a real change the overwrite
-            # gate refused (already filled, member). Only the second kind
-            # names display_name specifically -- the first is the generic
-            # wrong-handle refusal regardless of which field it was.
-            provenance_missing = set(sets) - set(allowed)
-            overwrite_missing = set(changed) - set(admitted)
-            if provenance_missing == {"relationship"}:
-                if own_handle and turn.get("owner"):
-                    return own_handle_refusal
-                return json.dumps({
-                    "success": False,
-                    "error": "relationship not recorded: it is the owner's to say -- drop it or ask the owner",
-                })
-            if not provenance_missing and overwrite_missing == {"display_name"}:
-                return json.dumps({
-                    "success": False,
-                    "error": "display_name not recorded: once set, only the owner may rename it",
-                })
-            return generic_refusal
-    write_body = {**admitted, **{k: "" for k in clears}}
+            return refused("could not read the contact book; nothing was recorded; retrying is safe")
+        current = next((row for row in book if _handle_key(row["provider_key"]) == key), {})
+    # Only a value that changes the record is written, as the rule's
+    # normalised value -- the one the hook writes too; may-write and
+    # may-overwrite are different questions, so the overwrite gate sees only
+    # real changes and a restatement never trips it.
+    changed = {k: _one_line(v) for k, v in sets.items() if _one_line(v) != (current.get(k) or "")}
+    if any(not may(field, current=current.get(field)) for field in changed):
+        return refused("display_name not recorded: once set, only the owner may rename it")
+    write_body = {**changed, **{k: "" for k in clears}}
     if not write_body:
         return json.dumps({"success": True, "display_name": current.get("display_name"),
                            "relationship": current.get("relationship")})
@@ -4651,9 +4621,9 @@ PLOW_NAME_CONTACT_SCHEMA = {
         "person each take the same name; the roster shows each person as name "
         "(handle). Only a value that changes what is already on record is "
         "written; omit display_name/relationship, or repeat the current "
-        "value, to leave it as is. Pass \"\" to clear a field -- your "
-        "owner's own turn only, and a relationship never clears on their "
-        "own handle either."
+        "value, to leave it as is. Pass \"\" to clear a field on anyone "
+        "else's row -- your owner's own turn only; their own name is their "
+        "account name and never clears."
     ),
     "parameters": {
         "type": "object",
@@ -4670,17 +4640,29 @@ PLOW_NAME_CONTACT_SCHEMA = {
 }
 
 
-def _admit_people_facts(facts, *, owner, speaker_handle, owner_handle, known, book):
-    """What the classifier proposed, reduced to what this speaker may write.
+def _may_write_contact_field(field, *, owner, target, speaker, owner_handle, current=None, clear=False):
+    """The provenance rule, one field at a time, over handle keys: who may say
+    this field on this handle, and whether over what is there. The owner's
+    word names anyone and overwrites -- the latest owner statement wins --
+    but never lands a relationship on their own handle, and never clears
+    anything there: their own name is their account name. A member's word
+    reaches only their own row, fills only an empty display_name, and never
+    carries a relationship -- who someone is to the owner is the owner's to
+    say."""
+    if clear:
+        return owner and target != owner_handle
+    if not owner:
+        return field == "display_name" and target == speaker and not current
+    return field == "display_name" or target != owner_handle
 
-    The owner's words name anyone the roster or book knows, and overwrite:
-    "current" means the latest owner statement wins. A member's words reach
-    only their own row, fill only empty fields, and never carry a
-    relationship -- who someone is to the owner is the owner's to say. A
-    handle nobody knows is dropped rather than invented. An alias -- another
-    handle for the same person -- is the owner's to give: it lands a name on a
-    handle nobody has verified, and a member's word for which handles are
-    theirs is exactly the claim that cannot be checked.
+
+def _admit_people_facts(facts, *, owner, speaker_handle, owner_handle, known, book):
+    """What the classifier proposed, reduced to what this speaker may write
+    under `_may_write_contact_field`. A handle nobody knows is dropped rather
+    than invented. An alias -- another handle for the same person -- is the
+    owner's to give: it lands a name on a handle nobody has verified, and a
+    member's word for which handles are theirs is exactly the claim that
+    cannot be checked.
     """
     speaker_key = _handle_key(speaker_handle)
     owner_key = _handle_key(owner_handle)
@@ -4689,19 +4671,16 @@ def _admit_people_facts(facts, *, owner, speaker_handle, owner_handle, known, bo
         if not isinstance(fact, dict):
             continue
         key = _handle_key(_one_line(fact.get("handle")))
-        if not key or key not in known or (not owner and key != speaker_key):
+        if not key or key not in known:
             continue
         current = {**book.get(key, {}), **writes.get(known[key], {})}
         body = {}
         for field in ("display_name", "relationship"):
             value = _one_line(fact.get(field))
-            if not value or value == (current.get(field) or ""):
-                continue
-            if field == "relationship" and (not owner or key == owner_key):
-                continue
-            if not owner and current.get(field):
-                continue
-            body[field] = value
+            if (value and value != (current.get(field) or "")
+                    and _may_write_contact_field(field, owner=owner, target=key, speaker=speaker_key,
+                                                 owner_handle=owner_key, current=current.get(field))):
+                body[field] = value
         if body:
             writes.setdefault(known[key], {}).update(body)
         alias = _one_line(fact.get("same_person_as")) if owner else ""

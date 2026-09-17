@@ -269,6 +269,15 @@ def _owner_handle(chat):
     return owner.get("provider_key") if owner else None
 
 
+def _speaker_participant(chat, user_id):
+    """The member who spoke on this turn, off the chat's roster, or None on a
+    wake or setup turn, which has no speaker to learn anything from. Both
+    lines stamp its handle as the turn's `speaker_handle`, the key
+    `_may_write_contact_field` lets a member's word reach."""
+    return next((p for p in chat.get("participants") or []
+                 if p.get("type") == "member" and p.get("uid") == user_id), None)
+
+
 def _handle_key(handle):
     """Plow's `membership_key`, as far as a comparison needs it: a phone is its
     digits, anything else is case-folded -- so `+1 (555) 000-0001` and
