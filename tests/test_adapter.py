@@ -2635,30 +2635,43 @@ async def test_a_failing_classifier_writes_nothing(
     assert written == []
 
 
-_SKILL_BODY = ("# The owner's contacts are on this Mac\n... /usr/bin/sqlite3 -readonly "
-               "'/Users/sam/Library/Application Support/AddressBook/AddressBook-v22.abcddb' ...\n"
-               "sweep '/Users/sam/Library/Application Support/AddressBook/Sources/ABCD-1/AddressBook-v22.abcddb' too")
+_STORE_DIR = "/Users/sam/Library/Application Support/AddressBook"
+_STORES = [f"{_STORE_DIR}/AddressBook-v22.abcddb", f"{_STORE_DIR}/Sources/ABCD-1/AddressBook-v22.abcddb"]
+# The shape of Latch's real contacts skill: the resolved ROOT store, bare and
+# inside a recipe's argv; the sync-source stores are left to a find; and a
+# `~/…/` literal that is prose, not a path.
+_SKILL_BODY = ("# The owner's contacts are on this Mac\n\nThere is more than one store. The root one:\n\n"
+               f"    {_STORES[0]}\n\nplus one per sync source under `Sources/<UUID>/`. Sweep them all first:\n\n"
+               f'    plow_run_command {{ argv: ["/usr/bin/find", "{_STORE_DIR}", "-maxdepth", "4", "-name", '
+               '"AddressBook*.abcddb"] }\n\n'
+               f'    plow_run_command {{ argv: ["/usr/bin/sqlite3", "-readonly", "-header", "-csv", "{_STORES[0]}", '
+               '"select count(*) from ZABCDRECORD;"] }\n\n'
+               "a literal `~/…/AddressBook-v22.abcddb` argument would fail to open.")
 
 
-def test_the_store_paths_come_from_the_contacts_skill(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> None:
+def test_the_store_directory_comes_from_the_contacts_skill(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> None:
     module = _load(monkeypatch, tmp_path)
-    assert module._contacts_store_paths(_SKILL_BODY) == [
-        "/Users/sam/Library/Application Support/AddressBook/AddressBook-v22.abcddb",
-        "/Users/sam/Library/Application Support/AddressBook/Sources/ABCD-1/AddressBook-v22.abcddb",
-    ]
+    assert module._contacts_store_dir(_SKILL_BODY) == _STORE_DIR
+    with pytest.raises(ValueError):
+        module._contacts_store_dir("# a skill that names no store")
 
 
 @pytest.mark.parametrize("rows, expected", [
     # Half the store is "(714) 393-3614"-shaped: digits decide, and a leading 1 is not a difference.
-    ([{"record": 1, "name": "Patrick Salyer", "phone": "(714) 393-3614", "email": None}],
+    ([{"name": "Patrick Salyer", "phone": "(714) 393-3614", "email": None}],
      {"+17143933614": "Patrick Salyer"}),
     # Two records share a number: nobody is named.
-    ([{"record": 1, "name": "Patrick Salyer", "phone": "+17143933614", "email": None},
-      {"record": 2, "name": "P. Salyer", "phone": "+1 714 393 3614", "email": None}], {}),
+    ([{"name": "Patrick Salyer", "phone": "+17143933614", "email": None},
+      {"name": "P. Salyer", "phone": "+1 714 393 3614", "email": None}], {}),
     # Emails match case-folded; one record with two rows is still one record.
-    ([{"record": 3, "name": "Chu", "phone": None, "email": "CMchu@x.com"},
-      {"record": 3, "name": "Chu", "phone": "+15550001111", "email": None}],
+    ([{"name": "Chu", "phone": None, "email": "CMchu@x.com"},
+      {"name": "Chu", "phone": "+15550001111", "email": None}],
      {"cmchu@x.com": "Chu"}),
+    # The same card in the root store and its iCloud source is one person; a nameless company card is nobody.
+    ([{"name": "Patrick Salyer", "phone": "+17143933614", "email": None},
+      {"name": "Patrick Salyer", "phone": "(714) 393-3614", "email": None},
+      {"name": "", "phone": "+17143933614", "email": None}],
+     {"+17143933614": "Patrick Salyer"}),
     ([], {}),
 ])
 def test_a_handle_resolves_only_to_exactly_one_card(
@@ -2683,7 +2696,10 @@ async def test_bare_handles_are_named_from_the_owners_mac_after_a_reach_refresh(
         relay_calls.append((name, arguments))
         if name == "plow_read_skill":
             return {"body": _SKILL_BODY}
-        rows = [{"record": 1, "name": "Patrick Salyer", "phone": "+17143933614", "email": None}]
+        if arguments["argv"][0] == "/usr/bin/find":
+            return {"status": "completed", "exit_code": 0, "output": "\n".join(_STORES) + "\n"}
+        # The same card in both stores -- the root and its iCloud source -- is one person, not two.
+        rows = [{"name": "Patrick Salyer", "phone": "+17143933614", "email": None}]
         return {"status": "completed", "exit_code": 0, "output": json.dumps(rows)}
 
     monkeypatch.setattr(module, "_relay_call", relay)
@@ -2699,10 +2715,13 @@ async def test_bare_handles_are_named_from_the_owners_mac_after_a_reach_refresh(
     adapter._set_reach([_chat("cht_a"), chat])
     await asyncio.get_running_loop().run_in_executor(None, done.wait, 5)
     assert written == [("+17143933614", {"display_name": "Patrick Salyer"})]
-    assert [name for name, _ in relay_calls] == ["plow_read_skill", "plow_run_command", "plow_run_command"]
-    argv = relay_calls[1][1]["argv"]
-    assert argv[:3] == ["/usr/bin/sqlite3", "-readonly", "-json"]
-    assert "3933614" in argv[-1]   # the query carries the handle's digits, not a wildcard sweep
+    assert [name for name, _ in relay_calls] == ["plow_read_skill"] + ["plow_run_command"] * 3
+    sweep, *queries = (arguments for _, arguments in relay_calls[1:])
+    assert sweep["argv"][:2] == ["/usr/bin/find", _STORE_DIR]
+    assert [q["argv"][:4] for q in queries] == [["/usr/bin/sqlite3", "-readonly", "-json", s] for s in _STORES]
+    assert "3933614" in queries[0]["argv"][-1]   # the query carries the handle's digits, not a wildcard sweep
+    # What the owner's approval dialog, the adversarial reviewer and the audit log show.
+    assert all(a["read_paths"] == [_STORE_DIR] and a["goal"] == module.BACKFILL_GOAL for a in (sweep, *queries))
 
 
 async def test_backfill_leaves_the_listing_alone_when_the_mac_is_unreachable(

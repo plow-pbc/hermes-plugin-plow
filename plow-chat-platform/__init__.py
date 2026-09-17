@@ -1068,26 +1068,28 @@ def _fetch_mac_skills(url: str, token: str, timeout: float = 8.0) -> list[dict[s
     return [{"name": str(sk["name"]), "description": str(sk["description"])} for sk in skills]
 
 
-_STORE_PATH_RE = re.compile(r"(/[^'\"`\n]*?AddressBook-v22\.abcddb)")
+# A store path starts where a token starts: the skill also spells a `~/…/`
+# literal in prose, and its recipes put `/usr/bin/sqlite3` on the same line.
+_STORE_PATH_RE = re.compile(r"(?<=[\s'\"`])(/[^'\"`\n]*?/AddressBook-v22\.abcddb)")
 _backfill = {"tried_at": 0.0, "lock": threading.Lock()}
 _backfill_done = None   # test seam: called when a backfill thread finishes
 BACKFILL_RETRY_S = 300.0
+BACKFILL_GOAL = "Name the still-unnamed people in your chats from your Contacts, so they go by name and not by number"
 
 
-def _contacts_store_paths(skill_body):
-    """Every AddressBook store the Latch contacts skill names -- it prints
-    RESOLVED paths, so this is where the owner's home comes from."""
-    seen = []
-    for path in _STORE_PATH_RE.findall(skill_body):
-        if path not in seen:
-            seen.append(path)
-    return seen
+def _contacts_store_dir(skill_body):
+    """The AddressBook directory the Latch contacts skill names -- it prints the
+    RESOLVED root store, so this is where the owner's home comes from. The
+    sync-source stores under it are found with the skill's own sweep."""
+    match = _STORE_PATH_RE.search(skill_body)
+    if match is None:
+        raise ValueError("the contacts skill names no AddressBook store")
+    return os.path.dirname(match.group(1))
 
 
 def _contacts_sql(handles):
     """One read over a store: every card whose phone digits end in a wanted
-    number's last ten, or whose email matches case-folded. Rows carry the
-    record id so `_resolve_handles` can tell one card from two."""
+    number's last ten, or whose email matches case-folded."""
     digits = {_handle_key(h)[-10:] for h in handles if "@" not in h}
     emails = {h.casefold() for h in handles if "@" in h}
     stripped = "replace(replace(replace(replace(replace(replace(p.ZFULLNUMBER,' ',''),'(',''),')',''),'-',''),'+',''),'.','')"
@@ -1095,7 +1097,7 @@ def _contacts_sql(handles):
     email_where = ", ".join(f"'{e}'" for e in sorted(emails) if re.fullmatch(r"[^'\s]+", e))
     where = " or ".join(w for w in (phone_where, f"lower(e.ZADDRESS) in ({email_where})" if email_where else "") if w)
     return (
-        "select r.Z_PK as record, trim(coalesce(r.ZFIRSTNAME,'')||' '||coalesce(r.ZLASTNAME,'')) as name, "
+        "select trim(coalesce(r.ZFIRSTNAME,'')||' '||coalesce(r.ZLASTNAME,'')) as name, "
         "p.ZFULLNUMBER as phone, e.ZADDRESS as email from ZABCDRECORD r "
         "left join ZABCDPHONENUMBER p on p.ZOWNER = r.Z_PK "
         "left join ZABCDEMAILADDRESS e on e.ZOWNER = r.Z_PK "
@@ -1104,20 +1106,20 @@ def _contacts_sql(handles):
 
 
 def _resolve_handles(rows, handles):
-    """handle -> card name, only where exactly one card matched."""
-    cards = {}
+    """handle -> card name, only where exactly one name matched. Names, not
+    record ids: the root store and its iCloud source both carry the owner's
+    cards, so one person is two records with one name."""
+    names = {}
     for row in rows:
+        name = row["name"].strip()
         for value in (row.get("phone"), row.get("email")):
-            if value:
-                cards.setdefault(_handle_key(value)[-10:] if "@" not in value else value.casefold(), {})[row["record"]] = row["name"]
+            if value and name:
+                names.setdefault(_handle_key(value)[-10:] if "@" not in value else value.casefold(), set()).add(name)
     out = {}
     for handle in handles:
-        key = _handle_key(handle)[-10:] if "@" not in handle else handle.casefold()
-        matched = cards.get(key, {})
+        matched = names.get(_handle_key(handle)[-10:] if "@" not in handle else handle.casefold(), set())
         if len(matched) == 1:
-            name = next(iter(matched.values())).strip()
-            if name:
-                out[handle] = name
+            out[handle] = next(iter(matched))
     return out
 
 
@@ -1126,12 +1128,29 @@ def _backfill_bare_handles(adapter, bare):
     url, token = os.environ["PLOW_MCP_URL"], os.environ["PLOW_AGENT_TOKEN"]
     try:
         body = _relay_call(url, token, "plow_read_skill", {"name": "contacts"}, WIKI_RELAY_TIMEOUT_S)["body"]
-        rows = []
-        for store in _contacts_store_paths(body):
+        store_dir = _contacts_store_dir(body)
+
+        def run(argv):
+            # read_paths and goal are what the owner's approval dialog, the
+            # adversarial reviewer and the audit log show -- the skill's contract.
             out = _relay_call(url, token, "plow_run_command",
-                              {"argv": ["/usr/bin/sqlite3", "-readonly", "-json", store, _contacts_sql(bare)]},
-                              WIKI_RELAY_TIMEOUT_S)
-            rows.extend(json.loads(out.get("output") or "[]"))
+                              {"argv": argv, "read_paths": [store_dir], "goal": BACKFILL_GOAL}, WIKI_RELAY_TIMEOUT_S)
+            return out.get("exit_code", 0), out.get("output") or ""
+
+        # The skill's own sweep: the root store plus one per sync source, and
+        # the iCloud source is usually the populated one. Output is stdout and
+        # stderr together, so a store is a line that names one.
+        _, found = run(["/usr/bin/find", store_dir, "-maxdepth", "4", "-name", "AddressBook*.abcddb"])
+        stores = [line for line in found.splitlines() if line.endswith(".abcddb")]
+        if not stores:
+            raise RuntimeError(f"no AddressBook store under {store_dir}: {found.strip()[:200]}")
+        rows = []
+        for store in stores:
+            status, output = run(["/usr/bin/sqlite3", "-readonly", "-json", store, _contacts_sql(bare)])
+            if status:   # a store on another schema version answers with an error, not rows
+                log.warning("[plow_chat] contact store %s skipped: %s", store, output.strip()[:200])
+                continue
+            rows.extend(json.loads(output or "[]"))
         if _live is None:
             return
         _adapter, loop = _live
