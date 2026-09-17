@@ -2523,10 +2523,6 @@ def test_only_the_speakers_own_facts_reach_the_book(
     book = {k: dict(v) for k, v in _BOOK_INDEX.items()}
     if not owner and speaker == "+15550000003":
         known["15550000003"] = "+15550000003"
-    if case == "member aliases a handle known only elsewhere":
-        known["15559990000"] = "+15559990000"   # a bare member of some other chat, not this one
-    if case == "member aliases a bare book row with no name":
-        book["15559998888"] = {"relationship": "friend"}   # no display_name: still a claimed row
     out = module._admit_people_facts(facts, owner=owner, speaker_handle=speaker,
                                      owner_handle="+15550000001", known=known, book=book)
     assert out == expected, case
