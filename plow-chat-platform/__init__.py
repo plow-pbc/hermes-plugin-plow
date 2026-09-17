@@ -1068,6 +1068,104 @@ def _fetch_mac_skills(url: str, token: str, timeout: float = 8.0) -> list[dict[s
     return [{"name": str(sk["name"]), "description": str(sk["description"])} for sk in skills]
 
 
+_STORE_PATH_RE = re.compile(r"(/[^'\"`\n]*?AddressBook-v22\.abcddb)")
+_backfill = {"tried_at": 0.0, "lock": threading.Lock()}
+_backfill_done = None   # test seam: called when a backfill thread finishes
+BACKFILL_RETRY_S = 300.0
+
+
+def _contacts_store_paths(skill_body):
+    """Every AddressBook store the Latch contacts skill names -- it prints
+    RESOLVED paths, so this is where the owner's home comes from."""
+    seen = []
+    for path in _STORE_PATH_RE.findall(skill_body):
+        if path not in seen:
+            seen.append(path)
+    return seen
+
+
+def _contacts_sql(handles):
+    """One read over a store: every card whose phone digits end in a wanted
+    number's last ten, or whose email matches case-folded. Rows carry the
+    record id so `_resolve_handles` can tell one card from two."""
+    digits = {_handle_key(h)[-10:] for h in handles if "@" not in h}
+    emails = {h.casefold() for h in handles if "@" in h}
+    stripped = "replace(replace(replace(replace(replace(replace(p.ZFULLNUMBER,' ',''),'(',''),')',''),'-',''),'+',''),'.','')"
+    phone_where = " or ".join(f"{stripped} like '%{d}'" for d in sorted(digits) if d.isdigit())
+    email_where = ", ".join(f"'{e}'" for e in sorted(emails) if re.fullmatch(r"[^'\s]+", e))
+    where = " or ".join(w for w in (phone_where, f"lower(e.ZADDRESS) in ({email_where})" if email_where else "") if w)
+    return (
+        "select r.Z_PK as record, trim(coalesce(r.ZFIRSTNAME,'')||' '||coalesce(r.ZLASTNAME,'')) as name, "
+        "p.ZFULLNUMBER as phone, e.ZADDRESS as email from ZABCDRECORD r "
+        "left join ZABCDPHONENUMBER p on p.ZOWNER = r.Z_PK "
+        "left join ZABCDEMAILADDRESS e on e.ZOWNER = r.Z_PK "
+        f"where {where or '0'};"
+    )
+
+
+def _resolve_handles(rows, handles):
+    """handle -> card name, only where exactly one card matched."""
+    cards = {}
+    for row in rows:
+        for value in (row.get("phone"), row.get("email")):
+            if value:
+                cards.setdefault(_handle_key(value)[-10:] if "@" not in value else value.casefold(), {})[row["record"]] = row["name"]
+    out = {}
+    for handle in handles:
+        key = _handle_key(handle)[-10:] if "@" not in handle else handle.casefold()
+        matched = cards.get(key, {})
+        if len(matched) == 1:
+            name = next(iter(matched.values())).strip()
+            if name:
+                out[handle] = name
+    return out
+
+
+def _backfill_bare_handles(adapter, bare):
+    """Resolve bare handles on the owner's Mac and fill the empty names."""
+    url, token = os.environ["PLOW_MCP_URL"], os.environ["PLOW_AGENT_TOKEN"]
+    try:
+        body = _relay_call(url, token, "plow_read_skill", {"name": "contacts"}, WIKI_RELAY_TIMEOUT_S)["body"]
+        rows = []
+        for store in _contacts_store_paths(body):
+            out = _relay_call(url, token, "plow_run_command",
+                              {"argv": ["/usr/bin/sqlite3", "-readonly", "-json", store, _contacts_sql(bare)]},
+                              WIKI_RELAY_TIMEOUT_S)
+            rows.extend(json.loads(out.get("output") or "[]"))
+        if _live is None:
+            return
+        _adapter, loop = _live
+        for handle, name in _resolve_handles(rows, bare).items():
+            asyncio.run_coroutine_threadsafe(
+                adapter.name_contact(handle, {"display_name": name}), loop).result(timeout=30)
+    except Exception as exc:  # noqa: BLE001 - a name is cosmetic; reach is not
+        log.warning("[plow_chat] contact backfill skipped: %s", exc)
+    finally:
+        if _backfill_done is not None:
+            _backfill_done()
+
+
+def _kick_backfill(adapter, chats):
+    """Once per BACKFILL_RETRY_S: the listing tool refreshes reach on every
+    call, and the Mac need not answer for each one."""
+    if not os.environ.get("PLOW_MCP_URL"):
+        return
+    bare = sorted({
+        p["provider_key"] for chat in chats for p in chat.get("participants", [])
+        if p.get("type") == "member" and p.get("role") != "owner"
+        and _participant_identity(p) == p["provider_key"]
+    })
+    if not bare:
+        return
+    now = time.time()
+    with _backfill["lock"]:
+        if now - _backfill["tried_at"] < BACKFILL_RETRY_S:
+            return
+        _backfill["tried_at"] = now
+    threading.Thread(target=_backfill_bare_handles, args=(adapter, bare),
+                     name="plow-contact-backfill", daemon=True).start()
+
+
 def _render_mac_skills(skills: list[dict[str, str]]) -> str:
     if not skills:
         return ""
@@ -1452,6 +1550,7 @@ class PlowChatAdapter(BasePlatformAdapter):
             # token, and an OSError's path is what makes the failure fixable.
             log.warning("[plow_chat] channel alias publish failed: %s: %s",
                         type(exc).__name__, exc)
+        _kick_backfill(self, next_chats.values())
 
     async def _refresh_reach(self, http):
         """Discover the token's grant-scoped reach. The home is fixed by

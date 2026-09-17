@@ -2635,6 +2635,98 @@ async def test_a_failing_classifier_writes_nothing(
     assert written == []
 
 
+_SKILL_BODY = ("# The owner's contacts are on this Mac\n... /usr/bin/sqlite3 -readonly "
+               "'/Users/sam/Library/Application Support/AddressBook/AddressBook-v22.abcddb' ...\n"
+               "sweep '/Users/sam/Library/Application Support/AddressBook/Sources/ABCD-1/AddressBook-v22.abcddb' too")
+
+
+def test_the_store_paths_come_from_the_contacts_skill(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> None:
+    module = _load(monkeypatch, tmp_path)
+    assert module._contacts_store_paths(_SKILL_BODY) == [
+        "/Users/sam/Library/Application Support/AddressBook/AddressBook-v22.abcddb",
+        "/Users/sam/Library/Application Support/AddressBook/Sources/ABCD-1/AddressBook-v22.abcddb",
+    ]
+
+
+@pytest.mark.parametrize("rows, expected", [
+    # Half the store is "(714) 393-3614"-shaped: digits decide, and a leading 1 is not a difference.
+    ([{"record": 1, "name": "Patrick Salyer", "phone": "(714) 393-3614", "email": None}],
+     {"+17143933614": "Patrick Salyer"}),
+    # Two records share a number: nobody is named.
+    ([{"record": 1, "name": "Patrick Salyer", "phone": "+17143933614", "email": None},
+      {"record": 2, "name": "P. Salyer", "phone": "+1 714 393 3614", "email": None}], {}),
+    # Emails match case-folded; one record with two rows is still one record.
+    ([{"record": 3, "name": "Chu", "phone": None, "email": "CMchu@x.com"},
+      {"record": 3, "name": "Chu", "phone": "+15550001111", "email": None}],
+     {"cmchu@x.com": "Chu"}),
+    ([], {}),
+])
+def test_a_handle_resolves_only_to_exactly_one_card(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, rows: list[dict[str, Any]], expected: dict[str, str]
+) -> None:
+    module = _load(monkeypatch, tmp_path)
+    assert module._resolve_handles(rows, ["+17143933614", "cmchu@x.com"]) == expected
+
+
+async def test_bare_handles_are_named_from_the_owners_mac_after_a_reach_refresh(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """The listing showed a handle; the owner's own Contacts know the name;
+    nobody had to ask. Ambiguous and already-named rows are left alone, and
+    the Mac being unreachable costs nothing but a log line."""
+    module = _load(monkeypatch, tmp_path)
+    monkeypatch.setenv("PLOW_MCP_URL", "https://relay.example/mcp")
+    monkeypatch.setenv("PLOW_AGENT_TOKEN", "t")
+    relay_calls: list[tuple[str, dict[str, Any]]] = []
+
+    def relay(url: str, token: str, name: str, arguments: dict[str, Any], timeout: float) -> dict[str, Any]:
+        relay_calls.append((name, arguments))
+        if name == "plow_read_skill":
+            return {"body": _SKILL_BODY}
+        rows = [{"record": 1, "name": "Patrick Salyer", "phone": "+17143933614", "email": None}]
+        return {"status": "completed", "exit_code": 0, "output": json.dumps(rows)}
+
+    monkeypatch.setattr(module, "_relay_call", relay)
+    adapter, written = _people_adapter(module, monkeypatch, [_chat("cht_a")],
+                                       [{"provider_key": "+15550000001", "display_name": "Sam", "relationship": None, "role": "owner"}])
+    loop = asyncio.get_running_loop()
+    monkeypatch.setattr(module, "_live", (adapter, loop))
+    chat = _chat("cht_b", group=True)
+    chat["participants"][2]["provider_key"] = "+17143933614"
+    done = threading.Event()
+    monkeypatch.setattr(module, "_backfill_done", done.set)   # test seam: fires after the thread finishes
+    monkeypatch.setattr(module, "_backfill", {"tried_at": 0.0, "lock": threading.Lock()})
+    adapter._set_reach([_chat("cht_a"), chat])
+    await asyncio.get_running_loop().run_in_executor(None, done.wait, 5)
+    assert written == [("+17143933614", {"display_name": "Patrick Salyer"})]
+    assert [name for name, _ in relay_calls] == ["plow_read_skill", "plow_run_command", "plow_run_command"]
+    argv = relay_calls[1][1]["argv"]
+    assert argv[:3] == ["/usr/bin/sqlite3", "-readonly", "-json"]
+    assert "3933614" in argv[-1]   # the query carries the handle's digits, not a wildcard sweep
+
+
+async def test_backfill_leaves_the_listing_alone_when_the_mac_is_unreachable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    module = _load(monkeypatch, tmp_path)
+    monkeypatch.setenv("PLOW_MCP_URL", "https://relay.example/mcp")
+    monkeypatch.setenv("PLOW_AGENT_TOKEN", "t")
+
+    def relay(*a: Any, **k: Any) -> dict[str, Any]:
+        raise OSError("mac offline")
+
+    monkeypatch.setattr(module, "_relay_call", relay)
+    adapter, written = _people_adapter(module, monkeypatch, [_chat("cht_a")], [])
+    monkeypatch.setattr(module, "_live", (adapter, asyncio.get_running_loop()))
+    done = threading.Event()
+    monkeypatch.setattr(module, "_backfill_done", done.set)
+    monkeypatch.setattr(module, "_backfill", {"tried_at": 0.0, "lock": threading.Lock()})
+    adapter._set_reach([_chat("cht_a"), _chat("cht_b", group=True)])
+    await asyncio.get_running_loop().run_in_executor(None, done.wait, 5)
+    assert written == []
+    assert set(adapter.chat_uids) == {"cht_a", "cht_b"}
+
+
 def _authority_case_read_the_book(module: Any, monkeypatch: pytest.MonkeyPatch, turn: dict[str, Any] | None, authorized: bool) -> None:
     """The mirror of naming's gate: a no-turn cron caller reads, where it refuses to write."""
     record: list[Any] = []
