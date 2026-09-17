@@ -473,10 +473,13 @@ to the owner — `wife`, `landlord` — through `plow_name_contact`, which `PUT`
 `/v1/contacts/{handle}`. The book is keyed by handle, not by chat, so one name
 follows the person into every thread they are in; naming the owner's own handle
 sets their account name, and a relationship on their own handle is refused.
-Both labels may be recorded on any active turn whose roster seats the
-owner — they come from the owner's ask, the owner's own contacts, or a person's
-own word — and the owner's own handle only on the owner's turn; no active turn
-at all, or a member's turn on a roster with no owner, writes nothing.
+The tool and the passive capture below share one provenance rule: the
+owner's own turn may write a display name and a relationship for anyone
+they can name, while a member's own turn may only fill their own
+still-empty display name — never a relationship, which changes how the
+channel prompt treats a person, and never someone else's row; the owner's
+own handle is likewise the owner's turn alone. No active turn at all writes
+nothing.
 A relationship renders as
 `Name (handle) (relationship)` in the untrusted roster context above — where
 the owner's own row also carries `(your owner)` — never in

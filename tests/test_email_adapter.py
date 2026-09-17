@@ -202,8 +202,13 @@ async def test_an_email_turn_confines_the_chat_tools_and_never_sends_from_the_ow
     mail = _adapter(module)
     mail._set_reach([_mail_chat("cht_m")])
     record: list[Any] = []
-    _live_tool(module, monkeypatch, "name_contact",
-               result={"display_name": "Sam", "relationship": None}, record=record)
+    contact_adapter = _live_tool(module, monkeypatch, "name_contact",
+                                 result={"display_name": "Sam", "relationship": None}, record=record)
+
+    async def _empty_book() -> list[dict[str, Any]]:
+        return []
+
+    contact_adapter.contacts = _empty_book
     event = SimpleNamespace(source=SimpleNamespace(chat_id="cht_m", chat_type="dm",
                                                    role_authorized=role == "owner"))
     await mail.on_processing_start(event)
@@ -211,8 +216,9 @@ async def test_an_email_turn_confines_the_chat_tools_and_never_sends_from_the_ow
     assert module._ACTIVE_TURN.get() == {"chat_uid": "cht_m", "owner": owner, "dm": False,
                                          "authority": owner, "email": True, "owner_handle": OWNER[1]}
     contacts = json.loads(module._plow_contacts({}))
-    assert contacts["success"] is False
-    assert ("without the owner's authority" in contacts["error"]) == (role == "member")
+    assert contacts["success"] is owner
+    if not owner:
+        assert "without the owner's authority" in contacts["error"]
     rename = json.loads(module._plow_name_contact({"handle": OWNER[1].upper(), "display_name": "Sam"}))
     assert rename["success"] is owner
     assert record == ([(OWNER[1].upper(), {"display_name": "Sam"})] if owner else [])

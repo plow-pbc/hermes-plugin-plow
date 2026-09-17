@@ -4521,12 +4521,13 @@ def _plow_name_contact(args, **_kwargs):
 
     Keyed by handle, so the owner's contact book reaches anyone they can name --
     a member of this chat, someone in another thread, or the owner themselves.
-    Both labels are written on any active turn whose roster seats the owner:
-    they come from the owner's ask, the owner's own contacts, or the person's
-    own word, and a wrong one costs a label. The one exception is the owner's
-    own handle -- their account name, which reaches the channel prompt -- so
-    only the owner writes it. No active turn at all refuses: a turn-less write
-    has nobody to have asked.
+    Routed through `_admit_people_facts`, the same provenance rule the
+    passive-capture hook uses: the owner may write, overwrite, or clear a
+    display name and a relationship for any handle they can name; a member
+    may only fill their own empty display_name -- never a relationship,
+    never a clear, and never another person's row, since who someone is to
+    the owner is the owner's to say. No active turn at all refuses: a
+    turn-less write has nobody to have asked.
     """
     turn = _ACTIVE_TURN.get()
     if turn is None:
@@ -4534,22 +4535,51 @@ def _plow_name_contact(args, **_kwargs):
                            "error": "this requires an active turn; nothing was recorded"})
     handle = str(args.get("handle") or "").strip()
     body = {k: args[k] for k in ("display_name", "relationship") if args.get(k) is not None}
-    owner_handle = turn.get("owner_handle")
-    if not turn.get("owner") and (not owner_handle or _handle_key(handle) == _handle_key(owner_handle)):
-        # Fail closed: a member turn may not name the owner, and on a roster
-        # that seats no owner it cannot tell who that is.
-        return json.dumps({"success": False,
-                           "error": "your owner's own name comes from them: this requires the "
-                                    "owner's own active turn, nothing was recorded"})
     if not handle or not body:
         return json.dumps({"success": False,
                            "error": "a handle, and display_name or relationship, are required"})
+    refused = json.dumps({
+        "success": False,
+        "error": "not recorded on this turn: a member may name only their own bare handle, "
+                 "and a relationship is the owner's to say",
+    })
+    # A clear ("") is an owner overwrite, mirroring the matrix's own rule that
+    # a relationship never lands on the owner's own handle, cleared or set.
+    owner_handle = turn.get("owner_handle")
+    clears = {k for k, v in body.items() if v == ""}
+    sets = {k: v for k, v in body.items() if v != ""}
+    if clears and not turn.get("owner"):
+        return refused
+    if "relationship" in clears and _handle_key(handle) == _handle_key(owner_handle):
+        return refused
     if _live is None:
         return json.dumps({"success": False, "error": "the Plow Chat gateway is not connected; nothing was recorded"})
     adapter, loop = _live
     try:
+        current = requested = {}
+        if sets:
+            book_rows = asyncio.run_coroutine_threadsafe(adapter.contacts(), loop).result(timeout=30)
+            known = {_handle_key(handle): handle}
+            book = {_handle_key(r["provider_key"]): r for r in book_rows}
+            current = book.get(_handle_key(handle), {})
+            requested = {k: v for k, v in sets.items() if v != (current.get(k) or "")}
+            # A field whose value already matches the book is a no-op the
+            # matrix itself would silently drop -- indistinguishable, to it,
+            # from an authority violation. Probe those fields with a value
+            # guaranteed to differ so the matrix's own rules run for real;
+            # only `requested`'s real values are ever written below.
+            probed = {k: v + "\u0001" for k, v in sets.items() if k not in requested}
+            writes = _admit_people_facts([{"handle": handle, **requested, **probed}], owner=turn.get("owner"),
+                                         speaker_handle=turn.get("speaker_handle"),
+                                         owner_handle=owner_handle, known=known, book=book)
+            if set(writes.get(handle, {})) != set(sets):
+                return refused
+        write_body = {**requested, **{k: "" for k in clears}}
+        if not write_body:
+            return json.dumps({"success": True, "display_name": current.get("display_name"),
+                               "relationship": current.get("relationship")})
         data = asyncio.run_coroutine_threadsafe(
-            adapter.name_contact(handle, body), loop).result(timeout=30)
+            adapter.name_contact(handle, write_body), loop).result(timeout=30)
     except _PlowSendError as exc:
         if exc.status >= 500:
             return json.dumps({
@@ -4572,16 +4602,19 @@ PLOW_NAME_CONTACT_SCHEMA = {
     "name": "plow_name_contact",
     "description": (
         "Record what your owner calls a person, and who that person is to your "
-        "owner (e.g. \"wife\", \"landlord\"). Both come from your owner's ask, your "
-        "owner's own contacts, or what a person says about themselves, and are "
-        "recorded without asking on any active turn whose roster seats your owner. "
-        "People are keyed by handle, so this reaches anyone your owner can name, in "
-        "this chat or not, and a phone and an email for the same person each take "
-        "the same name; the roster shows each person as name (handle). Your owner's "
-        "own handle takes a display_name -- that is their account name -- but only "
-        "your owner's own turn may write it, and it never takes a relationship. "
-        "Omit display_name/relationship to leave it; for other people, pass \"\" to "
-        "clear it."
+        "owner (e.g. \"wife\", \"landlord\"). A display_name may be written on "
+        "any active turn: your owner's own turn for anyone they can name, or a "
+        "member's own turn to fill in their own still-empty row -- never "
+        "someone else's. A relationship is the owner's to say, so only your "
+        "owner's own turn ever writes one, and never to their own handle. "
+        "People are keyed by handle, so this reaches anyone your owner can "
+        "name, in this chat or not, and a phone and an email for the same "
+        "person each take the same name; the roster shows each person as name "
+        "(handle). Only a value that changes what is already on record is "
+        "written; omit display_name/relationship, or repeat the current "
+        "value, to leave it as is. Pass \"\" to clear a field -- your "
+        "owner's own turn only, and a relationship never clears on their "
+        "own handle either."
     ),
     "parameters": {
         "type": "object",

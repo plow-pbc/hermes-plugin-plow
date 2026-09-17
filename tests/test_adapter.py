@@ -2406,13 +2406,19 @@ def _authority_case_cross_chat_send(module: Any, monkeypatch: pytest.MonkeyPatch
 
 
 def _authority_case_name_a_contact(module: Any, monkeypatch: pytest.MonkeyPatch, turn: dict[str, Any] | None, authorized: bool) -> None:
-    """Both labels are written on any active turn -- they come from the
-    owner's ask, the owner's contacts, or the person's own word, all of which
-    can land on a member's turn. The owner's own handle is written on the
-    owner's turn or not at all."""
+    """Routed through `_admit_people_facts`, the same provenance rule the
+    passive-capture hook uses: the owner writes both labels for any handle
+    they can name; a member fills only their own empty display_name, never
+    a relationship, and never another handle. The owner's own handle is
+    written on the owner's turn or not at all."""
     record: list[Any] = []
-    _live_tool(module, monkeypatch, "name_contact",
-               result={"display_name": "Abby", "relationship": "wife"}, record=record)
+    adapter = _live_tool(module, monkeypatch, "name_contact",
+                         result={"display_name": "Abby", "relationship": "wife"}, record=record)
+
+    async def contacts() -> list[dict[str, Any]]:
+        return []   # an empty book: every write below is to a fresh field
+
+    adapter.contacts = contacts
     # A roster that seats no owner cannot say who a member may not name, so a
     # member turn there writes nothing; the owner's own turn needs no roster.
     module._ACTIVE_TURN.set(turn)
@@ -2421,11 +2427,36 @@ def _authority_case_name_a_contact(module: Any, monkeypatch: pytest.MonkeyPatch,
     assert record == ([("+15550000002", {"display_name": "Abby"})] if authorized else [])
     record.clear()
     module._ACTIVE_TURN.set(turn and {**turn, "owner_handle": "+15550000001"})
+    owner_turn = bool(turn) and turn["owner"]
     display = json.loads(module._plow_name_contact(
         {"handle": "+15550000002", "display_name": "Abby", "relationship": "wife"}))
-    assert display["success"] is (turn is not None)
-    # No chat id rides along: the contact book is keyed by handle, not by room.
-    assert record == ([("+15550000002", {"display_name": "Abby", "relationship": "wife"})] if turn else [])
+    assert display["success"] is owner_turn
+    if owner_turn:
+        # No chat id rides along: the contact book is keyed by handle, not by room.
+        assert record == [("+15550000002", {"display_name": "Abby", "relationship": "wife"})]
+    else:
+        assert ("active turn" if turn is None else "not recorded on this turn") in display["error"]
+        assert record == []
+    record.clear()
+    member_turn = turn is not None and not turn["owner"]
+    if member_turn:
+        # A member fills only their own empty display_name -- never a
+        # relationship, and never another handle.
+        module._ACTIVE_TURN.set({**turn, "owner_handle": "+15550000001", "speaker_handle": "+15550000003"})
+        own_name = json.loads(module._plow_name_contact({"handle": "+15550000003", "display_name": "Patrick"}))
+        assert own_name["success"]
+        assert record == [("+15550000003", {"display_name": "Patrick"})]
+        record.clear()
+        own_relationship = json.loads(module._plow_name_contact(
+            {"handle": "+15550000003", "relationship": "friend"}))
+        assert not own_relationship["success"]
+        assert "not recorded on this turn" in own_relationship["error"]
+        assert record == []
+        record.clear()
+        other_handle = json.loads(module._plow_name_contact({"handle": "+15550000002", "display_name": "Abby"}))
+        assert not other_handle["success"]
+        assert "not recorded on this turn" in other_handle["error"]
+        assert record == []
     for body in ({"handle": "+15550000001", "display_name": "Sam"},
                  {"handle": "+1 (555) 000-0001", "display_name": "Sam"}):   # canonically the owner
         record.clear()
@@ -2437,6 +2468,65 @@ def _authority_case_name_a_contact(module: Any, monkeypatch: pytest.MonkeyPatch,
         else:
             assert ("active turn" if turn is None else "owner") in out["error"]
             assert record == []
+
+
+def test_name_a_contact_clears_and_restates_through_the_matrix(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
+) -> None:
+    """A clear ("") is an owner overwrite, gated the same way a set is: only
+    the owner's own turn may clear anything, and a relationship never clears
+    on the owner's own handle either. A field whose requested value already
+    matches the book is satisfied without reaching the adapter -- unless the
+    speaker was never authorized to write it at all, in which case a no-op
+    is still refused for authority, not silently treated as nothing to do."""
+    module = _load(monkeypatch, tmp_path)
+    record: list[Any] = []
+    adapter = _live_tool(module, monkeypatch, "name_contact",
+                         result={"display_name": "Abby", "relationship": "wife"}, record=record)
+
+    async def contacts() -> list[dict[str, Any]]:
+        return _BOOK   # Abby's row already carries display_name "Abby", relationship "wife"
+
+    adapter.contacts = contacts
+
+    # The owner clears a member's relationship.
+    module._ACTIVE_TURN.set({**_OWNER_DM, "owner_handle": "+15550000001"})
+    cleared = json.loads(module._plow_name_contact({"handle": "+15550000002", "relationship": ""}))
+    assert cleared["success"]
+    assert record == [("+15550000002", {"relationship": ""})]
+    record.clear()
+
+    # A member may never clear anything, own row or not.
+    module._ACTIVE_TURN.set({**_TRUSTED_MEMBER, "owner_handle": "+15550000001", "speaker_handle": "+15550000002"})
+    member_clear = json.loads(module._plow_name_contact({"handle": "+15550000002", "display_name": ""}))
+    assert not member_clear["success"]
+    assert "not recorded on this turn" in member_clear["error"]
+    assert record == []
+
+    # A relationship never clears on the owner's own handle either.
+    module._ACTIVE_TURN.set({**_OWNER_DM, "owner_handle": "+15550000001"})
+    own_handle_clear = json.loads(module._plow_name_contact({"handle": "+15550000001", "relationship": ""}))
+    assert not own_handle_clear["success"]
+    assert "not recorded on this turn" in own_handle_clear["error"]
+    assert record == []
+
+    # The owner repeats the book's current relationship while genuinely
+    # changing display_name: the restatement is satisfied by construction,
+    # only the real change reaches the adapter.
+    restated = json.loads(module._plow_name_contact(
+        {"handle": "+15550000002", "relationship": "wife", "display_name": "Abigail"}))
+    assert restated["success"]
+    assert record == [("+15550000002", {"display_name": "Abigail"})]
+    record.clear()
+
+    # A member restating that exact same relationship value is still refused
+    # for authority -- a no-op is never a backdoor around who may say it.
+    module._ACTIVE_TURN.set({**_TRUSTED_MEMBER, "owner_handle": "+15550000001", "speaker_handle": "+15550000002"})
+    member_restated = json.loads(module._plow_name_contact(
+        {"handle": "+15550000002", "relationship": "wife"}))
+    assert not member_restated["success"]
+    assert "not recorded on this turn" in member_restated["error"]
+    assert record == []
 
 
 _PEOPLE_ROSTER = {"15550000001": "+15550000001", "15550000002": "+15550000002"}
@@ -3213,9 +3303,11 @@ def test_tools_register_with_optional_deferred_questions(
     assert name_contact_tool["schema"]["parameters"]["required"] == ["handle"]
     assert name_contact_tool["requires_env"] == ["PLOW_AGENT_TOKEN"]
     # The description carries the split the gate enforces: a display name on
-    # any turn, a relationship on the owner's; and the send tool says to name
-    # a recipient the owner called by name in the same batch.
+    # any active turn whose roster seats the owner, a relationship on the
+    # owner's own turn; and the send tool says to name a recipient the owner
+    # called by name in the same batch.
     assert "any active turn" in name_contact_tool["schema"]["description"]
+    assert "owner's own turn" in name_contact_tool["schema"]["description"]
     assert "plow_name_contact" in send_message_tool["schema"]["description"]
     assert name_contact_tool["check_fn"]()
 
@@ -3280,7 +3372,12 @@ def test_naming_reports_unconfirmed_write_on_network_error(
     only a 4xx is Plow itself definitively declining."""
     module = _load(monkeypatch, tmp_path)
     raises = TimeoutError("no response") if status is None else module._PlowSendError(status, "detail")
-    _live_tool(module, monkeypatch, "name_contact", raises=raises)
+    adapter = _live_tool(module, monkeypatch, "name_contact", raises=raises)
+
+    async def contacts() -> list[dict[str, Any]]:
+        return []
+
+    adapter.contacts = contacts
     module._ACTIVE_TURN.set(_OWNER_DM)
 
     out = json.loads(module._plow_name_contact(
