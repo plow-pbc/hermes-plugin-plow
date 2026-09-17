@@ -2501,6 +2501,12 @@ _BOOK_INDEX = {"15550000001": {"display_name": "Sam", "relationship": None},
      [{"handle": "+15550000002", "display_name": "Pat"},
       {"handle": "+15550000002", "display_name": "Patrick"}],
      {"+15550000002": {"display_name": "Pat"}}),
+    # A same-call fact that only carries an alias still picks up the name a
+    # separate fact about the same handle just gave, not a stale empty one.
+    ("member's alias fact picks up the name a separate fact in the same call gave", False, "+15550000002",
+     [{"handle": "+15550000002", "display_name": "Patrick"},
+      {"handle": "+15550000002", "same_person_as": "p@mayfield.com"}],
+     {"+15550000002": {"display_name": "Patrick"}, "p@mayfield.com": {"display_name": "Patrick"}}),
 ])
 def test_only_the_speakers_own_facts_reach_the_book(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
