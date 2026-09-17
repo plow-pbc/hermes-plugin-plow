@@ -2705,8 +2705,6 @@ async def test_bare_handles_are_named_from_the_owners_mac_after_a_reach_refresh(
     monkeypatch.setattr(module, "_relay_call", relay)
     adapter, written = _people_adapter(module, monkeypatch, [_chat("cht_a")],
                                        [{"provider_key": "+15550000001", "display_name": "Sam", "relationship": None, "role": "owner"}])
-    loop = asyncio.get_running_loop()
-    monkeypatch.setattr(module, "_live", (adapter, loop))
     chat = _chat("cht_b", group=True)
     chat["participants"][2]["provider_key"] = "+17143933614"
     done = threading.Event()
@@ -2722,6 +2720,10 @@ async def test_bare_handles_are_named_from_the_owners_mac_after_a_reach_refresh(
     assert "3933614" in queries[0]["argv"][-1]   # the query carries the handle's digits, not a wildcard sweep
     # What the owner's approval dialog, the adversarial reviewer and the audit log show.
     assert all(a["read_paths"] == [_STORE_DIR] and a["goal"] == module.BACKFILL_GOAL for a in (sweep, *queries))
+    # The listing tool refreshes reach on every call; within BACKFILL_RETRY_S the Mac is not asked again.
+    tried_at = module._backfill["tried_at"]
+    adapter._set_reach([_chat("cht_a"), chat])
+    assert module._backfill["tried_at"] == tried_at and len(relay_calls) == 4
 
 
 async def test_backfill_leaves_the_listing_alone_when_the_mac_is_unreachable(
@@ -2736,7 +2738,6 @@ async def test_backfill_leaves_the_listing_alone_when_the_mac_is_unreachable(
 
     monkeypatch.setattr(module, "_relay_call", relay)
     adapter, written = _people_adapter(module, monkeypatch, [_chat("cht_a")], [])
-    monkeypatch.setattr(module, "_live", (adapter, asyncio.get_running_loop()))
     done = threading.Event()
     monkeypatch.setattr(module, "_backfill_done", done.set)
     monkeypatch.setattr(module, "_backfill", {"tried_at": 0.0, "lock": threading.Lock()})

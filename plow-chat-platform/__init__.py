@@ -1123,7 +1123,7 @@ def _resolve_handles(rows, handles):
     return out
 
 
-def _backfill_bare_handles(adapter, bare):
+def _backfill_bare_handles(adapter, loop, bare):
     """Resolve bare handles on the owner's Mac and fill the empty names."""
     url, token = os.environ["PLOW_MCP_URL"], os.environ["PLOW_AGENT_TOKEN"]
     try:
@@ -1151,9 +1151,6 @@ def _backfill_bare_handles(adapter, bare):
                 log.warning("[plow_chat] contact store %s skipped: %s", store, output.strip()[:200])
                 continue
             rows.extend(json.loads(output or "[]"))
-        if _live is None:
-            return
-        _adapter, loop = _live
         for handle, name in _resolve_handles(rows, bare).items():
             asyncio.run_coroutine_threadsafe(
                 adapter.name_contact(handle, {"display_name": name}), loop).result(timeout=30)
@@ -1181,7 +1178,10 @@ def _kick_backfill(adapter, chats):
         if now - _backfill["tried_at"] < BACKFILL_RETRY_S:
             return
         _backfill["tried_at"] = now
-    threading.Thread(target=_backfill_bare_handles, args=(adapter, bare),
+    # The loop is taken here, not read off `_live`: the first reach refresh
+    # runs in `connect`, before `_listen` publishes `_live`, and a Mac that
+    # answered before the anchor pass finished would have named nobody.
+    threading.Thread(target=_backfill_bare_handles, args=(adapter, asyncio.get_running_loop(), bare),
                      name="plow-contact-backfill", daemon=True).start()
 
 
