@@ -8711,7 +8711,7 @@ async def test_only_the_owners_own_dm_text_interrupts_a_busy_run(
     assert calls == [("queue", handled[0].text)]
 
 
-# ── seeding a new chat's history (PLU-31) ────────────────────────────────────
+# ── seeding a new chat's history ─────────────────────────────────────────────
 
 
 def _seed_message(uid: str, *, direction: str = "inbound", body: str = "hi",
@@ -8747,9 +8747,9 @@ def test_a_burst_outside_the_page_budget_seeds_nothing(monkeypatch, tmp_path):
 def test_our_own_outbound_is_the_assistant_turn_a_peer_is_not(monkeypatch, tmp_path):
     module = _load(monkeypatch, tmp_path)
     chat = _chat("cht_g", group=True)
-    ours = _seed_message("m1", direction="outbound", body="Hey Joe, this is Willow.",
+    ours = _seed_message("m1", direction="outbound", body="Hey Joe, this is your friend's assistant.",
                          status="sent", sender=OWN_LINE)
-    assert module._seed_turn(ours, chat, set()) == ("assistant", "Hey Joe, this is Willow.")
+    assert module._seed_turn(ours, chat, set()) == ("assistant", "Hey Joe, this is your friend's assistant.")
     peer = _seed_message("m2", body="not my turn", sender=PEER_LINE)
     role, content = module._seed_turn(peer, chat, set())
     assert role == "user" and "not my turn" in content
@@ -8859,7 +8859,7 @@ def test_a_failed_read_leaves_the_turn_to_run(monkeypatch, tmp_path, caplog):
     assert "could not seed history" in caplog.text, "and it is said out loud"
 
 
-# ── reading a chat (PLU-31, chunk 2) ─────────────────────────────────────────
+# ── reading a chat ───────────────────────────────────────────────────────────
 
 
 def _read_rig(module, monkeypatch, *, current, rooms, record=None):
