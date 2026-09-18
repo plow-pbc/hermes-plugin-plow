@@ -8756,3 +8756,7 @@ def test_the_tool_says_to_search_before_reporting_what_a_chat_said(monkeypatch, 
     assert "session_search" in description
     assert "Before you tell anyone what another chat did or did not say" in description
     assert "answering from it is guessing" in description
+    # An empty search is not evidence of silence: the room may have gone on
+    # without this agent, so the honest answer names what could not be found.
+    assert "is not proof nobody replied" in description
+    assert "never 'no reply yet'" in description
