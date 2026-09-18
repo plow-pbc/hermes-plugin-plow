@@ -1447,7 +1447,6 @@ INBOUND_DEBOUNCE_SECONDS = 2.0
 # throttle in `send_typing` rather than beside it.
 TYPING_COOLDOWN_SECONDS = 60
 HAND_OFF_RETRY_SECONDS = 5.0
-NEW_AGENT_SECONDS = 3600  # see `_ensure_anchor`
 
 
 def _server_died(task):
@@ -2952,7 +2951,7 @@ class PlowChatAdapter(BasePlatformAdapter):
             # needs to know NOW, synchronously, whether the baseline
             # actually landed -- `data["adoption"]` is this tool's honest
             # answer to the caller. No `http` passed -- see `_ensure_anchor`
-            # for why empty, never the newest existing message, is always
+            # for why empty, never a read baseline, is always
             # the right call here.
             try:
                 await self._ensure_anchor(chat_id)
@@ -3120,14 +3119,14 @@ class PlowChatAdapter(BasePlatformAdapter):
         `http` is given only by `_listen`'s first-install branch, for a
         chat known at this process's true first-ever connect -- the one
         deliberate, one-time skip of pre-existing history this mechanism
-        exists to gate. The newest-message read happens HERE, under the
+        exists to gate. The baseline read happens HERE, under the
         lock and after the already-anchored check, never before taking it:
         reading it first and passing the uid in left a window where a
         concurrent empty anchor for the same chat_uid (a `start_group_thread`
         call, or `_deliver` for a message that lands mid-read) could win the
         lock first, leaving this call's own read to resolve into a
         skipped, already-anchored no-op -- stranding the chat empty-anchored
-        instead of at newest, and `_backfill` would then replay its entire
+        instead of at its baseline, and `_backfill` would then replay its entire
         pre-existing history to hermes as new turns. Every other caller --
         `_listen` on any later connect, `start_group_thread` right after
         its own send, `_deliver` for a chat it discovers is still
@@ -3140,21 +3139,19 @@ class PlowChatAdapter(BasePlatformAdapter):
         ack-after-handoff checkpoint `_deliver` writes becomes the first
         durable one.
 
-        Pre-existing means older than the agent, not older than this connect:
-        a turn sent between the agent's creation and its first connect --
-        often the owner's first text, the one that created the chat -- was
-        never seen. So the read pages back to the newest message created
-        before the agent, and a chat with none anchors empty; either way
-        `_backfill` replays what came after. With no creation time (a 404
-        identity, or an API that does not serve it yet) it is the newest, and
-        so it is for an agent older than NEW_AGENT_SECONDS: that is an old
-        agent's lost checkpoint, not a new agent, and replaying back to its
-        birth would replay its whole history.
+        Pre-existing means seen, not merely older than this connect: a turn sent
+        between the agent's creation and its first connect -- often the
+        owner's first text, the one that created the chat -- was never seen.
+        So the read pages back to the first message that predates the agent
+        or is its own reply (a wiped home on an existing agent answered
+        everything up to there), and a chat with neither anchors empty;
+        either way `_backfill` replays what came after. A 404 identity has no
+        birth, so it anchors at the newest message.
 
         A write failure raises: `_listen` and `_deliver` both retry (the
         reconnect loop, `_serve_chat`'s hand-off retry) and always pass no
         `http` on the next attempt regardless of what this one tried, so a
-        chat stranded unanchored is retried empty, never newest, no matter
+        chat stranded unanchored is retried empty, never read, no matter
         how many attempts it takes; `start_group_thread` reports it
         honestly in `adoption` instead of retrying.
 
@@ -3170,11 +3167,10 @@ class PlowChatAdapter(BasePlatformAdapter):
                 return
             uid = ""
             if http is not None:
-                born = self._identity["created_at"] and datetime.fromisoformat(self._identity["created_at"])
-                if born and (datetime.now(timezone.utc) - born).total_seconds() > NEW_AGENT_SECONDS:
-                    born = None
+                born = self._identity["created_at"]
                 async for m in self._history(http, chat_uid, limit=1):
-                    if not born or datetime.fromisoformat(m["created_at"]) < born:
+                    if (born is None or m["direction"] == "outbound"
+                            or datetime.fromisoformat(m["created_at"]) < datetime.fromisoformat(born)):
                         uid = m["uid"]
                         break
             if not self._checkpoint(uid, chat_uid):
@@ -3278,22 +3274,22 @@ class PlowChatAdapter(BasePlatformAdapter):
                 await self._refresh_reach(http)
                 self._identity = await _refresh_identity(http, self.auth, self._identity)
             ticket = await _ticket(http, self.auth)
-            # ONE gate decides newest vs empty for every chat this agent ever
+            # ONE gate decides read vs empty for every chat this agent ever
             # anchors: this process's first connect AND this agent's genuine
             # first-ever life. Snapshotted and `first_connection` consumed
             # BEFORE the loop: `_ensure_anchor` raises on a checkpoint-write
             # failure partway through, and a retry must anchor the chats
-            # this attempt never reached empty, never newest.
-            newest_anchor = first_connection and first_install
+            # this attempt never reached empty, never read.
+            read_anchor = first_connection and first_install
             first_connection = False
-            # `http` only when newest_anchor: `_ensure_anchor` reads the
-            # newest uid itself, under its own lock, so a concurrent
+            # `http` only when read_anchor: `_ensure_anchor` reads the
+            # baseline itself, under its own lock, so a concurrent
             # `start_group_thread` empty anchor for the same chat_uid cannot
             # land between a read taken here and a write made there. Before
             # the socket, never inside it -- reading after `ws_connect` races
             # the frames that connection is already buffering.
             for chat_uid in self.chat_uids:
-                await self._ensure_anchor(chat_uid, http if newest_anchor else None)
+                await self._ensure_anchor(chat_uid, http if read_anchor else None)
             # Published only now, after every chat known at this connect has
             # been through the anchor decision -- never in `connect`, where
             # publishing let a tool call's bridged coroutine reach

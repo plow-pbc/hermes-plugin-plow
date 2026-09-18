@@ -39,8 +39,6 @@ PLUGIN = pathlib.Path(__file__).resolve().parents[1] / "plow-chat-platform" / "_
 SIGNUP = {"name": "Life Assistant", "phrase": "Set this up for me: aiworthusing.com/agent-index/life"}
 NUMBER = "+16505550100"
 AGENT = "agt_1"
-ME = {"line": {"uid": "ln_e", "provider_key": NUMBER}, "agent": {"uid": AGENT}, "chats": [], "mcp_url": None,
-      "signup": SIGNUP}
 
 
 def _ago(minutes: float) -> str:
@@ -48,7 +46,9 @@ def _ago(minutes: float) -> str:
     return (datetime.now(timezone.utc) - timedelta(minutes=minutes)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
-BIRTH = _ago(2)  # a new agent's `agent.created_at`, once /me serves it; ME is the body before
+BIRTH = _ago(2)
+ME = {"line": {"uid": "ln_e", "provider_key": NUMBER}, "agent": {"uid": AGENT, "created_at": BIRTH}, "chats": [],
+      "mcp_url": None, "signup": SIGNUP}
 
 # What `GET /v1/lines` serves: the pool, as personas with a number and a
 # mailbox each. `agent_uid` is this owner's agent on the row: Elm is this
@@ -65,7 +65,7 @@ LINES = [
     {"uid": "ln_u", "provider_type": "imessage", "provider_key": "+16505550199", "display_name": None,
      "agent_uid": None},
 ]
-IDENTITY = {"signup": SIGNUP, "number": NUMBER, "agent": AGENT, "created_at": None, "lines": LINES}
+IDENTITY = {"signup": SIGNUP, "number": NUMBER, "agent": AGENT, "created_at": BIRTH, "lines": LINES}
 
 # The four turn shapes every action gate is keyed on, plus no turn at all
 # (a cron run), as `_authority` derives them -- see the prompt matrix. The
@@ -1081,10 +1081,12 @@ def test_guest_turn_is_not_tool_blocked(
         adapter._active_turn.reset(turn)
 
 
-# Messages either side of the agent's birth.
-PRE = {"uid": "msg_pre_birth", "created_at": _ago(10)}
-POST = {"uid": "msg_post_birth", "created_at": _ago(1)}
-POST_2 = {"uid": "msg_post_birth_2", "created_at": _ago(0.5)}
+# Messages either side of a new agent's birth, and a month-old agent's.
+PRE = {"uid": "msg_pre_birth", "direction": "inbound", "created_at": _ago(10)}
+POST = {"uid": "msg_post_birth", "direction": "inbound", "created_at": _ago(1)}
+REPLY = {"uid": "msg_reply", "direction": "outbound", "created_at": _ago(0.75)}
+POST_2 = {"uid": "msg_post_birth_2", "direction": "inbound", "created_at": _ago(0.5)}
+OLD = _ago(60 * 24 * 30)
 
 
 @pytest.mark.parametrize(
@@ -1097,7 +1099,8 @@ POST_2 = {"uid": "msg_post_birth_2", "created_at": _ago(0.5)}
         ([POST_2, POST], 200, True, None, BIRTH, ["msg_post_birth", "msg_post_birth_2"]),
         ([PRE], 200, True, "msg_pre_birth", BIRTH, []),
         ([POST, PRE], 200, True, "msg_post_birth", None, []),
-        ([POST, PRE], 200, True, "msg_post_birth", _ago(60 * 24 * 30), []),
+        ([POST_2, REPLY, POST, PRE], 200, True, "msg_reply", OLD, ["msg_post_birth_2"]),
+        ([POST_2, POST, PRE], 200, True, None, OLD, ["msg_pre_birth", "msg_post_birth", "msg_post_birth_2"]),
     ],
     ids=[
         "chat has history -> anchored before the socket",
@@ -1106,8 +1109,9 @@ POST_2 = {"uid": "msg_post_birth_2", "created_at": _ago(0.5)}
         "a message sent after the agent was born -> anchored before it, and backfilled",
         "every message postdates the agent (one created the chat) -> no baseline, all backfilled",
         "the newest message predates the agent -> anchored at it, nothing backfilled",
-        "birth unknown (the API does not serve it yet) -> anchored at newest, as before",
-        "an old agent that lost its checkpoint -> anchored at newest, its history not replayed",
+        "birth unknown (a 404 identity) -> anchored at newest, as before",
+        "an old agent's wiped home -> anchored at its own last reply, only what followed backfilled",
+        "an old agent never replied (or installed late) -> everything since its birth backfilled",
     ],
 )
 async def test_startup_baseline_cases(
@@ -1140,9 +1144,8 @@ async def test_startup_baseline_cases(
 
     The first install skips only what predates the agent: a message sent
     between its creation and its first connect was never seen, and it is
-    often the owner's first text, the one that created the chat. Only a new
-    agent's first install, though: an old one that lost its checkpoint would
-    replay its whole history.
+    often the owner's first text, the one that created the chat. Nor what
+    follows the agent's own last reply, when a wiped home reinstalls it.
     """
     module = _load(monkeypatch, tmp_path)
     adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
@@ -1296,7 +1299,7 @@ async def test_retried_anchor_baseline_cases(
     where `target`'s newest-message read fails (500) partway through the
     very first anchor pass. `first_connection` used to stay true across the
     retry until the whole loop succeeded, so the retry 5s later would still
-    newest-anchor `target` -- `newest_anchor` is now snapshotted and
+    newest-anchor `target` -- `read_anchor` is now snapshotted and
     `first_connection` consumed BEFORE the loop runs, so the retry always
     empty-anchors instead, no matter how many attempts it takes."""
     module = _load(monkeypatch, tmp_path)
@@ -2185,7 +2188,7 @@ async def test_identity_refresh_reads_me_and_the_roster_and_only_a_200_speaks(
     class _ReachAndMeHTTP:
         def get(self, url: str, **kwargs: Any) -> _Resp:
             if url.endswith("/v1/agents/me"):
-                return _Resp({**ME, "agent": {"uid": AGENT, "created_at": BIRTH}}, status=me_status)
+                return _Resp(ME, status=me_status)
             if url.endswith("/v1/lines"):
                 return _Resp({"object": "list", "data": LINES, "has_more": False}, status=lines_status)
             return _Resp({"object": "list", "data": [_chat("cht_a")], "has_more": False})
@@ -2194,7 +2197,7 @@ async def test_identity_refresh_reads_me_and_the_roster_and_only_a_200_speaks(
     assert adapter.chat_uids == frozenset({"cht_a"}) and adapter._identity == held, "reach alone"
     if refreshes:
         refreshed = await module._refresh_identity(_ReachAndMeHTTP(), adapter.auth, held)
-        assert refreshed == ({**IDENTITY, "created_at": BIRTH} if me_status == 200 else {**held, "lines": LINES})
+        assert refreshed == (IDENTITY if me_status == 200 else {**held, "lines": LINES})
     else:
         with pytest.raises(RuntimeError):
             await module._refresh_identity(_ReachAndMeHTTP(), adapter.auth, held)

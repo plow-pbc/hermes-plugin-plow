@@ -68,8 +68,7 @@ async def _read_identity(http, auth):
 
     `GET /v1/agents/me` -- not the `/v1/agents/cloud/me` alias, which serves
     the old shape with no `agent` key -- for the signup block, this agent's
-    number, its uid and its creation time (None from an API that does not
-    serve it yet). 200 answers those; 404 is the documented "this token
+    number, uid and birth. 200 answers those; 404 is the documented "this token
     is not one agent" (a wildcard or multi-line grant) and answers none of
     them, so the caller keeps what it holds. Anything else is not an answer
     about identity: through the credential seam (a 401 is terminal), then fail
@@ -89,7 +88,7 @@ async def _read_identity(http, auth):
         if resp.status == 200:
             me = await resp.json(content_type=None)
             identity = {"signup": me.get("signup"), "number": (me.get("line") or {}).get("provider_key"),
-                        "agent": me["agent"]["uid"], "created_at": me["agent"].get("created_at")}
+                        "agent": me["agent"]["uid"], "created_at": me["agent"]["created_at"]}
         elif resp.status != 404:
             _auth_raise_for_status(resp)
             raise RuntimeError(f"the identity read returned HTTP {resp.status}")

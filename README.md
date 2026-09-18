@@ -42,7 +42,9 @@ The directory is named for the plugin id so the install can be a directory copy:
 > with a `subject`, goes out from the mailbox that shares this agent's persona; the API
 > seats the owner in `cc` from the credential, so the plugin sends none — deploy
 > [`plow-pbc/plow#1959`](https://github.com/plow-pbc/plow/pull/1959), which does that
-> seating, before this plugin SHA is pinned, or every new email is refused with a 403), and
+> seating, before this plugin SHA is pinned, or every new email is refused with a 403),
+> `agent.created_at` on `GET /v1/agents/me` (a first install replays what reached a chat after
+> the agent was created — [`plow-pbc/plow#2103`](https://github.com/plow-pbc/plow/pull/2103)), and
 > `PUT /v1/contacts/{handle}` (`plow_name_contact` — the handle-keyed contact
 > book, superseding the per-participant contact route of
 > [`plow-pbc/plow#1752`](https://github.com/plow-pbc/plow/pull/1752),
