@@ -325,8 +325,12 @@ reply is read as an answer to it rather than as strangers talking. Only
 messages older than the burst being delivered are seeded, paging stops after
 two pages, and the delivery checkpoint is never moved — it records what was
 handed off, and seeded messages never were. Seeding and a cross-chat send take
-one per-chat lock, so a send that lands mid-seed waits rather than missing the
-session, and the rows stay in the order they were said. Both are best-effort:
+one adapter-wide lock — a thread's id exists only after the create call that
+has to be covered, so there is no key to take a per-chat lock under — held
+across the send's own API write and its mirror. A send that lands mid-seed
+waits rather than missing the session or saying itself twice, and the rows
+stay in the order they were said; the cost is that two chats' transcript
+writes serialize, which is a handful of local rows. Both are best-effort:
 a failed read logs and the turn runs on whatever history exists. Seeded uids
 are remembered in-process only, so a restart between seeding and the
 checkpoint can redeliver one seeded inbound message as a turn — a visible

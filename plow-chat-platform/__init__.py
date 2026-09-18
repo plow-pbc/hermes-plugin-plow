@@ -1510,7 +1510,22 @@ class PlowChatAdapter(BasePlatformAdapter):
         self._quiet_until = 0.0              # while now is under this, the gate is quiet without a read
         self._seen = []                      # (chat uid, message uid), newest last
         self._seeded = set()                 # chats whose session this process has seeded
-        self._transcript_lock = None         # the one order of writes into any chat's session
+        # The one order of writes into any chat's Hermes transcript. Seeding and
+        # a cross-chat send race for the same session three ways: a send
+        # landing mid-seed has nowhere to mirror to until the session exists;
+        # one landing after it would be appended BEFORE the older rows the seed
+        # is still fetching, and replay is by insertion order, not by
+        # timestamp, so the room would read its reply before the opener it
+        # answers; and a send that lands BEFORE the seed reads is in the page
+        # the seed writes, so mirroring it afterwards says it twice.
+        #
+        # So the send holds this around its own API write, not just around the
+        # mirror: either the seed reads a chat this send has not reached and
+        # the mirror follows it in, or the send is durable first -- and then
+        # the mirror has given that chat a session, which is the one state the
+        # seed refuses to touch. One lock, not one per chat: a thread's id
+        # exists only AFTER the create call it has to cover.
+        self._transcript_lock = asyncio.Lock()
         self._seen_events = []               # event uids, newest last
         self._inbound = {}                   # chat uid -> (queue, the task serving it)
         # One durable owner of recovery state. The file existing means "this
@@ -2408,11 +2423,11 @@ class PlowChatAdapter(BasePlatformAdapter):
         # empty default withholds, which is the direction that cannot
         # disclose.
         withhold = diagnostic or (chatter and not _owner_dm(self._chats.get(chat_id, {})))
-        # Held across the send and its mirror: see `_writing_transcripts`. A
+        # Held across the send and its mirror: see `_transcript_lock`. A
         # reply to this turn's own chat records itself, so only a cross-chat
         # send needs the order.
         cross_chat = turn is not None and chat_id != turn["chat_uid"]
-        async with self._writing_transcripts() if cross_chat else _nothing():
+        async with self._transcript_lock if cross_chat else contextlib.nullcontext():
           async with aiohttp.ClientSession() as http:
               if withhold and not await self._verbose_enabled(http):
                   # Before typing is touched: a message the owner never sees must
@@ -2918,7 +2933,7 @@ class PlowChatAdapter(BasePlatformAdapter):
             line_uid = await self._home_line_uid()
         except Exception as exc:
             raise _PlowPreflightError(f"{type(exc).__name__}: {exc}") from exc
-        async with self._writing_transcripts(), aiohttp.ClientSession() as http:
+        async with self._transcript_lock, aiohttp.ClientSession() as http:
             async with http.post(
                 f"{BASE}/v1/chats",
                 # The key is required by the API and names this one confirmed
@@ -3212,32 +3227,6 @@ class PlowChatAdapter(BasePlatformAdapter):
         _woken = True
         await self._handoff_message(event)
 
-    def _writing_transcripts(self):
-        """The one order of writes into any chat's Hermes transcript.
-
-        Seeding and a cross-chat send race for the same session three ways: a
-        send landing mid-seed has nowhere to mirror to until the session
-        exists; one landing after it would be appended BEFORE the older rows
-        the seed is still fetching, and replay is by insertion order, not by
-        timestamp, so the room would read its reply before the opener it
-        answers; and a send that lands BEFORE the seed reads is in the page the
-        seed writes, so mirroring it afterwards puts the same sentence in the
-        room twice.
-
-        So the send takes this around its own API write, not just around the
-        mirror: either the seed reads a chat this send has not reached yet and
-        the mirror follows it in, or the send is in the durable record before
-        the seed looks -- and then the mirror has already given that chat a
-        session, which is the one thing the seed refuses to touch.
-
-        One lock, not one per chat: a thread's id exists only AFTER the create
-        call it has to cover, so there is no key to take a per-chat lock under.
-        Every write here is a handful of local rows.
-        """
-        if self._transcript_lock is None:
-            self._transcript_lock = asyncio.Lock()
-        return self._transcript_lock
-
     async def _seed_history(self, chat_uid, burst, source):
         """Give a chat with no session its own recent history before the first
         hand-off.
@@ -3264,7 +3253,7 @@ class PlowChatAdapter(BasePlatformAdapter):
             return
         self._seeded.add(chat_uid)
         try:
-            async with self._writing_transcripts():
+            async with self._transcript_lock:
                 # Every state.db call below runs in a worker thread: the registry
                 # handle, the read and the append are synchronous SQLite under a
                 # lock, and on this loop they would stall the socket that is
@@ -4020,12 +4009,6 @@ def _append_seeded_turns(session_id, turns):
         db.append_messages_batch(session_id, turns)
     finally:
         release_or_close(db)
-
-
-@contextlib.asynccontextmanager
-async def _nothing():
-    """An async context that guards nothing, for a send that needs no order."""
-    yield
 
 
 def _seed_epoch(created_at):
