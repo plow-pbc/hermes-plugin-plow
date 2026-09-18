@@ -2434,27 +2434,25 @@ class PlowChatAdapter(BasePlatformAdapter):
 
         Hermes keeps one session per chat and this adapter drops the echo of
         its own sends, so a room opened from another chat's turn is born at the
-        stranger's REPLY with nothing of ours in it -- and the group rule, which
-        speaks only when a message is clearly ours, reads that reply as other
-        people talking. It is: it answers the message this writes.
+        stranger's REPLY with nothing of ours in it -- and the group rule,
+        which speaks only when a message is clearly ours, reads that reply as
+        other people talking. It is: it answers the message this records.
 
-        The session has to be made before anything can be written to it, which
-        is what `_mirror_sent` cannot do. Best-effort, like that mirror: the
-        message is already delivered, and a room that forgets its opener is
-        better than a send reported as failed.
+        A just-created room has no session, which is the one thing
+        `_mirror_sent` cannot solve on its own -- so the session is made here,
+        through the store the gateway hands every adapter, and handed to that
+        same writer. Best-effort like it: the message is delivered either way.
         """
         try:
-            store = self.gateway_runner.async_session_store
             chat = await self.get_chat_info(chat_uid)
             source = self.build_source(chat_id=chat_uid, chat_name=chat["name"],
                                        chat_type=chat["type"])
-            session = await store.get_or_create_session(source, touch_activity=False)
-            from gateway.mirror import mirror_to_session  # in-process with Hermes
-            await asyncio.to_thread(mirror_to_session, PLATFORM_NAME, chat_uid, body,
-                                    source_label=PLATFORM_NAME, role="assistant",
-                                    session_id=session.session_id)
+            session = await asyncio.to_thread(
+                self._session_store.get_or_create_session, source, touch_activity=False)
         except Exception as exc:  # noqa: BLE001 - see the docstring
             log.warning("[plow_chat] opener not recorded for %s: %s", chat_uid, exc)
+            return
+        await asyncio.to_thread(_mirror_sent, chat_uid, body, session.session_id)
 
     async def _verbose_enabled(self, http):
         """Whether this agent's owner asked for diagnostic output in chat.
@@ -3819,7 +3817,7 @@ def _wiki_recall(session_id, user_message, platform, **_kwargs):
     return {"context": "\n".join(lines)}
 
 
-def _mirror_sent(chat_uid, body):
+def _mirror_sent(chat_uid, body, session_id=None):
     """Record a message this agent just posted to `chat_uid` in that chat's
     own Hermes session, as the assistant turn it is.
 
@@ -3831,14 +3829,21 @@ def _mirror_sent(chat_uid, body):
     `hermes send` deliveries (tools/send_message_tool.py); assistant role
     because the text is genuinely the agent speaking.
 
+    `session_id` names the session for a room whose opener is being recorded as
+    the room is created: there is nothing yet for the origin scan to find.
+
     Best-effort: the send already succeeded, so a mirror failure here must
     never propagate and turn a delivered message into a reported failure --
     that would risk a resend and a duplicate. Every caller (`plow_send_message`'s
     cross-chat send and its person-thread opener alike) inherits the guard from here."""
     try:
         from gateway.mirror import mirror_to_session  # in-process with Hermes
+        # Only when we hold one: passing session_id=None would make every
+        # ordinary mirror a call with a null session rather than the origin
+        # scan it has always been.
+        target = {"session_id": session_id} if session_id else {}
         mirrored = mirror_to_session(PLATFORM_NAME, chat_uid, body,
-                                     source_label=PLATFORM_NAME, role="assistant")
+                                     source_label=PLATFORM_NAME, role="assistant", **target)
     except Exception as exc:  # noqa: BLE001 - best effort, see docstring
         log.warning("[plow_chat] message to %s was sent but not mirrored: %s",
                     chat_uid, exc, exc_info=True)
@@ -4485,10 +4490,10 @@ PLOW_SEND_MESSAGE_SCHEMA = {
         "outreach (a contractor, a neighbour, a merchant) uses the default "
         "trusted=false; trusted=true hands every member your owner's own "
         "authority and needs your owner's own turn. To post into an EXISTING "
-        "chat, pass its `cht_` id (from action=list) or a `#title`. Before you tell "
-        "anyone what another chat did or did not say -- what someone replied, whether "
-        "they answered at all -- search your sessions for that chat with session_search "
-        "and read what it finds. action=list names your rooms and shows nothing that was "
+        "chat, pass its `cht_` id (from action=list) or a `#title`. In your owner's own "
+        "chat with you, before you tell them what another chat did or did not say -- what "
+        "someone replied, whether they answered at all -- search your sessions for that "
+        "chat with session_search and read what it finds. action=list names your rooms and shows nothing that was "
         "said in them: answering from it is guessing. A search that finds nothing is not "
         "proof nobody replied -- it is a search that found nothing, and the room may have "
         "gone on without you. Say what you could not find ('I can't pull that thread up "

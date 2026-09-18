@@ -4944,23 +4944,58 @@ def test_a_preflight_failure_reports_nothing_sent_not_delivery_unknown(
     assert "delivery_unknown" not in out
 
 
-@pytest.mark.parametrize("created, mirrored", [(False, ["cht_old"]), (True, [])],
+@pytest.mark.parametrize("created, session_id", [(False, None), (True, "s-new")],
                          ids=["resumed", "created"])
-async def test_start_group_thread_records_the_opener_only_where_a_session_can_exist(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, created: bool, mirrored: list[str]
+async def test_start_group_thread_records_the_opener_in_the_rooms_own_session(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, created: bool, session_id: str | None
 ) -> None:
-    """POST /v1/chats resumes a thread that already exists, and that thread
-    has spoken before, so its session must get the opener like any other
-    cross-chat send. A thread created by this call has no session yet."""
+    """A resumed thread has spoken before, so its session gets the opener like
+    any other cross-chat send. A thread created by this call has no session at
+    all -- so one is made, and the opener recorded in it: the room is otherwise
+    born at the stranger's reply with nothing of this agent's in it, and the
+    group rule then reads that reply as other people talking.
+
+    Driven through `start_group_thread`, not through the recorder: a test that
+    calls the recorder directly still passes with the production call deleted,
+    which is the bug back."""
     module = _load(monkeypatch, tmp_path)
     adapter = _adapter_with_home_line(module)
+    adapter._chats["cht_old"] = _chat("cht_old", group=True)
+    sources: list[Any] = []
+
+    def get_or_create_session(source: Any, **kwargs: Any) -> Any:
+        sources.append((source.chat_id, source.chat_type, kwargs))
+        return SimpleNamespace(session_id="s-new")
+    adapter._session_store = SimpleNamespace(get_or_create_session=get_or_create_session)
     http = _create_http([], resource={"uid": "cht_old", "created": created, "trusted": False},
-                        granted=[_chat("cht_a"), _chat("cht_old")])
+                        granted=[_chat("cht_a"), _chat("cht_old", group=True)])
     monkeypatch.setattr(module.aiohttp, "ClientSession", lambda *a, **k: http)
     calls = _stub_mirror(monkeypatch)
     data = await adapter.start_group_thread(["+15550001111"], "hello again")
     assert data["created"] is created and data["adoption"] == "adopted"
-    assert [(c["chat_id"], c["text"]) for c in calls] == [(uid, "hello again") for uid in mirrored]
+    assert [(c["chat_id"], c["text"], c.get("session_id")) for c in calls] == [
+        ("cht_old", "hello again", session_id)], "a created room's opener names the session just made"
+    assert sources == ([("cht_old", "group", {"touch_activity": False})] if created else [])
+
+
+async def test_a_created_room_whose_session_cannot_be_made_still_reports_the_send(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """The message is already in Plow when the recording is attempted: a room
+    that forgets its opener is not a send to report as failed."""
+    module = _load(monkeypatch, tmp_path)
+    adapter = _adapter_with_home_line(module)
+    adapter._chats["cht_old"] = _chat("cht_old", group=True)
+
+    def explode(source: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("state.db is read-only")
+    adapter._session_store = SimpleNamespace(get_or_create_session=explode)
+    http = _create_http([], resource={"uid": "cht_old", "created": True, "trusted": False},
+                        granted=[_chat("cht_a"), _chat("cht_old", group=True)])
+    monkeypatch.setattr(module.aiohttp, "ClientSession", lambda *a, **k: http)
+    _stub_mirror(monkeypatch)
+    data = await adapter.start_group_thread(["+15550001111"], "hello again")
+    assert data["chat_id"] == "cht_old" and data["adoption"] == "adopted", "the send stands"
 
 
 async def test_start_group_thread_raises_plow_send_error_on_4xx(
@@ -8708,53 +8743,13 @@ async def test_only_the_owners_own_dm_text_interrupts_a_busy_run(
     runner.mode = "queue"                       # demoted: subagents or compression in flight
     assert await busy(handled[0], "k") is True
     assert calls == [("queue", handled[0].text)]
-
-
-def test_a_new_rooms_opener_is_written_into_its_own_session(monkeypatch, tmp_path):
-    """Chunk 1: the room an agent opens is born at the stranger's reply, so the
-    opener has to be put in that room's transcript as the agent's own turn —
-    otherwise the group rule reads the reply as other people talking."""
-    module = _load(monkeypatch, tmp_path)
-    adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
-    adapter._chats["cht_new"] = _chat("cht_new", group=True)
-    sources: list[Any] = []
-    mirrored: list[Any] = []
-
-    async def get_or_create_session(source: Any, **kwargs: Any) -> Any:
-        sources.append((source.chat_id, source.chat_type, kwargs))
-        return SimpleNamespace(session_id="s-new")
-    adapter.gateway_runner = SimpleNamespace(
-        async_session_store=SimpleNamespace(get_or_create_session=get_or_create_session))
-    mirror = types.ModuleType("gateway.mirror")
-    mirror.mirror_to_session = lambda *args, **kwargs: mirrored.append((args, kwargs))
-    monkeypatch.setitem(sys.modules, "gateway.mirror", mirror)
-
-    asyncio.run(adapter._record_opener("cht_new", "Hey Joe, about lunch?"))
-
-    assert sources == [("cht_new", "group", {"touch_activity": False})], "the room's own session"
-    (platform, chat_uid, body), kwargs = mirrored[0]
-    assert (platform, chat_uid, body) == (module.PLATFORM_NAME, "cht_new", "Hey Joe, about lunch?")
-    assert kwargs["role"] == "assistant", "the agent said it"
-    assert kwargs["session_id"] == "s-new", "the session just created, not one guessed by origin"
-
-
-def test_a_session_that_cannot_be_written_never_fails_the_send(monkeypatch, tmp_path, caplog):
-    module = _load(monkeypatch, tmp_path)
-    adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
-    adapter._chats["cht_new"] = _chat("cht_new", group=True)
-    adapter.gateway_runner = SimpleNamespace(async_session_store=None)
-    with caplog.at_level(logging.WARNING):
-        asyncio.run(adapter._record_opener("cht_new", "Hey Joe"))   # raises nothing
-    assert "opener not recorded" in caplog.text
-
-
 def test_the_tool_says_to_search_before_reporting_what_a_chat_said(monkeypatch, tmp_path):
     """Chunk 2, prompt-only: the listing names rooms and shows nothing said in
     them, so answering 'what did Joe say' from it is guessing."""
     module = _load(monkeypatch, tmp_path)
     description = module.PLOW_SEND_MESSAGE_SCHEMA["description"]
     assert "session_search" in description
-    assert "Before you tell anyone what another chat did or did not say" in description
+    assert "In your owner's own chat with you, before you tell them" in description
     assert "answering from it is guessing" in description
     # An empty search is not evidence of silence: the room may have gone on
     # without this agent, so the honest answer names what could not be found.

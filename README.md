@@ -317,13 +317,15 @@ turn's own, the adapter mirrors the text into that chat's session as an
 assistant turn with upstream's `gateway.mirror` — the mechanism Hermes uses
 for cron and `hermes send` deliveries — on the delivery's own coroutine, so a
 caller that stopped waiting cannot strand a delivered message unrecorded. A
-chat's session is born on its first inbound message, so a chat that has never
-spoken has nowhere to record to: the adapter logs a warning and that chat
-will not remember the send. A thread `plow_send_message` opened for a person is
-in that state; one it resumed is handled like any other cross-chat send,
-which records the opener only where a session already exists (a thread
-resumed before anyone replied has none, and logs the same warning). Posting
-to the Plow API directly from a
+chat's session is born on its first inbound message, so at the moment a thread
+is opened there is nowhere to record to — and the room would then be born at
+the stranger's REPLY, with nothing of this agent's in it, which the group rule
+reads as other people talking. So creating a thread makes that room's session
+through the store the gateway hands this adapter and records the opener in it,
+as the agent's own turn. A thread it resumed already has one and is handled
+like any other cross-chat send. Both are best-effort: the message is in Plow
+either way, and a room that forgets its opener beats a delivered send reported
+as failed. Posting to the Plow API directly from a
 script bypasses all of this and leaves the target chat amnesiac; the tool
 exists so the model never has to.
 
