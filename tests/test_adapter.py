@@ -8947,3 +8947,49 @@ def test_a_photo_only_message_is_seeded_as_the_live_path_delivers_it(monkeypatch
     photo["attachments"] = [{"uid": "att_1"}]
     role, content = module._seed_turn(photo, chat, set())
     assert role == "user" and content.endswith("(attachment)")
+
+
+def test_a_send_and_a_seed_never_write_the_same_message_twice(monkeypatch, tmp_path):
+    """The interleaving: a cross-chat send lands in the room, and the room's
+    first inbound is delivered while that send is still in flight."""
+    module = _load(monkeypatch, tmp_path)
+    appended: list[Any] = []
+    written: list[str] = []
+    posted = asyncio.Event()
+    adapter = _seed_adapter(module, monkeypatch, tmp_path, [[]], appended=appended)
+    monkeypatch.setattr(module, "_mirror_sent", lambda chat_uid, body: written.append(body))
+    # State.db as it really behaves: once the mirror has written, the chat owns a
+    # session with a turn in it, which is the state the seed refuses to touch.
+    monkeypatch.setattr(module, "_seeded_session_id",
+                        lambda chat_uid: module._SESSION_ALREADY_FILLED if written else None)
+
+    # The send's own page, once it has landed: the seed would replay it too.
+    opener = _seed_message("m1", direction="outbound", body="Hey Joe",
+                           status="sent", sender=OWN_LINE)
+    async def page(auth, chat_uid):
+        return [[_seed_message("m2", body="2pm please"), opener]]
+    monkeypatch.setattr(module, "_page_chat_messages", page)
+
+    async def post_message(http, chat_id, payload, metadata):
+        posted.set()
+        await asyncio.sleep(0)               # the seed gets its chance here
+        return module.SendResult(success=True)
+    adapter._post_message = post_message
+
+    async def no_refusal(*args: Any, **kwargs: Any) -> Any:
+        return None
+    adapter._fresh_cross_chat = no_refusal
+    monkeypatch.setattr(module.PlowChatAdapter, "_message_guard", lambda self, chat_id: None)
+    module._ACTIVE_TURN.set({"chat_uid": "cht_dm", "owner": True, "dm": True,
+                             "authority": True, "recall_everywhere": True})
+
+    async def drive():
+        send = asyncio.create_task(adapter.send("cht_g", "Hey Joe"))
+        await posted.wait()
+        await adapter._seed_history("cht_g", [_burst("m2")], SimpleNamespace())
+        await send
+    asyncio.run(drive())
+
+    seeded = [row["content"] for _session, turns in appended for row in turns]
+    assert seeded.count("Hey Joe") + written.count("Hey Joe") == 1, (
+        "the opener is recorded once: either the seed replayed it or the mirror wrote it")

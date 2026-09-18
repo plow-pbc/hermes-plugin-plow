@@ -8,6 +8,7 @@ See HERMES_INTEGRATION.md for deployment and protocol constraints.
 """
 import asyncio
 import base64
+import contextlib
 import dataclasses
 import hashlib
 import json
@@ -1509,7 +1510,7 @@ class PlowChatAdapter(BasePlatformAdapter):
         self._quiet_until = 0.0              # while now is under this, the gate is quiet without a read
         self._seen = []                      # (chat uid, message uid), newest last
         self._seeded = set()                 # chats whose session this process has seeded
-        self._transcript_locks = {}          # chat uid -> the lock ordering writes to its session
+        self._transcript_lock = None         # the one order of writes into any chat's session
         self._seen_events = []               # event uids, newest last
         self._inbound = {}                   # chat uid -> (queue, the task serving it)
         # One durable owner of recovery state. The file existing means "this
@@ -2407,28 +2408,32 @@ class PlowChatAdapter(BasePlatformAdapter):
         # empty default withholds, which is the direction that cannot
         # disclose.
         withhold = diagnostic or (chatter and not _owner_dm(self._chats.get(chat_id, {})))
-        async with aiohttp.ClientSession() as http:
-            if withhold and not await self._verbose_enabled(http):
-                # Before typing is touched: a message the owner never sees must
-                # not eat the "working" signal either.
-                log.info("[plow_chat] dropped %s for %s",
-                         "diagnostic" if diagnostic else "mid-turn chatter", chat_id)
-                return SendResult(success=True)
-            result = await self._post_message(http, chat_id, {"body": body}, metadata)
-        if result.success:
-            # Only once it lands: text that never reached the thread is not
-            # something the agent said. This records the turn's reply to its
-            # OWN chat, which is exactly the case the mirror below excludes --
-            # the two are disjoint on that comparison, not competing.
-            self._goal_note_reply(chat_id, body)
-            if turn is not None and chat_id != turn["chat_uid"]:
-                # A turn speaking in another chat: record it where it landed,
-                # on the delivery's own coroutine, so a caller that stopped
-                # waiting cannot strand a delivered message unmirrored. A
-                # turn's reply to its own chat is already that chat's assistant
-                # turn, and a turn-less (cron) delivery is mirrored by Hermes
-                # itself.
-                async with self._transcript_lock(chat_id):
+        # Held across the send and its mirror: see `_writing_transcripts`. A
+        # reply to this turn's own chat records itself, so only a cross-chat
+        # send needs the order.
+        cross_chat = turn is not None and chat_id != turn["chat_uid"]
+        async with self._writing_transcripts() if cross_chat else _nothing():
+          async with aiohttp.ClientSession() as http:
+              if withhold and not await self._verbose_enabled(http):
+                  # Before typing is touched: a message the owner never sees must
+                  # not eat the "working" signal either.
+                  log.info("[plow_chat] dropped %s for %s",
+                           "diagnostic" if diagnostic else "mid-turn chatter", chat_id)
+                  return SendResult(success=True)
+              result = await self._post_message(http, chat_id, {"body": body}, metadata)
+          if result.success:
+              # Only once it lands: text that never reached the thread is not
+              # something the agent said. This records the turn's reply to its
+              # OWN chat, which is exactly the case the mirror below excludes --
+              # the two are disjoint on that comparison, not competing.
+              self._goal_note_reply(chat_id, body)
+              if turn is not None and chat_id != turn["chat_uid"]:
+                  # A turn speaking in another chat: record it where it landed,
+                  # on the delivery's own coroutine, so a caller that stopped
+                  # waiting cannot strand a delivered message unmirrored. A
+                  # turn's reply to its own chat is already that chat's assistant
+                  # turn, and a turn-less (cron) delivery is mirrored by Hermes
+                  # itself.
                     await asyncio.to_thread(_mirror_sent, chat_id, body)
         return result
 
@@ -2913,7 +2918,7 @@ class PlowChatAdapter(BasePlatformAdapter):
             line_uid = await self._home_line_uid()
         except Exception as exc:
             raise _PlowPreflightError(f"{type(exc).__name__}: {exc}") from exc
-        async with aiohttp.ClientSession() as http:
+        async with self._writing_transcripts(), aiohttp.ClientSession() as http:
             async with http.post(
                 f"{BASE}/v1/chats",
                 # The key is required by the API and names this one confirmed
@@ -2938,8 +2943,7 @@ class PlowChatAdapter(BasePlatformAdapter):
                 # A resumed thread has spoken before, so a session may own it:
                 # record the opener there like any cross-chat send. A thread
                 # created just now has no session yet -- nothing to record to.
-                async with self._transcript_lock(chat_id):
-                    await asyncio.to_thread(_mirror_sent, chat_id, body)
+                await asyncio.to_thread(_mirror_sent, chat_id, body)
             try:
                 await self._refresh_reach(http)
             except Exception as exc:  # noqa: BLE001 - delivery happened; report adoption honestly
@@ -3208,22 +3212,31 @@ class PlowChatAdapter(BasePlatformAdapter):
         _woken = True
         await self._handoff_message(event)
 
-    def _transcript_lock(self, chat_uid):
-        """The one lock ordering writes into a chat's Hermes transcript.
+    def _writing_transcripts(self):
+        """The one order of writes into any chat's Hermes transcript.
 
-        Seeding and a cross-chat send race for the same session: a send
-        landing mid-seed has nowhere to mirror to until the session exists,
-        and one landing after it exists would be appended BEFORE the older
-        rows the seed is still fetching -- replay is by insertion order, not
-        by timestamp, so the room would read its reply before the opener it
-        answers. Both writers take this, so the seed's rows are in before any
-        later send's, and the send waits rather than falling through to "no
-        live session owns that chat yet".
+        Seeding and a cross-chat send race for the same session three ways: a
+        send landing mid-seed has nowhere to mirror to until the session
+        exists; one landing after it would be appended BEFORE the older rows
+        the seed is still fetching, and replay is by insertion order, not by
+        timestamp, so the room would read its reply before the opener it
+        answers; and a send that lands BEFORE the seed reads is in the page the
+        seed writes, so mirroring it afterwards puts the same sentence in the
+        room twice.
+
+        So the send takes this around its own API write, not just around the
+        mirror: either the seed reads a chat this send has not reached yet and
+        the mirror follows it in, or the send is in the durable record before
+        the seed looks -- and then the mirror has already given that chat a
+        session, which is the one thing the seed refuses to touch.
+
+        One lock, not one per chat: a thread's id exists only AFTER the create
+        call it has to cover, so there is no key to take a per-chat lock under.
+        Every write here is a handful of local rows.
         """
-        lock = self._transcript_locks.get(chat_uid)
-        if lock is None:
-            lock = self._transcript_locks[chat_uid] = asyncio.Lock()
-        return lock
+        if self._transcript_lock is None:
+            self._transcript_lock = asyncio.Lock()
+        return self._transcript_lock
 
     async def _seed_history(self, chat_uid, burst, source):
         """Give a chat with no session its own recent history before the first
@@ -3251,7 +3264,7 @@ class PlowChatAdapter(BasePlatformAdapter):
             return
         self._seeded.add(chat_uid)
         try:
-            async with self._transcript_lock(chat_uid):
+            async with self._writing_transcripts():
                 # Every state.db call below runs in a worker thread: the registry
                 # handle, the read and the append are synchronous SQLite under a
                 # lock, and on this loop they would stall the socket that is
@@ -4007,6 +4020,12 @@ def _append_seeded_turns(session_id, turns):
         db.append_messages_batch(session_id, turns)
     finally:
         release_or_close(db)
+
+
+@contextlib.asynccontextmanager
+async def _nothing():
+    """An async context that guards nothing, for a send that needs no order."""
+    yield
 
 
 def _seed_epoch(created_at):
