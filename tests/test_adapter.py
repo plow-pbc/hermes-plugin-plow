@@ -8875,18 +8875,21 @@ def _read_rig(module, monkeypatch, *, current, rooms, record=None):
 
 
 @pytest.mark.parametrize("case, current, target, rooms, allowed", [
-    # The owner's own chat with the agent is the one room that may read another.
+    # The owner's own chat with the agent is the only room a read may run in,
+    # and from there every chat is readable, that DM included.
     ("owner DM reads a group", "cht_dm", "cht_g",
      {"cht_dm": _chat("cht_dm"), "cht_g": _chat("cht_g", group=True)}, True),
+    ("owner DM reads itself", "cht_dm", "cht_dm", {"cht_dm": _chat("cht_dm")}, True),
     # Trust says what a group's members may ask for, never whose rooms may be recited to them.
     ("trusted group reads the owner DM", "cht_g", "cht_dm",
      {"cht_dm": _chat("cht_dm"), "cht_g": _chat("cht_g", group=True, trusted=True)}, False),
     ("group reads another group", "cht_g", "cht_g2",
      {"cht_g": _chat("cht_g", group=True), "cht_g2": _chat("cht_g2", group=True)}, False),
-    # Its own room discloses nothing new, wherever the turn is running.
-    ("group reads itself", "cht_g", "cht_g", {"cht_g": _chat("cht_g", group=True)}, True),
+    # Not even its own room: a roster grows without the owner, so somebody
+    # auto-seated into the thread would be read what was said before they came.
+    ("group reads itself", "cht_g", "cht_g", {"cht_g": _chat("cht_g", group=True)}, False),
 ])
-def test_only_the_owners_own_chat_reads_another_room(monkeypatch, tmp_path, case, current, target, rooms, allowed):
+def test_reads_happen_only_in_the_owners_own_chat(monkeypatch, tmp_path, case, current, target, rooms, allowed):
     module = _load(monkeypatch, tmp_path)
     record: list[Any] = []
     _read_rig(module, monkeypatch, current=current, rooms=rooms, record=record)
@@ -8913,10 +8916,10 @@ def test_a_turnless_call_reads_nothing(monkeypatch, tmp_path):
 def test_a_read_honours_its_limit(monkeypatch, tmp_path):
     module = _load(monkeypatch, tmp_path)
     record: list[Any] = []
-    _read_rig(module, monkeypatch, current="cht_g", rooms={"cht_g": _chat("cht_g", group=True)}, record=record)
+    _read_rig(module, monkeypatch, current="cht_dm", rooms={"cht_dm": _chat("cht_dm")}, record=record)
     assert json.loads(module._plow_send_message(
-        {"action": "read", "chat_id": "cht_g", "limit": 5}))["success"] is True
-    assert record == [("cht_g", 5)]
+        {"action": "read", "chat_id": "cht_dm", "limit": 5}))["success"] is True
+    assert record == [("cht_dm", 5)]
 
 
 def test_the_read_projection_keeps_a_photo_and_drops_a_failed_send(monkeypatch, tmp_path):

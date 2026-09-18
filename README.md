@@ -338,10 +338,12 @@ script bypasses all of this; the tool exists so the model never has to.
 said: it returns that chat's recent messages — sender, time, direction, body,
 and a count when something was attached — carrying the same untrusted marker,
 with failed sends left out. One room may read the others: the owner's own chat
-with this agent. Every other room may read only itself, trusted or not, because
-a group's trust says what its members may ask for and never whose other
-conversations may be recited in front of them. A call with no live turn reads
-nothing.
+with this agent, and from there any of them. From a group nothing is readable
+at all — not another room, and not the room the turn is in. A group's trust
+says what its members may ask for, never whose conversations may be recited to
+them, and "just this room" is not safe either: a Plow roster is mutable and not
+owner-gated, so somebody auto-seated into an existing thread would be read back
+what was said before they arrived. A call with no live turn reads nothing.
 
 ### Recall from other chats
 
