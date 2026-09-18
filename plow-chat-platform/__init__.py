@@ -4783,9 +4783,16 @@ def _read_chat_tool(args):
     """Read one of this agent's own chats.
 
     Reads happen in ONE room: the owner's own chat with this agent. From there
-    any of the agent's chats may be read, that DM included; from a group,
+    any of THIS adapter's chats may be read, that DM included; from a group,
     nothing may be read at all -- not another room, and not even the room the
     turn is in.
+
+    "This adapter's" is the second half of the gate, and it is not the
+    credential's. One credential covers the phone line and the persona mailbox
+    alike, so a uid from the mailbox would be served by the API and read back
+    here -- rooms `action=list` deliberately does not show, since they belong
+    to another platform with its own turns. Reach is the same set every other
+    path in this plugin tests before it acts.
 
     Reading the current room looks harmless and is not. A Plow roster is
     mutable and not owner-gated: somebody delivered into an existing thread is
@@ -4804,7 +4811,11 @@ def _read_chat_tool(args):
     if turn is None:
         return json.dumps({"success": False,
                            "error": "reading a chat needs a live turn whose room says what may be disclosed"})
-    if not _owner_dm((_live[0]._chats if _live else {}).get(turn["chat_uid"], {})):
+    adapter = _live[0] if _live else None
+    if adapter is not None and chat_id not in adapter.chat_uids:
+        return json.dumps({"success": False,
+                           "error": f"Plow Chat {chat_id!r} is outside this agent's grant"})
+    if not _owner_dm((adapter._chats if adapter else {}).get(turn["chat_uid"], {})):
         return json.dumps({"success": False,
                            "error": "chats are only readable in your owner's own chat with you, "
                                     "never in a room somebody else is in -- including this one"})

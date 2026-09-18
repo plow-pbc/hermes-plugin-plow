@@ -6935,6 +6935,13 @@ def test_latch_section_renders_only_when_a_mac_is_connected(
     monkeypatch.setenv("PLOW_MCP_URL", "https://api.plow.co/v1/relay/devices/u/mcp")
     text = render({})
     assert text == module.LATCH_PROMPT
+    # Mac-first governs the owner's own world, with one carve-out: the rooms on
+    # this agent's own line, which a read answers with the Mac down. Routing
+    # those to Latch deferred an answer the agent already had.
+    assert "your first tool call is on their Mac" in text
+    assert 'plow_send_message(action="read")' in text
+    history = text.index("The Mac also remembers what Plow did before you")
+    assert "needs no Mac" in text[history:], "stated with the rule it bounds"
     assert len(text) <= module.HERMES_SECTION_MAX_CHARS, "Hermes skips a section over max_chars"
     for must in ("Latch", "plow_list_skills", "plow_", "not connected",
                  # One messaging tool now: it sends to a person and lists chats.
@@ -8869,6 +8876,7 @@ def _read_rig(module, monkeypatch, *, current, rooms, record=None):
                                   "direction": "inbound", "body": "2pm please"}],
                          record=record)
     adapter._chats.update(rooms)
+    adapter.chat_uids = frozenset(adapter._chats)
     module._ACTIVE_TURN.set({"chat_uid": current, "owner": True, "dm": True,
                              "authority": True, "recall_everywhere": True})
     return adapter
@@ -8998,16 +9006,14 @@ def test_a_send_and_a_seed_never_write_the_same_message_twice(monkeypatch, tmp_p
         "the opener is recorded once: either the seed replayed it or the mirror wrote it")
 
 
-def test_the_mac_first_rule_exempts_the_agents_own_plow_chats(monkeypatch, tmp_path):
+def test_a_read_never_leaves_this_adapters_own_chats(monkeypatch, tmp_path):
+    """One credential covers the phone line and the persona mailbox, so a uid
+    from another provider would be served by the API -- rooms action=list does
+    not show, belonging to a platform with its own turns."""
     module = _load(monkeypatch, tmp_path)
-    prompt = module.LATCH_PROMPT
-    # Mac-first still governs the owner's own world.
-    assert "your first tool call is on their Mac" in prompt
-    # But the rooms on this agent's line are its own, reachable with the Mac down:
-    # routing "what did Joe say?" to Latch would defer an answer it already has.
-    assert 'plow_send_message(action="read")' in prompt
-    # Stated where the Mac's own memory of earlier agents is described, which is
-    # the paragraph an agent reads when asked what happened before.
-    history = prompt.index("The Mac also remembers what Plow did before you")
-    assert "needs no Mac" in prompt[history:]
-    assert len(prompt) <= 4000, "a section over the cap is dropped whole"
+    record: list[Any] = []
+    _read_rig(module, monkeypatch, current="cht_dm", rooms={"cht_dm": _chat("cht_dm")}, record=record)
+    answer = json.loads(module._plow_send_message({"action": "read", "chat_id": "cht_mailbox"}))
+    assert answer["success"] is False
+    assert "outside this agent's grant" in answer["error"]
+    assert record == [], "a room outside reach never reaches Plow"
