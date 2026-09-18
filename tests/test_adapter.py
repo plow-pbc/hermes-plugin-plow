@@ -8896,6 +8896,13 @@ def _read_rig(module, monkeypatch, *, current, rooms, record=None):
     # Not even its own room: a roster grows without the owner, so somebody
     # auto-seated into the thread would be read what was said before they came.
     ("group reads itself", "cht_g", "cht_g", {"cht_g": _chat("cht_g", group=True)}, False),
+    # A room outside this adapter -- the persona mailbox shares the credential --
+    # is refused from the owner's own chat as out of grant, and from a group as
+    # the group is refused everything: the error must not tell a member which
+    # ids are in the grant and which are not.
+    ("owner DM reads outside this adapter", "cht_dm", "cht_mail", {"cht_dm": _chat("cht_dm")}, False),
+    ("group reads outside this adapter", "cht_g", "cht_mail",
+     {"cht_g": _chat("cht_g", group=True)}, False),
 ])
 def test_reads_happen_only_in_the_owners_own_chat(monkeypatch, tmp_path, case, current, target, rooms, allowed):
     module = _load(monkeypatch, tmp_path)
@@ -8908,7 +8915,8 @@ def test_reads_happen_only_in_the_owners_own_chat(monkeypatch, tmp_path, case, c
         assert module._UNTRUSTED_MARK in answer["note"], "other people's words arrive marked as data"
         assert record == [(target, module.READ_DEFAULT_LIMIT)]
     else:
-        assert "owner's own chat" in answer["error"]
+        expected = ("outside this agent's grant" if current == "cht_dm" else "owner's own chat")
+        assert expected in answer["error"], case
         assert record == [], "a refused read never reaches Plow"
 
 
@@ -9004,16 +9012,3 @@ def test_a_send_and_a_seed_never_write_the_same_message_twice(monkeypatch, tmp_p
     seeded = [row["content"] for _session, turns in appended for row in turns]
     assert seeded.count("Hey Joe") + written.count("Hey Joe") == 1, (
         "the opener is recorded once: either the seed replayed it or the mirror wrote it")
-
-
-def test_a_read_never_leaves_this_adapters_own_chats(monkeypatch, tmp_path):
-    """One credential covers the phone line and the persona mailbox, so a uid
-    from another provider would be served by the API -- rooms action=list does
-    not show, belonging to a platform with its own turns."""
-    module = _load(monkeypatch, tmp_path)
-    record: list[Any] = []
-    _read_rig(module, monkeypatch, current="cht_dm", rooms={"cht_dm": _chat("cht_dm")}, record=record)
-    answer = json.loads(module._plow_send_message({"action": "read", "chat_id": "cht_mailbox"}))
-    assert answer["success"] is False
-    assert "outside this agent's grant" in answer["error"]
-    assert record == [], "a room outside reach never reaches Plow"

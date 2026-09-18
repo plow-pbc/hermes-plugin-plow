@@ -4812,13 +4812,16 @@ def _read_chat_tool(args):
         return json.dumps({"success": False,
                            "error": "reading a chat needs a live turn whose room says what may be disclosed"})
     adapter = _live[0] if _live else None
-    if adapter is not None and chat_id not in adapter.chat_uids:
-        return json.dumps({"success": False,
-                           "error": f"Plow Chat {chat_id!r} is outside this agent's grant"})
+    # Whose room this is, BEFORE whether the named room exists: answering "outside
+    # this agent's grant" to a caller who may read nothing tells them which ids are
+    # in the grant and which are not, one guess at a time.
     if not _owner_dm((adapter._chats if adapter else {}).get(turn["chat_uid"], {})):
         return json.dumps({"success": False,
                            "error": "chats are only readable in your owner's own chat with you, "
                                     "never in a room somebody else is in -- including this one"})
+    if adapter is not None and chat_id not in adapter.chat_uids:
+        return json.dumps({"success": False,
+                           "error": f"Plow Chat {chat_id!r} is outside this agent's grant"})
     try:
         limit = max(1, min(int(args.get("limit") or READ_DEFAULT_LIMIT), READ_MAX_LIMIT))
     except (TypeError, ValueError):
