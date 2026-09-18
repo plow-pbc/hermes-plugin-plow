@@ -8996,3 +8996,18 @@ def test_a_send_and_a_seed_never_write_the_same_message_twice(monkeypatch, tmp_p
     seeded = [row["content"] for _session, turns in appended for row in turns]
     assert seeded.count("Hey Joe") + written.count("Hey Joe") == 1, (
         "the opener is recorded once: either the seed replayed it or the mirror wrote it")
+
+
+def test_the_mac_first_rule_exempts_the_agents_own_plow_chats(monkeypatch, tmp_path):
+    module = _load(monkeypatch, tmp_path)
+    prompt = module.LATCH_PROMPT
+    # Mac-first still governs the owner's own world.
+    assert "your first tool call is on their Mac" in prompt
+    # But the rooms on this agent's line are its own, reachable with the Mac down:
+    # routing "what did Joe say?" to Latch would defer an answer it already has.
+    assert 'plow_send_message(action="read")' in prompt
+    # Stated where the Mac's own memory of earlier agents is described, which is
+    # the paragraph an agent reads when asked what happened before.
+    history = prompt.index("The Mac also remembers what Plow did before you")
+    assert "needs no Mac" in prompt[history:]
+    assert len(prompt) <= 4000, "a section over the cap is dropped whole"

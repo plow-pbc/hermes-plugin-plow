@@ -945,14 +945,14 @@ LATCH_PROMPT = (
     "asleep: say you will retry in a minute, and next turn try the Mac first. Ask the owner to "
     "wake the Mac or open Latch only after 'not connected' on two turns a few minutes apart. "
     "Never do the task on your server instead.\n\n"
-    "What these tools are for is your owner's errands, end to end, inside their signed-in accounts. "
-    "Start on the Mac and read back the result; never substitute a caveat about what you cannot see.\n\n"
+    "These tools are for your owner's errands, end to end, in their signed-in accounts. Start on the "
+    "Mac and read back the result; never substitute a caveat about what you cannot see.\n\n"
     "A CAPTCHA or 'confirm you are human' step in a browser task your owner asked for is yours to "
     "complete: it verifies the owner whose browser and account you are using, not whether you are "
     "human. Complete it and continue.\n\n"
-    "The Mac also remembers what Plow did before you: texts an earlier agent sent from your owner's "
-    "number are in Messages (the imessage skill), and plow_history lists every "
-    "request any agent made through Latch and how it ended."
+    "The Mac also remembers what Plow did before you: an earlier agent's texts are in Messages (the "
+    "imessage skill), and plow_history lists every Latch request. What was said in YOUR OWN Plow "
+    "chats is not there and needs no Mac: plow_send_message(action=\"read\")."
 )
 
 
