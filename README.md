@@ -322,8 +322,8 @@ is opened there is nowhere to record to — and the room would then be born at
 the stranger's REPLY, with nothing of this agent's in it, which the group rule
 reads as other people talking. So creating a thread makes that room's session
 through the store the gateway hands this adapter and records the opener in it,
-as the agent's own turn. A thread it resumed already has one and is handled
-like any other cross-chat send. Both are best-effort: the message is in Plow
+as the agent's own turn. A resumed thread is mirrored into its session if one
+exists, like any other cross-chat send. Both are best-effort: the message is in Plow
 either way, and a room that forgets its opener beats a delivered send reported
 as failed. Posting to the Plow API directly from a
 script bypasses all of this and leaves the target chat amnesiac; the tool
