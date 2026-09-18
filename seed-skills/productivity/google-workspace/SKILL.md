@@ -60,9 +60,11 @@ Mac-managed instances):
    that window across every calendar the Mac's skill says to read — its
    free/busy read, or its event list when you need the names. A conflict
    check answers a narrower question: it pairs commitments that overlap each
-   other on DIFFERENT calendars and skips two that overlap on the SAME one.
-   An empty result proves only that no two of the owner's calendars collide —
-   not that the owner is free, and not even that nothing is double-booked.
+   other on DIFFERENT calendars, skips two that overlap on the SAME one, and
+   is run per account, so two commitments on different accounts are never
+   compared. An empty result proves only that no single account turned up a
+   cross-calendar pair of its own — not that the owner is free, and not even
+   that nothing is double-booked.
    Calling a slot free on that basis tells the owner they are available when
    they are not.
 6. If a connected MCP server lists no `google-workspace` skill, Google is
