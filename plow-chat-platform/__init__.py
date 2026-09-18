@@ -1509,6 +1509,7 @@ class PlowChatAdapter(BasePlatformAdapter):
         self._quiet_until = 0.0              # while now is under this, the gate is quiet without a read
         self._seen = []                      # (chat uid, message uid), newest last
         self._seeded = set()                 # chats whose session this process has seeded
+        self._transcript_locks = {}          # chat uid -> the lock ordering writes to its session
         self._seen_events = []               # event uids, newest last
         self._inbound = {}                   # chat uid -> (queue, the task serving it)
         # One durable owner of recovery state. The file existing means "this
@@ -2427,7 +2428,8 @@ class PlowChatAdapter(BasePlatformAdapter):
                 # turn's reply to its own chat is already that chat's assistant
                 # turn, and a turn-less (cron) delivery is mirrored by Hermes
                 # itself.
-                await asyncio.to_thread(_mirror_sent, chat_id, body)
+                async with self._transcript_lock(chat_id):
+                    await asyncio.to_thread(_mirror_sent, chat_id, body)
         return result
 
     async def _verbose_enabled(self, http):
@@ -2936,7 +2938,8 @@ class PlowChatAdapter(BasePlatformAdapter):
                 # A resumed thread has spoken before, so a session may own it:
                 # record the opener there like any cross-chat send. A thread
                 # created just now has no session yet -- nothing to record to.
-                await asyncio.to_thread(_mirror_sent, chat_id, body)
+                async with self._transcript_lock(chat_id):
+                    await asyncio.to_thread(_mirror_sent, chat_id, body)
             try:
                 await self._refresh_reach(http)
             except Exception as exc:  # noqa: BLE001 - delivery happened; report adoption honestly
@@ -2996,11 +2999,7 @@ class PlowChatAdapter(BasePlatformAdapter):
         somebody asks about ("what did Joe say?"). Failed sends are left out --
         they were never said.
         """
-        async with aiohttp.ClientSession() as http:
-            async with http.get(f"{BASE}/v1/chats/{chat_uid}/messages?limit={limit}",
-                                headers=self.auth) as resp:
-                _auth_raise_for_status(resp)
-                body = await resp.json(content_type=None)
+        body = await self._tool_json("GET", f"/v1/chats/{chat_uid}/messages?limit={limit}")
         return _read_projection(body.get("data") or [], self._chats.get(chat_uid, {}))
 
     async def list_chats(self):
@@ -3209,6 +3208,23 @@ class PlowChatAdapter(BasePlatformAdapter):
         _woken = True
         await self._handoff_message(event)
 
+    def _transcript_lock(self, chat_uid):
+        """The one lock ordering writes into a chat's Hermes transcript.
+
+        Seeding and a cross-chat send race for the same session: a send
+        landing mid-seed has nowhere to mirror to until the session exists,
+        and one landing after it exists would be appended BEFORE the older
+        rows the seed is still fetching -- replay is by insertion order, not
+        by timestamp, so the room would read its reply before the opener it
+        answers. Both writers take this, so the seed's rows are in before any
+        later send's, and the send waits rather than falling through to "no
+        live session owns that chat yet".
+        """
+        lock = self._transcript_locks.get(chat_uid)
+        if lock is None:
+            lock = self._transcript_locks[chat_uid] = asyncio.Lock()
+        return lock
+
     async def _seed_history(self, chat_uid, burst, source):
         """Give a chat with no session its own recent history before the first
         hand-off.
@@ -3235,46 +3251,47 @@ class PlowChatAdapter(BasePlatformAdapter):
             return
         self._seeded.add(chat_uid)
         try:
-            # Every state.db call below runs in a worker thread: the registry
-            # handle, the read and the append are synchronous SQLite under a
-            # lock, and on this loop they would stall the socket that is
-            # feeding every other chat.
-            session_id = await asyncio.to_thread(_seeded_session_id, chat_uid)
-            if session_id is _SESSION_ALREADY_FILLED:
-                return                       # the live socket already owns this room
-            if session_id is None:
-                store = getattr(self.gateway_runner, "async_session_store", None)
-                if store is None:
+            async with self._transcript_lock(chat_uid):
+                # Every state.db call below runs in a worker thread: the registry
+                # handle, the read and the append are synchronous SQLite under a
+                # lock, and on this loop they would stall the socket that is
+                # feeding every other chat.
+                session_id = await asyncio.to_thread(_seeded_session_id, chat_uid)
+                if session_id is _SESSION_ALREADY_FILLED:
+                    return                       # the live socket already owns this room
+                if session_id is None:
+                    store = getattr(self.gateway_runner, "async_session_store", None)
+                    if store is None:
+                        return
+                    # The same source the event carries, so the session this creates
+                    # is the one the turn routes to rather than a second row beside it.
+                    session_id = (await store.get_or_create_session(source, touch_activity=False)).session_id
+                pages = await _page_chat_messages(self.auth, chat_uid)
+                rows = _seed_page_cut(pages, burst[0].uid)
+                if rows is None:
+                    log.info("[plow_chat] no seed for %s: the burst is not within %d pages",
+                             chat_uid, SEED_MAX_PAGES)
                     return
-                # The same source the event carries, so the session this creates
-                # is the one the turn routes to rather than a second row beside it.
-                session_id = (await store.get_or_create_session(source, touch_activity=False)).session_id
-            pages = await _page_chat_messages(self.auth, chat_uid)
-            rows = _seed_page_cut(pages, burst[0].uid)
-            if rows is None:
-                log.info("[plow_chat] no seed for %s: the burst is not within %d pages",
-                         chat_uid, SEED_MAX_PAGES)
-                return
-            seen_uids = {uid for seen_chat, uid in self._seen if seen_chat == chat_uid}
-            seen_uids.update(message.uid for message in burst)
-            turns, uids = [], []
-            for message in rows:
-                turn = _seed_turn(message, self._chats.get(chat_uid, {}), seen_uids)
-                if turn is None:
-                    continue
-                role, content = turn
-                turns.append({"role": role, "content": content,
-                              "timestamp": _seed_epoch(message.get("created_at"))})
-                uids.append(message["uid"])
-            if not turns:
-                return
-            await asyncio.to_thread(_append_seeded_turns, session_id, turns)
-            # Seeded, so never delivered: an in-process backfill must not hand
-            # these to hermes a second time as fresh turns.
-            for uid in uids:
-                self._seen.append((chat_uid, uid))
-            del self._seen[:-512]
-            log.info("[plow_chat] seeded %d message(s) of history for %s", len(turns), chat_uid)
+                seen_uids = {uid for seen_chat, uid in self._seen if seen_chat == chat_uid}
+                seen_uids.update(message.uid for message in burst)
+                turns, uids = [], []
+                for message in rows:
+                    turn = _seed_turn(message, self._chats.get(chat_uid, {}), seen_uids)
+                    if turn is None:
+                        continue
+                    role, content = turn
+                    turns.append({"role": role, "content": content,
+                                  "timestamp": _seed_epoch(message.get("created_at"))})
+                    uids.append(message["uid"])
+                if not turns:
+                    return
+                await asyncio.to_thread(_append_seeded_turns, session_id, turns)
+                # Seeded, so never delivered: an in-process backfill must not hand
+                # these to hermes a second time as fresh turns.
+                for uid in uids:
+                    self._seen.append((chat_uid, uid))
+                del self._seen[:-512]
+                log.info("[plow_chat] seeded %d message(s) of history for %s", len(turns), chat_uid)
         except Exception as exc:             # noqa: BLE001 - see the docstring
             log.warning("[plow_chat] could not seed history for %s: %s", chat_uid, exc)
 
@@ -4605,8 +4622,8 @@ def _open_person_thread(adapter, loop, handles, body, trusted_arg, turn, subject
 
 
 def _plow_send_message(args, **_kwargs):
-    """The one messaging tool: reach a person, post into an existing chat, or
-    list the chats.
+    """The one messaging tool: reach a person, post into an existing chat,
+    read a chat, or list them.
 
     `to` decides the route, and which line it leaves from. A bare handle/name,
     or an array of them, is a PERSON. A number resolves to an owner-inclusive
@@ -4619,7 +4636,9 @@ def _plow_send_message(args, **_kwargs):
     A `cht_` id or a `#title` names an EXISTING chat and posts there
     through send(), whose owner-CC guard refuses a hand-picked room the owner
     is not in. `action="list"` enumerates the owner's chats with participants,
-    the sanctioned source of a cht_ id.
+    the sanctioned source of a cht_ id, and `action="read"` returns one chat's
+    recent messages -- this room from anywhere, another room only in the
+    owner's own chat with this agent.
 
     The adapter's send()/start_group_thread() are the authority on reach and
     trust: run_coroutine_threadsafe copies the turn onto their loop, so the
@@ -4628,10 +4647,14 @@ def _plow_send_message(args, **_kwargs):
     """
     action = str(args.get("action") or "send").strip().lower()
     if action == "list":
-        return _owner_read_tool(
+        turn = _ACTIVE_TURN.get()
+        if turn is not None and not turn["authority"]:
+            return json.dumps({"success": False,
+                               "error": "your owner's other chats are not listable without "
+                                        "the owner's authority"})
+        return _read_tool(
             lambda adapter: adapter.list_chats(),
             lambda chats: {"note": _CHAT_LISTING_MARK, "chats": chats},
-            "your owner's other chats are not listable without the owner's authority",
             "list the chats")
     if action == "read":
         return _read_chat_tool(args)
@@ -4698,7 +4721,7 @@ def _plow_send_message(args, **_kwargs):
 PLOW_SEND_MESSAGE_SCHEMA = {
     "name": "plow_send_message",
     "description": (
-        "Send a message, or list your chats. `to` chooses the route. To reach a "
+        "Send a message, read one of your chats, or list them. `to` chooses the send route. To reach a "
         "PERSON, resolve their name to a handle first (Latch's `contacts` skill "
         "for your owner's macOS Contacts, or plow_contacts for Plow's own book) "
         "and pass the handle -- or an array of handles for a group. That opens "
@@ -4783,24 +4806,20 @@ def _read_chat_tool(args):
         limit = max(1, min(int(args.get("limit") or READ_DEFAULT_LIMIT), READ_MAX_LIMIT))
     except (TypeError, ValueError):
         limit = READ_DEFAULT_LIMIT
-    if _live is None:
-        return json.dumps({"success": False, "error": "the Plow Chat gateway is not connected"})
-    adapter, loop = _live
-    try:
-        messages = asyncio.run_coroutine_threadsafe(
-            adapter.read_chat(chat_id, limit), loop).result(timeout=30)
-    except _PlowSendError as exc:
-        return json.dumps({"success": False, "error": f"Plow declined ({exc.status}): {exc.detail}"})
-    except Exception as exc:  # noqa: BLE001 - a failed read is never an empty room
-        return json.dumps({"success": False, "error": f"could not read {chat_id} ({type(exc).__name__})"})
-    return json.dumps({"success": True, "note": _CHAT_MESSAGES_MARK,
-                       "chat_id": chat_id, "messages": messages})
+    return _read_tool(
+        lambda adapter: adapter.read_chat(chat_id, limit),
+        lambda messages: {"note": _CHAT_MESSAGES_MARK, "chat_id": chat_id, "messages": messages},
+        f"read {chat_id}")
 
 
-def _owner_read_tool(operation, success, member_error, failure):
-    turn = _ACTIVE_TURN.get()
-    if turn is not None and not turn["authority"]:
-        return json.dumps({"success": False, "error": member_error})
+def _read_tool(operation, success, failure):
+    """Run one read against the live adapter and render its answer.
+
+    The gate is the caller's: `list` asks for the owner's authority, `read`
+    asks whose room this is. What is shared is the hop onto the adapter's loop
+    and the non-2xx contract -- a refusal from Plow reads as a refusal, and a
+    call that fell over never reads as an empty collection.
+    """
     if _live is None:
         return json.dumps({"success": False, "error": "the Plow Chat gateway is not connected"})
     adapter, loop = _live
@@ -5113,9 +5132,13 @@ def _plow_contacts(_args, **_kwargs):
     narrower: only a turn without the owner's authority is refused, since that
     is the one context where somebody else's words are steering the agent.
     """
-    return _owner_read_tool(
-        lambda adapter: adapter.contacts(), lambda contacts: {"contacts": contacts},
-        "your owner's contact book is not readable without the owner's authority", "read the contact book")
+    turn = _ACTIVE_TURN.get()
+    if turn is not None and not turn["authority"]:
+        return json.dumps({"success": False,
+                           "error": "your owner's contact book is not readable without "
+                                    "the owner's authority"})
+    return _read_tool(lambda adapter: adapter.contacts(), lambda contacts: {"contacts": contacts},
+                      "read the contact book")
 
 
 PLOW_CONTACTS_SCHEMA = {

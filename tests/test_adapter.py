@@ -8874,45 +8874,31 @@ def _read_rig(module, monkeypatch, *, current, rooms, record=None):
     return adapter
 
 
-def test_the_owners_own_chat_may_read_a_group(monkeypatch, tmp_path):
+@pytest.mark.parametrize("case, current, target, rooms, allowed", [
+    # The owner's own chat with the agent is the one room that may read another.
+    ("owner DM reads a group", "cht_dm", "cht_g",
+     {"cht_dm": _chat("cht_dm"), "cht_g": _chat("cht_g", group=True)}, True),
+    # Trust says what a group's members may ask for, never whose rooms may be recited to them.
+    ("trusted group reads the owner DM", "cht_g", "cht_dm",
+     {"cht_dm": _chat("cht_dm"), "cht_g": _chat("cht_g", group=True, trusted=True)}, False),
+    ("group reads another group", "cht_g", "cht_g2",
+     {"cht_g": _chat("cht_g", group=True), "cht_g2": _chat("cht_g2", group=True)}, False),
+    # Its own room discloses nothing new, wherever the turn is running.
+    ("group reads itself", "cht_g", "cht_g", {"cht_g": _chat("cht_g", group=True)}, True),
+])
+def test_only_the_owners_own_chat_reads_another_room(monkeypatch, tmp_path, case, current, target, rooms, allowed):
     module = _load(monkeypatch, tmp_path)
     record: list[Any] = []
-    _read_rig(module, monkeypatch, current="cht_dm", record=record,
-              rooms={"cht_dm": _chat("cht_dm"), "cht_g": _chat("cht_g", group=True)})
-    answer = json.loads(module._plow_send_message({"action": "read", "chat_id": "cht_g"}))
-    assert answer["success"] is True
-    assert answer["messages"][0]["body"] == "2pm please"
-    assert module._UNTRUSTED_MARK in answer["note"], "other people's words arrive marked as data"
-    assert record == [("cht_g", module.READ_DEFAULT_LIMIT)]
-
-
-def test_a_trusted_group_may_not_read_the_owners_own_chat(monkeypatch, tmp_path):
-    module = _load(monkeypatch, tmp_path)
-    record: list[Any] = []
-    _read_rig(module, monkeypatch, current="cht_g", record=record,
-              rooms={"cht_dm": _chat("cht_dm"), "cht_g": _chat("cht_g", group=True, trusted=True)})
-    answer = json.loads(module._plow_send_message({"action": "read", "chat_id": "cht_dm"}))
-    assert answer["success"] is False
-    assert "owner's own chat" in answer["error"]
-    assert record == [], "trust says what members may ask for, not whose rooms may be recited"
-
-
-def test_one_group_may_not_read_another(monkeypatch, tmp_path):
-    module = _load(monkeypatch, tmp_path)
-    record: list[Any] = []
-    _read_rig(module, monkeypatch, current="cht_g", record=record,
-              rooms={"cht_g": _chat("cht_g", group=True), "cht_g2": _chat("cht_g2", group=True)})
-    answer = json.loads(module._plow_send_message({"action": "read", "chat_id": "cht_g2"}))
-    assert answer["success"] is False and record == []
-
-
-def test_the_room_you_are_in_is_readable_anywhere(monkeypatch, tmp_path):
-    module = _load(monkeypatch, tmp_path)
-    record: list[Any] = []
-    _read_rig(module, monkeypatch, current="cht_g", record=record,
-              rooms={"cht_g": _chat("cht_g", group=True)})
-    answer = json.loads(module._plow_send_message({"action": "read", "chat_id": "cht_g", "limit": 5}))
-    assert answer["success"] is True and record == [("cht_g", 5)]
+    _read_rig(module, monkeypatch, current=current, rooms=rooms, record=record)
+    answer = json.loads(module._plow_send_message({"action": "read", "chat_id": target}))
+    assert answer["success"] is allowed, case
+    if allowed:
+        assert answer["messages"][0]["body"] == "2pm please"
+        assert module._UNTRUSTED_MARK in answer["note"], "other people's words arrive marked as data"
+        assert record == [(target, module.READ_DEFAULT_LIMIT)]
+    else:
+        assert "owner's own chat" in answer["error"]
+        assert record == [], "a refused read never reaches Plow"
 
 
 def test_a_turnless_call_reads_nothing(monkeypatch, tmp_path):
@@ -8922,6 +8908,15 @@ def test_a_turnless_call_reads_nothing(monkeypatch, tmp_path):
     module._ACTIVE_TURN.set(None)
     answer = json.loads(module._plow_send_message({"action": "read", "chat_id": "cht_dm"}))
     assert answer["success"] is False and "live turn" in answer["error"] and record == []
+
+
+def test_a_read_honours_its_limit(monkeypatch, tmp_path):
+    module = _load(monkeypatch, tmp_path)
+    record: list[Any] = []
+    _read_rig(module, monkeypatch, current="cht_g", rooms={"cht_g": _chat("cht_g", group=True)}, record=record)
+    assert json.loads(module._plow_send_message(
+        {"action": "read", "chat_id": "cht_g", "limit": 5}))["success"] is True
+    assert record == [("cht_g", 5)]
 
 
 def test_the_read_projection_keeps_a_photo_and_drops_a_failed_send(monkeypatch, tmp_path):

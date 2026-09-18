@@ -317,15 +317,31 @@ turn's own, the adapter mirrors the text into that chat's session as an
 assistant turn with upstream's `gateway.mirror` — the mechanism Hermes uses
 for cron and `hermes send` deliveries — on the delivery's own coroutine, so a
 caller that stopped waiting cannot strand a delivered message unrecorded. A
-chat's session is born on its first inbound message, so a chat that has never
-spoken has nowhere to record to: the adapter logs a warning and that chat
-will not remember the send. A thread `plow_send_message` opened for a person is
-in that state; one it resumed is handled like any other cross-chat send,
-which records the opener only where a session already exists (a thread
-resumed before anyone replied has none, and logs the same warning). Posting
-to the Plow API directly from a
-script bypasses all of this and leaves the target chat amnesiac; the tool
-exists so the model never has to.
+chat's session is born on its first inbound message, so at the moment a room is
+opened there is nowhere to record to. That room is no longer amnesiac: its
+first turn SEEDS the session from `GET /v1/chats/{uid}/messages` before the
+hand-off, so the opener is there as the agent's own assistant turn and the
+reply is read as an answer to it rather than as strangers talking. Only
+messages older than the burst being delivered are seeded, paging stops after
+two pages, and the delivery checkpoint is never moved — it records what was
+handed off, and seeded messages never were. Seeding and a cross-chat send take
+one per-chat lock, so a send that lands mid-seed waits rather than missing the
+session, and the rows stay in the order they were said. Both are best-effort:
+a failed read logs and the turn runs on whatever history exists. Seeded uids
+are remembered in-process only, so a restart between seeding and the
+checkpoint can redeliver one seeded inbound message as a turn — a visible
+duplicate, chosen over the silent loss a persisted cursor would produce.
+Posting to the Plow API directly from a
+script bypasses all of this; the tool exists so the model never has to.
+
+`plow_send_message` with `action=read` is how the agent finds out what a room
+said: it returns that chat's recent messages — sender, time, direction, body,
+and a count when something was attached — carrying the same untrusted marker,
+with failed sends left out. One room may read the others: the owner's own chat
+with this agent. Every other room may read only itself, trusted or not, because
+a group's trust says what its members may ask for and never whose other
+conversations may be recited in front of them. A call with no live turn reads
+nothing.
 
 ### Recall from other chats
 
