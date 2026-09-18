@@ -3001,20 +3001,7 @@ class PlowChatAdapter(BasePlatformAdapter):
                                 headers=self.auth) as resp:
                 _auth_raise_for_status(resp)
                 body = await resp.json(content_type=None)
-        chat = self._chats.get(chat_uid, {})
-        messages = []
-        for message in reversed(body.get("data") or []):   # the API pages newest first
-            if message.get("status") == "failed" or not (message.get("body") or "").strip():
-                continue
-            sender = message.get("sender") or {}
-            mine = sender.get("type") == "agent" and sender.get("relationship") == "self"
-            messages.append({
-                "from": "you" if mine else _speaker_name(sender, chat)[0],
-                "at": message.get("created_at"),
-                "direction": message.get("direction"),
-                "body": message.get("body"),
-            })
-        return messages
+        return _read_projection(body.get("data") or [], self._chats.get(chat_uid, {}))
 
     async def list_chats(self):
         """Every chat this credential can send to, as a compact listing.
@@ -3917,6 +3904,37 @@ async def _page_chat_messages(auth, chat_uid):
     return pages
 
 
+def _read_projection(page, chat):
+    """One page of the chat API as the rows a read hands the model, oldest last.
+
+    A message with no text is not an empty message: a photo lands with an empty
+    body and its attachments, and dropping it would answer "what did Joe say?"
+    with a silence he never sent. Its attachments are counted instead, so the
+    model can say a picture arrived and go looking for it rather than inventing
+    one. A failed send is the only thing left out -- it was never said.
+    """
+    rows = []
+    for message in reversed(page):           # the API pages newest first
+        if message.get("status") == "failed":
+            continue
+        body = (message.get("body") or "").strip()
+        attachments = message.get("attachments") or []
+        if not body and not attachments:
+            continue
+        sender = message.get("sender") or {}
+        mine = sender.get("type") == "agent" and sender.get("relationship") == "self"
+        row = {
+            "from": "you" if mine else _speaker_name(sender, chat)[0],
+            "at": message.get("created_at"),
+            "direction": message.get("direction"),
+            "body": message.get("body") or "",
+        }
+        if attachments:
+            row["attachments"] = len(attachments)
+        rows.append(row)
+    return rows
+
+
 def _seed_page_cut(pages, boundary_uid):
     """The rows strictly older than `boundary_uid`, oldest first, or None when
     the boundary was never reached.
@@ -4006,7 +4024,11 @@ def _seed_turn(message, chat, seen_uids):
         return None
     body = (message.get("body") or "").strip()
     if not body:
-        return None
+        # The live path delivers a message whose parts carry no text as
+        # "(attachment)"; a photo-only reply is something the room said.
+        if not (message.get("attachments") or []):
+            return None
+        body = "(attachment)"
     sender = message.get("sender") or {}
     if sender.get("type") == "agent" and sender.get("relationship") == "self":
         return "assistant", body

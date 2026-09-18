@@ -8922,3 +8922,33 @@ def test_a_turnless_call_reads_nothing(monkeypatch, tmp_path):
     module._ACTIVE_TURN.set(None)
     answer = json.loads(module._plow_send_message({"action": "read", "chat_id": "cht_dm"}))
     assert answer["success"] is False and "live turn" in answer["error"] and record == []
+
+
+def test_the_read_projection_keeps_a_photo_and_drops_a_failed_send(monkeypatch, tmp_path):
+    module = _load(monkeypatch, tmp_path)
+    chat = _chat("cht_g", group=True)
+    photo = _seed_message("m3", body="", created_at="2026-09-17T20:05:00+00:00")
+    photo["attachments"] = [{"uid": "att_1"}, {"uid": "att_2"}]
+    page = [  # newest first, as the API pages
+        _seed_message("m4", direction="outbound", body="never landed", status="failed", sender=OWN_LINE),
+        photo,
+        _seed_message("m2", body="2pm please"),
+        _seed_message("m1", direction="outbound", body="Hey Joe", status="sent", sender=OWN_LINE),
+    ]
+    rows = module._read_projection(page, chat)
+    assert [r["body"] for r in rows] == ["Hey Joe", "2pm please", ""], "oldest last, failed send omitted"
+    assert [r["from"] for r in rows] == ["you", "Joe", "Joe"]
+    assert [r["direction"] for r in rows] == ["outbound", "inbound", "inbound"]
+    assert rows[2]["attachments"] == 2, "a photo-only reply is something the room said"
+    assert "attachments" not in rows[1], "a text message carries no count"
+    empty = module._read_projection([_seed_message("m5", body="   ")], chat)
+    assert empty == [], "no text and nothing attached is not a message"
+
+
+def test_a_photo_only_message_is_seeded_as_the_live_path_delivers_it(monkeypatch, tmp_path):
+    module = _load(monkeypatch, tmp_path)
+    chat = _chat("cht_g", group=True)
+    photo = _seed_message("m1", body="")
+    photo["attachments"] = [{"uid": "att_1"}]
+    role, content = module._seed_turn(photo, chat, set())
+    assert role == "user" and content.endswith("(attachment)")
