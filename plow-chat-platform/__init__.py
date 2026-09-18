@@ -1447,6 +1447,7 @@ INBOUND_DEBOUNCE_SECONDS = 2.0
 # throttle in `send_typing` rather than beside it.
 TYPING_COOLDOWN_SECONDS = 60
 HAND_OFF_RETRY_SECONDS = 5.0
+NEW_AGENT_SECONDS = 3600  # see `_ensure_anchor`
 
 
 def _server_died(task):
@@ -3145,7 +3146,10 @@ class PlowChatAdapter(BasePlatformAdapter):
         never seen. So the read pages back to the newest message created
         before the agent, and a chat with none anchors empty; either way
         `_backfill` replays what came after. With no creation time (a 404
-        identity, or an API that does not serve it yet) it is the newest.
+        identity, or an API that does not serve it yet) it is the newest, and
+        so it is for an agent older than NEW_AGENT_SECONDS: that is an old
+        agent's lost checkpoint, not a new agent, and replaying back to its
+        birth would replay its whole history.
 
         A write failure raises: `_listen` and `_deliver` both retry (the
         reconnect loop, `_serve_chat`'s hand-off retry) and always pass no
@@ -3166,9 +3170,11 @@ class PlowChatAdapter(BasePlatformAdapter):
                 return
             uid = ""
             if http is not None:
-                born = self._identity["created_at"]
+                born = self._identity["created_at"] and datetime.fromisoformat(self._identity["created_at"])
+                if born and (datetime.now(timezone.utc) - born).total_seconds() > NEW_AGENT_SECONDS:
+                    born = None
                 async for m in self._history(http, chat_uid, limit=1):
-                    if born is None or datetime.fromisoformat(m["created_at"]) < datetime.fromisoformat(born):
+                    if not born or datetime.fromisoformat(m["created_at"]) < born:
                         uid = m["uid"]
                         break
             if not self._checkpoint(uid, chat_uid):

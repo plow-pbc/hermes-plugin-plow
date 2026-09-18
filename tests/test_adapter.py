@@ -41,7 +41,14 @@ NUMBER = "+16505550100"
 AGENT = "agt_1"
 ME = {"line": {"uid": "ln_e", "provider_key": NUMBER}, "agent": {"uid": AGENT}, "chats": [], "mcp_url": None,
       "signup": SIGNUP}
-BIRTH = "2026-09-18T19:17:32.143203Z"  # `agent.created_at`, once /me serves it; ME is the body before
+
+
+def _ago(minutes: float) -> str:
+    """A `created_at` as the API serves it, `minutes` before now."""
+    return (datetime.now(timezone.utc) - timedelta(minutes=minutes)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+BIRTH = _ago(2)  # a new agent's `agent.created_at`, once /me serves it; ME is the body before
 
 # What `GET /v1/lines` serves: the pool, as personas with a number and a
 # mailbox each. `agent_uid` is this owner's agent on the row: Elm is this
@@ -1075,9 +1082,9 @@ def test_guest_turn_is_not_tool_blocked(
 
 
 # Messages either side of the agent's birth.
-PRE = {"uid": "msg_pre_birth", "created_at": "2026-09-18T19:10:00.000000Z"}
-POST = {"uid": "msg_post_birth", "created_at": "2026-09-18T19:18:31.009000Z"}
-POST_2 = {"uid": "msg_post_birth_2", "created_at": "2026-09-18T19:18:40.000000Z"}
+PRE = {"uid": "msg_pre_birth", "created_at": _ago(10)}
+POST = {"uid": "msg_post_birth", "created_at": _ago(1)}
+POST_2 = {"uid": "msg_post_birth_2", "created_at": _ago(0.5)}
 
 
 @pytest.mark.parametrize(
@@ -1090,6 +1097,7 @@ POST_2 = {"uid": "msg_post_birth_2", "created_at": "2026-09-18T19:18:40.000000Z"
         ([POST_2, POST], 200, True, None, BIRTH, ["msg_post_birth", "msg_post_birth_2"]),
         ([PRE], 200, True, "msg_pre_birth", BIRTH, []),
         ([POST, PRE], 200, True, "msg_post_birth", None, []),
+        ([POST, PRE], 200, True, "msg_post_birth", _ago(60 * 24 * 30), []),
     ],
     ids=[
         "chat has history -> anchored before the socket",
@@ -1099,6 +1107,7 @@ POST_2 = {"uid": "msg_post_birth_2", "created_at": "2026-09-18T19:18:40.000000Z"
         "every message postdates the agent (one created the chat) -> no baseline, all backfilled",
         "the newest message predates the agent -> anchored at it, nothing backfilled",
         "birth unknown (the API does not serve it yet) -> anchored at newest, as before",
+        "an old agent that lost its checkpoint -> anchored at newest, its history not replayed",
     ],
 )
 async def test_startup_baseline_cases(
@@ -1131,7 +1140,9 @@ async def test_startup_baseline_cases(
 
     The first install skips only what predates the agent: a message sent
     between its creation and its first connect was never seen, and it is
-    often the owner's first text, the one that created the chat.
+    often the owner's first text, the one that created the chat. Only a new
+    agent's first install, though: an old one that lost its checkpoint would
+    replay its whole history.
     """
     module = _load(monkeypatch, tmp_path)
     adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
