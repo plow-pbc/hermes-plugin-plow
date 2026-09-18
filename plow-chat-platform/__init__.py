@@ -1508,6 +1508,7 @@ class PlowChatAdapter(BasePlatformAdapter):
         self._anchor_lock = asyncio.Lock()
         self._quiet_until = 0.0              # while now is under this, the gate is quiet without a read
         self._seen = []                      # (chat uid, message uid), newest last
+        self._seeded = set()                 # chats whose session this process has seeded
         self._seen_events = []               # event uids, newest last
         self._inbound = {}                   # chat uid -> (queue, the task serving it)
         # One durable owner of recovery state. The file existing means "this
@@ -3193,6 +3194,97 @@ class PlowChatAdapter(BasePlatformAdapter):
         _woken = True
         await self._handoff_message(event)
 
+    async def _seed_history(self, chat_uid, burst, source):
+        """Give a chat with no session its own recent history before the first
+        hand-off.
+
+        A room this agent opened is born at the stranger's REPLY: the opener it
+        sent from another chat's turn is in that chat's transcript, and the new
+        room's session starts empty. The group rule then reads the reply as
+        somebody else's conversation and the agent stays silent in a thread it
+        started. So the session is created here and filled from the durable
+        record before the turn that would otherwise begin blank.
+
+        Runs on `_serve_chat`'s own task, the single writer for this chat, so
+        nothing interleaves; `_deliver` retries on any exception, so it must be
+        safe to run twice -- an already-populated session is left alone. Never
+        fatal: a turn that never happens is worse than one that does not
+        remember, and a failed read leaves the room exactly as blank as it is
+        today.
+
+        The checkpoint is NOT advanced. It records what has been handed off,
+        and these messages never were; moving it would hide them from the
+        backfill that exists to recover undelivered turns.
+        """
+        if chat_uid in self._seeded:
+            return
+        self._seeded.add(chat_uid)
+        try:
+            from gateway.mirror import _find_session_id  # in-process with Hermes
+            from hermes_state_registry import acquire, release_or_close
+            session_id = _find_session_id(PLATFORM_NAME, chat_uid)
+            if session_id:
+                db = acquire()
+                try:
+                    existing = (db.get_session(session_id) or {}).get("message_count") or 0
+                finally:
+                    release_or_close(db)
+                if existing:
+                    return                   # the live socket already owns this room
+            else:
+                store = getattr(self.gateway_runner, "async_session_store", None)
+                if store is None:
+                    return
+                # The same source the event carries, so the session this creates
+                # is the one the turn routes to rather than a second row beside it.
+                session_id = (await store.get_or_create_session(source, touch_activity=False)).session_id
+            pages = []
+            async with aiohttp.ClientSession() as http:
+                cursor = None
+                for _ in range(SEED_MAX_PAGES):
+                    url = f"{BASE}/v1/chats/{chat_uid}/messages?limit={SEED_PAGE_SIZE}"
+                    if cursor:
+                        url += f"&starting_after={cursor}"
+                    async with http.get(url, headers=self.auth) as resp:
+                        _auth_raise_for_status(resp)
+                        body = await resp.json(content_type=None)
+                    page = body.get("data") or []
+                    pages.append(page)
+                    if not page or not body.get("has_more"):
+                        break
+                    cursor = page[-1]["uid"]
+            rows = _seed_page_cut(pages, burst[0].uid)
+            if rows is None:
+                log.info("[plow_chat] no seed for %s: the burst is not within %d pages",
+                         chat_uid, SEED_MAX_PAGES)
+                return
+            seen_uids = {uid for seen_chat, uid in self._seen if seen_chat == chat_uid}
+            seen_uids.update(message.uid for message in burst)
+            turns, uids = [], []
+            for message in rows:
+                turn = _seed_turn(message, self._chats.get(chat_uid, {}), seen_uids)
+                if turn is None:
+                    continue
+                role, content = turn
+                turns.append({"role": role, "content": content,
+                              "timestamp": _seed_epoch(message.get("created_at"))})
+                uids.append(message["uid"])
+            if not turns:
+                return
+            db = acquire()
+            try:
+                db.append_messages_batch(session_id, turns)
+            finally:
+                release_or_close(db)
+            # Seeded, so never delivered: an in-process backfill must not hand
+            # these to hermes a second time as fresh turns.
+            for uid in uids:
+                self._seen.append((chat_uid, uid))
+            del self._seen[:-512]
+            log.info("[plow_chat] seeded %d message(s) of history for %s", len(turns), chat_uid)
+        except Exception as exc:             # noqa: BLE001 - see the docstring
+            log.warning("[plow_chat] could not seed history for %s: %s", chat_uid, exc)
+
     async def _backfill(self, http, chat_uid):
         """Process what arrived while the socket was down.
 
@@ -3495,6 +3587,9 @@ class PlowChatAdapter(BasePlatformAdapter):
                                 and not burst[0].starts_slash_command
                                 and not media_urls and not media_types
                                 and any(part.has_text for part in burst))
+        # BEFORE the hand-off: the turn about to run is the one that needs the
+        # room's own history, and after it the session is no longer empty.
+        await self._seed_history(chat_uid, burst, event.source)
         await self._handoff_message(event)
         # Ack AFTER the handoff, never before: a checkpoint advanced first
         # would mark a message handled that hermes never accepted, and the
@@ -3789,6 +3884,73 @@ def _wiki_recall(session_id, user_message, platform, **_kwargs):
         lines.append(f"- {WIKI_RELAY_ROOT}/{page}.md ({title}): {text}")
     lines.append(_WIKI_END)
     return {"context": "\n".join(lines)}
+
+
+SEED_PAGE_SIZE = 100
+SEED_MAX_PAGES = 2                       # 200 rows; past that the boundary is not findable
+
+
+def _seed_page_cut(pages, boundary_uid):
+    """The rows strictly older than `boundary_uid`, oldest first, or None when
+    the boundary was never reached.
+
+    `pages` are the API's own pages, newest first, in the order they were
+    fetched. The boundary is the oldest message of the burst being delivered:
+    everything at or after it is either in that burst or queued behind it, and
+    writing any of it as history would put one message in the room twice --
+    once as context and once as its own turn. Not found inside the page budget
+    means we cannot say where the burst starts, so nothing is seeded: a room
+    with that much unseen traffic is not the just-opened chat this exists for.
+    """
+    rows, reached = [], False
+    for page in pages:
+        for message in page:
+            if message.get("uid") == boundary_uid:
+                reached = True
+                continue
+            if reached:
+                rows.append(message)
+    return list(reversed(rows)) if reached else None
+
+
+def _seed_epoch(created_at):
+    """`created_at` as the epoch seconds the transcript stores, or None.
+
+    The state layer accepts numbers and datetimes and silently falls back to
+    NOW for anything else, so an ISO string handed straight through would stamp
+    every seeded row with the moment it was seeded -- and the per-message
+    timestamps the model reads would say the room's whole history arrived at
+    once.
+    """
+    try:
+        return datetime.fromisoformat(str(created_at).replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+def _seed_turn(message, chat, seen_uids):
+    """One API message as the (role, content) pair its session row should hold,
+    or None when it is not history.
+
+    Ours is an assistant turn -- the opener a room the agent opened is missing.
+    A member, and a peer agent (which arrives as an INBOUND row whose sender is
+    an agent at `relationship: peer`), is somebody else speaking and keeps the
+    speaker label the live path gives it. A failed send is not history at all:
+    remembering having said something the network refused is the false memory
+    this whole path exists to prevent.
+    """
+    if message.get("status") == "failed":
+        return None
+    if message.get("uid") in seen_uids:
+        return None
+    body = (message.get("body") or "").strip()
+    if not body:
+        return None
+    sender = message.get("sender") or {}
+    if sender.get("type") == "agent" and sender.get("relationship") == "self":
+        return "assistant", body
+    name = _speaker_name(sender, chat)[0]
+    return "user", f"[{name}] {body}"
 
 
 def _mirror_sent(chat_uid, body):

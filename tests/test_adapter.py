@@ -8708,3 +8708,69 @@ async def test_only_the_owners_own_dm_text_interrupts_a_busy_run(
     runner.mode = "queue"                       # demoted: subagents or compression in flight
     assert await busy(handled[0], "k") is True
     assert calls == [("queue", handled[0].text)]
+
+
+# ── seeding a new chat's history (PLU-31) ────────────────────────────────────
+
+
+def _seed_message(uid: str, *, direction: str = "inbound", body: str = "hi",
+                  status: str = "received", sender: dict[str, Any] | None = None,
+                  created_at: str = "2026-09-17T20:01:58+00:00") -> dict[str, Any]:
+    if sender is None:
+        sender = {"type": "member", "uid": "cp_joe", "display_name": "Joe",
+                  "role": "member", "provider_key": "+19165204946"}
+    return {"uid": uid, "direction": direction, "body": body, "status": status,
+            "sender": sender, "created_at": created_at, "attachments": []}
+
+
+OWN_LINE = {"type": "agent", "relationship": "self", "line": {"uid": "ln_p1", "provider_key": NUMBER}}
+PEER_LINE = {"type": "agent", "relationship": "peer", "line": {"uid": "ln_p9", "provider_key": "+16505550199"}}
+
+
+def test_the_seed_keeps_only_what_is_older_than_the_burst(monkeypatch, tmp_path):
+    module = _load(monkeypatch, tmp_path)
+    page = [_seed_message("m4"), _seed_message("m3"), _seed_message("m2"), _seed_message("m1")]
+    rows = module._seed_page_cut([page], "m2")
+    assert [m["uid"] for m in rows] == ["m1"], "the burst and everything after it are delivered, not seeded"
+
+
+def test_a_burst_outside_the_page_budget_seeds_nothing(monkeypatch, tmp_path):
+    module = _load(monkeypatch, tmp_path)
+    pages = [[_seed_message(f"m{n}") for n in range(20, 10, -1)], [_seed_message(f"m{n}") for n in range(10, 0, -1)]]
+    assert module._seed_page_cut(pages, "gone") is None, "no boundary, no guess"
+    # The same pages, with a boundary that IS in the budget: the cut still works,
+    # so the None above is the missing boundary and not the paging.
+    assert [m["uid"] for m in module._seed_page_cut(pages, "m3")] == ["m1", "m2"]
+
+
+def test_our_own_outbound_is_the_assistant_turn_a_peer_is_not(monkeypatch, tmp_path):
+    module = _load(monkeypatch, tmp_path)
+    chat = _chat("cht_g", group=True)
+    ours = _seed_message("m1", direction="outbound", body="Hey Joe, this is Willow.",
+                         status="sent", sender=OWN_LINE)
+    assert module._seed_turn(ours, chat, set()) == ("assistant", "Hey Joe, this is Willow.")
+    peer = _seed_message("m2", body="not my turn", sender=PEER_LINE)
+    role, content = module._seed_turn(peer, chat, set())
+    assert role == "user" and "not my turn" in content
+    member = _seed_message("m3", body="2pm please")
+    assert module._seed_turn(member, chat, set()) == ("user", "[Joe] 2pm please")
+
+
+def test_a_failed_send_is_not_history(monkeypatch, tmp_path):
+    module = _load(monkeypatch, tmp_path)
+    failed = _seed_message("m1", direction="outbound", body="never landed",
+                           status="failed", sender=OWN_LINE)
+    assert module._seed_turn(failed, _chat("cht_g", group=True), set()) is None
+
+
+def test_a_message_already_seen_is_not_seeded_twice(monkeypatch, tmp_path):
+    module = _load(monkeypatch, tmp_path)
+    message = _seed_message("m1", body="2pm please")
+    assert module._seed_turn(message, _chat("cht_g", group=True), {"m1"}) is None
+
+
+def test_a_seeded_row_keeps_the_time_it_was_sent(monkeypatch, tmp_path):
+    module = _load(monkeypatch, tmp_path)
+    epoch = module._seed_epoch("2026-09-17T20:01:58Z")
+    assert epoch == datetime(2026, 9, 17, 20, 1, 58, tzinfo=timezone.utc).timestamp()
+    assert module._seed_epoch("not a time") is None, "an unparseable time is never NOW"
