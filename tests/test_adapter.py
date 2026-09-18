@@ -8708,3 +8708,51 @@ async def test_only_the_owners_own_dm_text_interrupts_a_busy_run(
     runner.mode = "queue"                       # demoted: subagents or compression in flight
     assert await busy(handled[0], "k") is True
     assert calls == [("queue", handled[0].text)]
+
+
+def test_a_new_rooms_opener_is_written_into_its_own_session(monkeypatch, tmp_path):
+    """Chunk 1: the room an agent opens is born at the stranger's reply, so the
+    opener has to be put in that room's transcript as the agent's own turn —
+    otherwise the group rule reads the reply as other people talking."""
+    module = _load(monkeypatch, tmp_path)
+    adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
+    adapter._chats["cht_new"] = _chat("cht_new", group=True)
+    sources: list[Any] = []
+    mirrored: list[Any] = []
+
+    async def get_or_create_session(source: Any, **kwargs: Any) -> Any:
+        sources.append((source.chat_id, source.chat_type, kwargs))
+        return SimpleNamespace(session_id="s-new")
+    adapter.gateway_runner = SimpleNamespace(
+        async_session_store=SimpleNamespace(get_or_create_session=get_or_create_session))
+    mirror = types.ModuleType("gateway.mirror")
+    mirror.mirror_to_session = lambda *args, **kwargs: mirrored.append((args, kwargs))
+    monkeypatch.setitem(sys.modules, "gateway.mirror", mirror)
+
+    asyncio.run(adapter._record_opener("cht_new", "Hey Joe, about lunch?"))
+
+    assert sources == [("cht_new", "group", {"touch_activity": False})], "the room's own session"
+    (platform, chat_uid, body), kwargs = mirrored[0]
+    assert (platform, chat_uid, body) == (module.PLATFORM_NAME, "cht_new", "Hey Joe, about lunch?")
+    assert kwargs["role"] == "assistant", "the agent said it"
+    assert kwargs["session_id"] == "s-new", "the session just created, not one guessed by origin"
+
+
+def test_a_session_that_cannot_be_written_never_fails_the_send(monkeypatch, tmp_path, caplog):
+    module = _load(monkeypatch, tmp_path)
+    adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
+    adapter._chats["cht_new"] = _chat("cht_new", group=True)
+    adapter.gateway_runner = SimpleNamespace(async_session_store=None)
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(adapter._record_opener("cht_new", "Hey Joe"))   # raises nothing
+    assert "opener not recorded" in caplog.text
+
+
+def test_the_tool_says_to_search_before_reporting_what_a_chat_said(monkeypatch, tmp_path):
+    """Chunk 2, prompt-only: the listing names rooms and shows nothing said in
+    them, so answering 'what did Joe say' from it is guessing."""
+    module = _load(monkeypatch, tmp_path)
+    description = module.PLOW_SEND_MESSAGE_SCHEMA["description"]
+    assert "session_search" in description
+    assert "Before you tell anyone what another chat did or did not say" in description
+    assert "answering from it is guessing" in description
