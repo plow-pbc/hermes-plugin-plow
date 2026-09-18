@@ -3220,39 +3220,21 @@ class PlowChatAdapter(BasePlatformAdapter):
             return
         self._seeded.add(chat_uid)
         try:
-            from gateway.mirror import _find_session_id  # in-process with Hermes
-            from hermes_state_registry import acquire, release_or_close
-            session_id = _find_session_id(PLATFORM_NAME, chat_uid)
-            if session_id:
-                db = acquire()
-                try:
-                    existing = (db.get_session(session_id) or {}).get("message_count") or 0
-                finally:
-                    release_or_close(db)
-                if existing:
-                    return                   # the live socket already owns this room
-            else:
+            # Every state.db call below runs in a worker thread: the registry
+            # handle, the read and the append are synchronous SQLite under a
+            # lock, and on this loop they would stall the socket that is
+            # feeding every other chat.
+            session_id = await asyncio.to_thread(_seeded_session_id, chat_uid)
+            if session_id is _SESSION_ALREADY_FILLED:
+                return                       # the live socket already owns this room
+            if session_id is None:
                 store = getattr(self.gateway_runner, "async_session_store", None)
                 if store is None:
                     return
                 # The same source the event carries, so the session this creates
                 # is the one the turn routes to rather than a second row beside it.
                 session_id = (await store.get_or_create_session(source, touch_activity=False)).session_id
-            pages = []
-            async with aiohttp.ClientSession() as http:
-                cursor = None
-                for _ in range(SEED_MAX_PAGES):
-                    url = f"{BASE}/v1/chats/{chat_uid}/messages?limit={SEED_PAGE_SIZE}"
-                    if cursor:
-                        url += f"&starting_after={cursor}"
-                    async with http.get(url, headers=self.auth) as resp:
-                        _auth_raise_for_status(resp)
-                        body = await resp.json(content_type=None)
-                    page = body.get("data") or []
-                    pages.append(page)
-                    if not page or not body.get("has_more"):
-                        break
-                    cursor = page[-1]["uid"]
+            pages = await _page_chat_messages(self.auth, chat_uid)
             rows = _seed_page_cut(pages, burst[0].uid)
             if rows is None:
                 log.info("[plow_chat] no seed for %s: the burst is not within %d pages",
@@ -3271,11 +3253,7 @@ class PlowChatAdapter(BasePlatformAdapter):
                 uids.append(message["uid"])
             if not turns:
                 return
-            db = acquire()
-            try:
-                db.append_messages_batch(session_id, turns)
-            finally:
-                release_or_close(db)
+            await asyncio.to_thread(_append_seeded_turns, session_id, turns)
             # Seeded, so never delivered: an in-process backfill must not hand
             # these to hermes a second time as fresh turns.
             for uid in uids:
@@ -3890,6 +3868,27 @@ SEED_PAGE_SIZE = 100
 SEED_MAX_PAGES = 2                       # 200 rows; past that the boundary is not findable
 
 
+async def _page_chat_messages(auth, chat_uid):
+    """Up to `SEED_MAX_PAGES` pages of a chat's messages, newest first, in the
+    order they were fetched. Stops early at the end of the feed."""
+    pages = []
+    async with aiohttp.ClientSession() as http:
+        cursor = None
+        for _ in range(SEED_MAX_PAGES):
+            url = f"{BASE}/v1/chats/{chat_uid}/messages?limit={SEED_PAGE_SIZE}"
+            if cursor:
+                url += f"&starting_after={cursor}"
+            async with http.get(url, headers=auth) as resp:
+                _auth_raise_for_status(resp)
+                body = await resp.json(content_type=None)
+            page = body.get("data") or []
+            pages.append(page)
+            if not page or not body.get("has_more"):
+                break
+            cursor = page[-1]["uid"]
+    return pages
+
+
 def _seed_page_cut(pages, boundary_uid):
     """The rows strictly older than `boundary_uid`, oldest first, or None when
     the boundary was never reached.
@@ -3911,6 +3910,40 @@ def _seed_page_cut(pages, boundary_uid):
             if reached:
                 rows.append(message)
     return list(reversed(rows)) if reached else None
+
+
+_SESSION_ALREADY_FILLED = object()
+
+
+def _seeded_session_id(chat_uid):
+    """This chat's session id when it exists and is EMPTY, the filled sentinel
+    when it already holds turns, or None when no session owns the chat yet.
+
+    Synchronous by nature -- state.db is SQLite behind a lock -- so every
+    caller runs it in a worker thread.
+    """
+    from gateway.mirror import _find_session_id  # in-process with Hermes
+    from hermes_state_registry import acquire, release_or_close
+    session_id = _find_session_id(PLATFORM_NAME, chat_uid)
+    if not session_id:
+        return None
+    db = acquire()
+    try:
+        if (db.get_session(session_id) or {}).get("message_count") or 0:
+            return _SESSION_ALREADY_FILLED
+    finally:
+        release_or_close(db)
+    return session_id
+
+
+def _append_seeded_turns(session_id, turns):
+    """Write the seeded rows in one transaction, off the event loop."""
+    from hermes_state_registry import acquire, release_or_close
+    db = acquire()
+    try:
+        db.append_messages_batch(session_id, turns)
+    finally:
+        release_or_close(db)
 
 
 def _seed_epoch(created_at):
@@ -3949,8 +3982,15 @@ def _seed_turn(message, chat, seen_uids):
     sender = message.get("sender") or {}
     if sender.get("type") == "agent" and sender.get("relationship") == "self":
         return "assistant", body
+    # Somebody else speaking, composed exactly as the live path composes it:
+    # the speaker prefix hermes writes from the event, then the same roster
+    # block `_deliver` prepends -- which is where every name written by the
+    # people in the room is marked as data and has its brackets escaped. A
+    # bare "[name] body" would put an unescaped display name at the very front
+    # of a turn, which is the one place a name can read as an instruction.
     name = _speaker_name(sender, chat)[0]
-    return "user", f"[{name}] {body}"
+    context = _collaboration_turn_context(chat, sender)
+    return "user", f"[{name}] {context}\n\n{body}" if context else f"[{name}] {body}"
 
 
 def _mirror_sent(chat_uid, body):
