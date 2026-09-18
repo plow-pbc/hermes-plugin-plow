@@ -41,6 +41,7 @@ NUMBER = "+16505550100"
 AGENT = "agt_1"
 ME = {"line": {"uid": "ln_e", "provider_key": NUMBER}, "agent": {"uid": AGENT}, "chats": [], "mcp_url": None,
       "signup": SIGNUP}
+BIRTH = "2026-09-18T19:17:32.143203Z"  # `agent.created_at`, once /me serves it; ME is the body before
 
 # What `GET /v1/lines` serves: the pool, as personas with a number and a
 # mailbox each. `agent_uid` is this owner's agent on the row: Elm is this
@@ -57,7 +58,7 @@ LINES = [
     {"uid": "ln_u", "provider_type": "imessage", "provider_key": "+16505550199", "display_name": None,
      "agent_uid": None},
 ]
-IDENTITY = {"signup": SIGNUP, "number": NUMBER, "agent": AGENT, "lines": LINES}
+IDENTITY = {"signup": SIGNUP, "number": NUMBER, "agent": AGENT, "created_at": None, "lines": LINES}
 
 # The four turn shapes every action gate is keyed on, plus no turn at all
 # (a cron run), as `_authority` derives them -- see the prompt matrix. The
@@ -339,7 +340,11 @@ class _Session:
         self.calls.append("history" if anchoring else "backfill")
         if self.status >= 400:
             return _Resp({}, status=self.status)
-        return _Resp({"data": self.anchor if anchoring else self.backfill, "has_more": False})
+        if not anchoring:
+            return _Resp({"data": self.backfill, "has_more": False})
+        after = url.partition("starting_after=")[2]
+        rest = self.anchor[[m["uid"] for m in self.anchor].index(after) + 1:] if after else self.anchor
+        return _Resp({"data": rest[:1], "has_more": len(rest) > 1})
 
     def post(self, url: str, **kw: Any) -> "_Resp":
         self.calls.append("ticket")
@@ -1069,17 +1074,31 @@ def test_guest_turn_is_not_tool_blocked(
         adapter._active_turn.reset(turn)
 
 
+# Messages either side of the agent's birth.
+PRE = {"uid": "msg_pre_birth", "created_at": "2026-09-18T19:10:00.000000Z"}
+POST = {"uid": "msg_post_birth", "created_at": "2026-09-18T19:18:31.009000Z"}
+POST_2 = {"uid": "msg_post_birth_2", "created_at": "2026-09-18T19:18:40.000000Z"}
+
+
 @pytest.mark.parametrize(
-    "history,history_status,connects,baseline",
+    "history,history_status,connects,baseline,born,delivered",
     [
-        ([{"uid": "msg_before_connect"}], 200, True, "msg_before_connect"),
-        ([], 200, True, None),
-        (None, 503, False, None),
+        ([{"uid": "msg_before_connect"}], 200, True, "msg_before_connect", None, []),
+        ([], 200, True, None, None, []),
+        (None, 503, False, None, None, []),
+        ([POST, PRE], 200, True, "msg_pre_birth", BIRTH, ["msg_post_birth"]),
+        ([POST_2, POST], 200, True, None, BIRTH, ["msg_post_birth", "msg_post_birth_2"]),
+        ([PRE], 200, True, "msg_pre_birth", BIRTH, []),
+        ([POST, PRE], 200, True, "msg_post_birth", None, []),
     ],
     ids=[
         "chat has history -> anchored before the socket",
         "chat is empty -> no baseline, and the backfill still pages",
         "history unreachable -> no socket, no baseline",
+        "a message sent after the agent was born -> anchored before it, and backfilled",
+        "every message postdates the agent (one created the chat) -> no baseline, all backfilled",
+        "the newest message predates the agent -> anchored at it, nothing backfilled",
+        "birth unknown (the API does not serve it yet) -> anchored at newest, as before",
     ],
 )
 async def test_startup_baseline_cases(
@@ -1089,6 +1108,8 @@ async def test_startup_baseline_cases(
     history_status: int,
     connects: bool,
     baseline: str | None,
+    born: str | None,
+    delivered: list[str],
 ) -> None:
     """Where the starting baseline comes from, and what happens when it cannot.
 
@@ -1107,17 +1128,25 @@ async def test_startup_baseline_cases(
     An unreachable history must not connect at all: an agent with no
     recoverable baseline is exactly the state the checkpoint rules out, and
     `_listen` already owns retrying a broken API.
+
+    The first install skips only what predates the agent: a message sent
+    between its creation and its first connect was never seen, and it is
+    often the owner's first text, the one that created the chat.
     """
     module = _load(monkeypatch, tmp_path)
     adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
+    adapter._identity = {**adapter._identity, "created_at": born}
 
     calls: list[str] = []
-    session = _Session(anchor=history or [], status=history_status, calls=calls)
+    session = _Session(anchor=history or [], backfill=history or [], status=history_status, calls=calls)
     monkeypatch.setattr(module.aiohttp, "ClientSession", lambda *a, **k: session)
+    handled: list[str] = []
+    monkeypatch.setattr(adapter, "_on_message", mock.AsyncMock(side_effect=lambda m, _chat: handled.append(m["uid"])))
     with mock.patch.object(module.asyncio, "sleep", side_effect=StopAsyncIteration):
         with pytest.raises(StopAsyncIteration):
             await adapter._listen()
 
+    assert handled == delivered, "what postdates the agent reaches hermes, oldest-first; nothing older does"
     assert ("ws_connect" in calls) is connects, calls
     if connects:
         assert calls.index("history") < calls.index("ws_connect"), "the baseline must predate anything the socket carries"
@@ -2145,7 +2174,7 @@ async def test_identity_refresh_reads_me_and_the_roster_and_only_a_200_speaks(
     class _ReachAndMeHTTP:
         def get(self, url: str, **kwargs: Any) -> _Resp:
             if url.endswith("/v1/agents/me"):
-                return _Resp(ME, status=me_status)
+                return _Resp({**ME, "agent": {"uid": AGENT, "created_at": BIRTH}}, status=me_status)
             if url.endswith("/v1/lines"):
                 return _Resp({"object": "list", "data": LINES, "has_more": False}, status=lines_status)
             return _Resp({"object": "list", "data": [_chat("cht_a")], "has_more": False})
@@ -2154,7 +2183,7 @@ async def test_identity_refresh_reads_me_and_the_roster_and_only_a_200_speaks(
     assert adapter.chat_uids == frozenset({"cht_a"}) and adapter._identity == held, "reach alone"
     if refreshes:
         refreshed = await module._refresh_identity(_ReachAndMeHTTP(), adapter.auth, held)
-        assert refreshed == (IDENTITY if me_status == 200 else {**held, "lines": LINES})
+        assert refreshed == ({**IDENTITY, "created_at": BIRTH} if me_status == 200 else {**held, "lines": LINES})
     else:
         with pytest.raises(RuntimeError):
             await module._refresh_identity(_ReachAndMeHTTP(), adapter.auth, held)

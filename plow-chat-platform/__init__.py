@@ -3139,6 +3139,14 @@ class PlowChatAdapter(BasePlatformAdapter):
         ack-after-handoff checkpoint `_deliver` writes becomes the first
         durable one.
 
+        Pre-existing means older than the agent, not older than this connect:
+        a turn sent between the agent's creation and its first connect --
+        often the owner's first text, the one that created the chat -- was
+        never seen. So the read pages back to the newest message created
+        before the agent, and a chat with none anchors empty; either way
+        `_backfill` replays what came after. With no creation time (a 404
+        identity, or an API that does not serve it yet) it is the newest.
+
         A write failure raises: `_listen` and `_deliver` both retry (the
         reconnect loop, `_serve_chat`'s hand-off retry) and always pass no
         `http` on the next attempt regardless of what this one tried, so a
@@ -3158,11 +3166,11 @@ class PlowChatAdapter(BasePlatformAdapter):
                 return
             uid = ""
             if http is not None:
-                async with http.get(f"{BASE}/v1/chats/{chat_uid}/messages?limit=1",
-                                    headers=self.auth) as resp:
-                    _auth_raise_for_status(resp)
-                    page = (await resp.json(content_type=None)).get("data") or []
-                uid = page[0]["uid"] if page else ""
+                born = self._identity["created_at"]
+                async for m in self._history(http, chat_uid, limit=1):
+                    if born is None or datetime.fromisoformat(m["created_at"]) < datetime.fromisoformat(born):
+                        uid = m["uid"]
+                        break
             if not self._checkpoint(uid, chat_uid):
                 raise OSError(f"could not persist the initial baseline at {self._checkpoint_path(chat_uid)}")
 
@@ -3193,6 +3201,26 @@ class PlowChatAdapter(BasePlatformAdapter):
         _woken = True
         await self._handoff_message(event)
 
+    async def _history(self, http, chat_uid, limit):
+        """A chat's messages newest-first, a page at a time on a uid cursor,
+        until the caller stops or they run out."""
+        cursor = None
+        while True:
+            url = f"{BASE}/v1/chats/{chat_uid}/messages?limit={limit}"
+            if cursor:
+                url += f"&starting_after={cursor}"
+            async with http.get(url, headers=self.auth) as resp:
+                # An error page is not an empty page: treating a 401 or a 500
+                # as "nothing missed" would move the baseline past the gap.
+                _auth_raise_for_status(resp)
+                body = await resp.json(content_type=None)
+            page = body.get("data") or []
+            for m in page:
+                yield m
+            if not page or not body.get("has_more"):
+                return
+            cursor = page[-1]["uid"]
+
     async def _backfill(self, http, chat_uid):
         """Process what arrived while the socket was down.
 
@@ -3210,29 +3238,14 @@ class PlowChatAdapter(BasePlatformAdapter):
         # chat, if the socket dropped before hermes accepted it. With no
         # checkpoint to stop at the loop simply pages to exhaustion, which for a
         # chat that started empty is the handful of messages actually missed.
-        missed, cursor = [], None
-        while True:
-            url = f"{BASE}/v1/chats/{chat_uid}/messages?limit=50"
-            if cursor:
-                url += f"&starting_after={cursor}"
-            async with http.get(url, headers=self.auth) as resp:
-                # An error page is not an empty page: treating a 401 or a 500
-                # as "nothing missed" would move the baseline past the gap.
-                _auth_raise_for_status(resp)
-                body = await resp.json(content_type=None)
-            page = body.get("data") or []
-            reached = False
-            for m in page:                   # newest-first
-                if m["uid"] == self._last_uids.get(chat_uid):
-                    reached = True
-                    break
-                missed.append(m)
-            # The checkpoint bounds this, not a page count: stopping early
-            # would drop the OLDEST missed messages while still advancing the
-            # baseline past them, which is the loss it exists to prevent.
-            if reached or not page or not body.get("has_more"):
+        missed = []
+        # The checkpoint bounds this, not a page count: stopping early
+        # would drop the OLDEST missed messages while still advancing the
+        # baseline past them, which is the loss it exists to prevent.
+        async for m in self._history(http, chat_uid, limit=50):
+            if m["uid"] == self._last_uids.get(chat_uid):
                 break
-            cursor = page[-1]["uid"]
+            missed.append(m)
         for m in reversed(missed):           # oldest-first
             await self._on_message(m, chat_uid)
         if missed:
