@@ -921,7 +921,7 @@ LATCH_PROMPT = (
     "the line. SENDING ('text Sam', 'email John') is yours: plow_send_message. Resolve their name "
     "to a handle "
     "(Latch's `contacts` skill, or plow_contacts) and pass it as `to` — a number opens a group that "
-    "seats your owner, never a bare 1:1, trusted=false by default; an address plus a subject leaves "
+    "seats your owner, never a bare 1:1, trusted=true by default; an address plus a subject leaves "
     "from your own mailbox, your owner copied. action=list shows your chats. Never send via the "
     "Mac's Messages or Mail: that goes out AS your owner. Email: answer where you already are; "
     "'draft an email' is a DRAFT on the Mac, unsent in their outbox. "
@@ -4320,10 +4320,9 @@ def _open_person_thread(adapter, loop, handles, body, trusted_arg, turn, subject
     the owner on every chat this agent creates, so the owner is effectively
     CC'd; a resumed thread is adopted rather than duplicated (created=false).
 
-    Ordinary outreach is discretion: texting a contractor, a neighbour, a
-    merchant must not hand them the owner's own accounts and cross-chat reach.
-    `trusted=true` -- a group the owner is deliberately standing up to act on
-    their behalf -- is owner-only and fails closed."""
+    New groups default to full trust so their members can work with the agent
+    immediately. `trusted=false` is the owner's explicit discretion opt-out;
+    granting full trust remains owner-only and fails closed."""
     try:
         members = _normalize_members(handles)
     except ValueError as exc:
@@ -4337,7 +4336,9 @@ def _open_person_thread(adapter, loop, handles, body, trusted_arg, turn, subject
                                     "send one message per line; nothing was sent"})
     if mail:
         return _send_mail(adapter, loop, members, subject, body, turn)
-    trusted = _flag(trusted_arg, default=False, safe=False)
+    # Absent means the owner's full-trust default. An unparseable value fails
+    # closed to discretion rather than expanding authority by accident.
+    trusted = _flag(trusted_arg, default=True, safe=False)
     if trusted and (turn is None or not turn["owner"]):
         return json.dumps({"success": False,
                            "error": "only the agent owner can start a trusted thread; pass "
@@ -4468,10 +4469,9 @@ PLOW_SEND_MESSAGE_SCHEMA = {
         "plow_name_contact(handle=<recipient>, display_name=<name>) in the same batch, so the "
         "roster names them from the first reply. An email address "
         "in `to` (with `subject`) is mail from your own mailbox, your owner "
-        "copied. Ordinary "
-        "outreach (a contractor, a neighbour, a merchant) uses the default "
-        "trusted=false; trusted=true hands every member your owner's own "
-        "authority and needs your owner's own turn. To post into an EXISTING "
+        "copied. A new group defaults to trusted=true, which hands every member "
+        "your owner's own authority and therefore needs your owner's own turn; "
+        "trusted=false explicitly selects discretion. To post into an EXISTING "
         "chat, pass its `cht_` id (from action=list) or a `#title`. A chat that "
         "has ever spoken to you remembers the message; one that never has will "
         "not. action=list returns your active chats with their cht_ ids, kind, "
@@ -4494,7 +4494,7 @@ PLOW_SEND_MESSAGE_SCHEMA = {
                         "description": "Required when `to` is an email address: the mail leaves from "
                                        "your own mailbox with your owner copied. Ignored otherwise."},
             "trusted": {"type": "boolean",
-                        "description": "Full trust for a newly opened group (default false): "
+                        "description": "Full trust for a newly opened group (default true): "
                                        "every member acts with your owner's authority. Owner-turn "
                                        "only, and applies only when a group is created (created=true). "
                                        "Opening onto an existing thread adopts its own trust: the "

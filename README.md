@@ -271,10 +271,9 @@ refused regardless of authority. Email sends and calendar-conflict overrides nee
 turn with the owner's authority; an email's approval posts in the room that asked,
 and an override posts none. A turn without authority cannot send to other chats, set
 goals, or list the owner's other rooms, and only the owner's own turn writes
-the owner's own name into the contact book. A group the owner deliberately stands up
-to act on their behalf begins trusted; ordinary outreach the owner asks for —
-texting a contractor, a neighbour, a merchant — begins with discretion, as
-does a group another member starts. Only the owner can change that later.
+the owner's own name into the contact book. Every group the owner asks the agent
+to open begins trusted; `trusted=false` explicitly selects discretion. A group
+another member starts begins with discretion. Only the owner can change that later.
 
 The `plow_set_conversation_trusted` tool writes the same API preference as the
 dashboard; it only succeeds on an owner-authored Plow Chat turn where the model
