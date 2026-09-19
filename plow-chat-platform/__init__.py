@@ -4336,9 +4336,9 @@ def _open_person_thread(adapter, loop, handles, body, trusted_arg, turn, subject
                                     "send one message per line; nothing was sent"})
     if mail:
         return _send_mail(adapter, loop, members, subject, body, turn)
-    # Absent means the owner's full-trust default. An unparseable value fails
-    # closed to discretion rather than expanding authority by accident.
-    trusted = _flag(trusted_arg, default=True, safe=False)
+    # Absent means full trust on the owner's turn. An authority-bearing member
+    # may still open a discretion room; only the owner can expand trust.
+    trusted = _flag(trusted_arg, default=bool(turn and turn["owner"]), safe=False)
     if trusted and (turn is None or not turn["owner"]):
         return json.dumps({"success": False,
                            "error": "only the agent owner can start a trusted thread; pass "
@@ -4494,7 +4494,8 @@ PLOW_SEND_MESSAGE_SCHEMA = {
                         "description": "Required when `to` is an email address: the mail leaves from "
                                        "your own mailbox with your owner copied. Ignored otherwise."},
             "trusted": {"type": "boolean",
-                        "description": "Full trust for a newly opened group (default true): "
+                        "description": "Full trust for a newly opened group (default true on the "
+                                       "owner's turn, false on a member turn): "
                                        "every member acts with your owner's authority. Owner-turn "
                                        "only, and applies only when a group is created (created=true). "
                                        "Opening onto an existing thread adopts its own trust: the "

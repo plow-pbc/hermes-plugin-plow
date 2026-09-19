@@ -4601,17 +4601,16 @@ def test_group_message_reports_adoption_separately_from_delivery(
         pytest.param("tru", _OWNER_DM, True, False, id="owner-unparseable-word-opts-out"),
         pytest.param("false", _OWNER_DM, True, False, id="owner-falsy-string-opts-out"),
         pytest.param(None, _OWNER_DM, True, True, id="owner-omitted-defaults-to-full-trust"),
-        pytest.param(None, _TRUSTED_MEMBER, False, True, id="trusted-member-cannot-expand-trust"),
+        pytest.param(None, _TRUSTED_MEMBER, True, False, id="trusted-member-omitted-opens-discretion"),
     ],
 )
 def test_starting_a_thread_gates_on_trust_and_turn_authority(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, trusted: Any, turn: dict[str, Any] | None,
     started: bool, resolved: bool,
 ) -> None:
-    """New owner-started groups default to full trust; explicit false opts out.
-    Full trust hands members the owner's own reach, so it remains owner-only,
-    and a falsy or unparseable value resolves to discretion rather than
-    accidentally opening a trusted line."""
+    """Owner-started groups default to full trust; explicit false opts out.
+    An authority-bearing member's omission opens a discretion group because
+    only the owner can expand trust; falsy and unparseable values do likewise."""
     module = _load(monkeypatch, tmp_path)
     sent: list[Any] = []
     _live_tool(module, monkeypatch, "start_group_thread",
