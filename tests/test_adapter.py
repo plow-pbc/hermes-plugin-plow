@@ -4600,7 +4600,7 @@ def test_group_message_reports_adoption_separately_from_delivery(
         pytest.param(False, None, False, False, id="plain-outside-turn"),
         pytest.param("tru", _OWNER_DM, True, False, id="owner-unparseable-word-opts-out"),
         pytest.param("false", _OWNER_DM, True, False, id="owner-falsy-string-opts-out"),
-        pytest.param(None, _OWNER_DM, True, False, id="owner-omitted-defaults-to-discretion"),
+        pytest.param(None, _OWNER_DM, True, True, id="owner-omitted-defaults-to-full-trust"),
         pytest.param(None, _TRUSTED_MEMBER, True, False, id="trusted-member-omitted-opens-discretion"),
     ],
 )
@@ -4608,11 +4608,9 @@ def test_starting_a_thread_gates_on_trust_and_turn_authority(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, trusted: Any, turn: dict[str, Any] | None,
     started: bool, resolved: bool,
 ) -> None:
-    """Ordinary outreach is discretion, so `trusted` defaults to false and any
-    authorized turn may open the thread: a trusted group's member and the owner
-    alike. Full trust hands members the owner's own reach, so trusted=true is
-    owner-only, and a falsy or unparseable value always resolves to discretion,
-    never full trust -- a typo cannot open a trusted line."""
+    """Owner-started groups default to full trust; explicit false opts out.
+    An authority-bearing member's omission opens a discretion group because
+    only the owner can expand trust; falsy and unparseable values do likewise."""
     module = _load(monkeypatch, tmp_path)
     sent: list[Any] = []
     _live_tool(module, monkeypatch, "start_group_thread",
@@ -4632,13 +4630,12 @@ def test_starting_a_thread_gates_on_trust_and_turn_authority(
 def test_send_message_does_not_ask_a_trust_question(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
 ) -> None:
-    """Opening a thread to text someone selects discretion by default, so the
-    schema never poses a trust question -- it states the trusted=false default
-    and that the group is owner-inclusive."""
+    """Opening a thread defaults to full trust without posing a trust question,
+    and the schema states both the default and the owner-inclusive shape."""
     module = _load(monkeypatch, tmp_path)
     desc = module.PLOW_SEND_MESSAGE_SCHEMA["description"]
     assert "Do you want them to be able to talk to me" not in desc
-    assert "trusted=false" in desc and "owner-inclusive" in desc
+    assert "trusted=true" in desc and "owner-inclusive" in desc
 
 
 def test_disconnected_gateway_sends_nothing(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> None:
@@ -7022,10 +7019,8 @@ def test_latch_section_renders_only_when_a_mac_is_connected(
                  # which is how a failed send got reported to an owner as
                  # delivered, with no record on any surface they can see.
                  "AS your owner",
-                 # Opening a thread to text someone must not hand them the
-                 # owner's authority: person-targeting selects trusted=false, so
-                 # the prompt states that default explicitly.
-                 "trusted=false",
+                 # A group the owner asks the agent to open begins trusted.
+                 "trusted=true",
                  # 'Email John' is the same verb as 'text Sam' now — the handle
                  # picks the transport — so the prompt must name the mailbox
                  # route rather than send the model to the Mac for a new email.
@@ -7946,7 +7941,7 @@ def test_person_targeting_opens_one_owner_inclusive_group(
     """A person -- one handle or several -- resolves to a single group the
     server seats the owner into, never a bare 1:1. Owner seating is server-side,
     so the tool's contract is exactly one start_group_thread call carrying the
-    handles and discretion (trusted=false)."""
+    handles and the full-trust default."""
     module = _load(monkeypatch, tmp_path)
     sent: list[Any] = []
     _live_tool(module, monkeypatch, "start_group_thread",
@@ -7954,7 +7949,7 @@ def test_person_targeting_opens_one_owner_inclusive_group(
     module._ACTIVE_TURN.set(_OWNER_DM)
     out = json.loads(module._plow_send_message({"to": to, "body": "meet Friday?"}))
     assert out["success"] is True and out["chat_id"] == "cht_new"
-    assert sent == [(members, "meet Friday?", False)]
+    assert sent == [(members, "meet Friday?", True)]
 
 
 def test_person_targeting_reuses_an_existing_group(
