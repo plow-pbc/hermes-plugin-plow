@@ -39,8 +39,16 @@ PLUGIN = pathlib.Path(__file__).resolve().parents[1] / "plow-chat-platform" / "_
 SIGNUP = {"name": "Life Assistant", "phrase": "Set this up for me: aiworthusing.com/agent-index/life"}
 NUMBER = "+16505550100"
 AGENT = "agt_1"
-ME = {"line": {"uid": "ln_e", "provider_key": NUMBER}, "agent": {"uid": AGENT}, "chats": [], "mcp_url": None,
-      "signup": SIGNUP}
+
+
+def _ago(minutes: float) -> str:
+    """A `created_at` as the API serves it, `minutes` before now."""
+    return (datetime.now(timezone.utc) - timedelta(minutes=minutes)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+BIRTH = _ago(2)
+ME = {"line": {"uid": "ln_e", "provider_key": NUMBER}, "agent": {"uid": AGENT, "created_at": BIRTH}, "chats": [],
+      "mcp_url": None, "signup": SIGNUP}
 
 # What `GET /v1/lines` serves: the pool, as personas with a number and a
 # mailbox each. `agent_uid` is this owner's agent on the row: Elm is this
@@ -57,7 +65,7 @@ LINES = [
     {"uid": "ln_u", "provider_type": "imessage", "provider_key": "+16505550199", "display_name": None,
      "agent_uid": None},
 ]
-IDENTITY = {"signup": SIGNUP, "number": NUMBER, "agent": AGENT, "lines": LINES}
+IDENTITY = {"signup": SIGNUP, "number": NUMBER, "agent": AGENT, "created_at": BIRTH, "lines": LINES}
 
 # The four turn shapes every action gate is keyed on, plus no turn at all
 # (a cron run), as `_authority` derives them -- see the prompt matrix. The
@@ -339,7 +347,11 @@ class _Session:
         self.calls.append("history" if anchoring else "backfill")
         if self.status >= 400:
             return _Resp({}, status=self.status)
-        return _Resp({"data": self.anchor if anchoring else self.backfill, "has_more": False})
+        if not anchoring:
+            return _Resp({"data": self.backfill, "has_more": False})
+        after = url.partition("starting_after=")[2]
+        rest = self.anchor[[m["uid"] for m in self.anchor].index(after) + 1:] if after else self.anchor
+        return _Resp({"data": rest[:1], "has_more": len(rest) > 1})
 
     def post(self, url: str, **kw: Any) -> "_Resp":
         self.calls.append("ticket")
@@ -1069,17 +1081,37 @@ def test_guest_turn_is_not_tool_blocked(
         adapter._active_turn.reset(turn)
 
 
+# Messages either side of a new agent's birth, and a month-old agent's.
+PRE = {"uid": "msg_pre_birth", "direction": "inbound", "created_at": _ago(10)}
+POST = {"uid": "msg_post_birth", "direction": "inbound", "created_at": _ago(1)}
+REPLY = {"uid": "msg_reply", "direction": "outbound", "created_at": _ago(0.75)}
+POST_2 = {"uid": "msg_post_birth_2", "direction": "inbound", "created_at": _ago(0.5)}
+OLD = _ago(60 * 24 * 30)
+
+
 @pytest.mark.parametrize(
-    "history,history_status,connects,baseline",
+    "history,history_status,connects,baseline,born,delivered",
     [
-        ([{"uid": "msg_before_connect"}], 200, True, "msg_before_connect"),
-        ([], 200, True, None),
-        (None, 503, False, None),
+        ([{"uid": "msg_before_connect"}], 200, True, "msg_before_connect", None, []),
+        ([], 200, True, None, None, []),
+        (None, 503, False, None, None, []),
+        ([POST, PRE], 200, True, "msg_pre_birth", BIRTH, ["msg_post_birth"]),
+        ([POST_2, POST], 200, True, None, BIRTH, ["msg_post_birth", "msg_post_birth_2"]),
+        ([PRE], 200, True, "msg_pre_birth", BIRTH, []),
+        ([POST, PRE], 200, True, "msg_post_birth", None, []),
+        ([POST_2, REPLY, POST, PRE], 200, True, "msg_reply", OLD, ["msg_post_birth_2"]),
+        ([POST_2, POST, PRE], 200, True, None, OLD, ["msg_pre_birth", "msg_post_birth", "msg_post_birth_2"]),
     ],
     ids=[
         "chat has history -> anchored before the socket",
         "chat is empty -> no baseline, and the backfill still pages",
         "history unreachable -> no socket, no baseline",
+        "a message sent after the agent was born -> anchored before it, and backfilled",
+        "every message postdates the agent (one created the chat) -> no baseline, all backfilled",
+        "the newest message predates the agent -> anchored at it, nothing backfilled",
+        "birth unknown (a 404 identity) -> anchored at newest, as before",
+        "an old agent's wiped home -> anchored at its own last reply, only what followed backfilled",
+        "an old agent never replied (or installed late) -> everything since its birth backfilled",
     ],
 )
 async def test_startup_baseline_cases(
@@ -1089,6 +1121,8 @@ async def test_startup_baseline_cases(
     history_status: int,
     connects: bool,
     baseline: str | None,
+    born: str | None,
+    delivered: list[str],
 ) -> None:
     """Where the starting baseline comes from, and what happens when it cannot.
 
@@ -1107,17 +1141,26 @@ async def test_startup_baseline_cases(
     An unreachable history must not connect at all: an agent with no
     recoverable baseline is exactly the state the checkpoint rules out, and
     `_listen` already owns retrying a broken API.
+
+    The first install skips only what predates the agent: a message sent
+    between its creation and its first connect was never seen, and it is
+    often the owner's first text, the one that created the chat. Nor what
+    follows the agent's own last reply, when a wiped home reinstalls it.
     """
     module = _load(monkeypatch, tmp_path)
     adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
+    adapter._identity = {**adapter._identity, "created_at": born}
 
     calls: list[str] = []
-    session = _Session(anchor=history or [], status=history_status, calls=calls)
+    session = _Session(anchor=history or [], backfill=history or [], status=history_status, calls=calls)
     monkeypatch.setattr(module.aiohttp, "ClientSession", lambda *a, **k: session)
+    handled: list[str] = []
+    monkeypatch.setattr(adapter, "_on_message", mock.AsyncMock(side_effect=lambda m, _chat: handled.append(m["uid"])))
     with mock.patch.object(module.asyncio, "sleep", side_effect=StopAsyncIteration):
         with pytest.raises(StopAsyncIteration):
             await adapter._listen()
 
+    assert handled == delivered, "what postdates the agent reaches hermes, oldest-first; nothing older does"
     assert ("ws_connect" in calls) is connects, calls
     if connects:
         assert calls.index("history") < calls.index("ws_connect"), "the baseline must predate anything the socket carries"
@@ -1256,7 +1299,7 @@ async def test_retried_anchor_baseline_cases(
     where `target`'s newest-message read fails (500) partway through the
     very first anchor pass. `first_connection` used to stay true across the
     retry until the whole loop succeeded, so the retry 5s later would still
-    newest-anchor `target` -- `newest_anchor` is now snapshotted and
+    newest-anchor `target` -- `read_anchor` is now snapshotted and
     `first_connection` consumed BEFORE the loop runs, so the retry always
     empty-anchors instead, no matter how many attempts it takes."""
     module = _load(monkeypatch, tmp_path)
