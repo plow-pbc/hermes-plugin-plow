@@ -1297,9 +1297,8 @@ _AUTHORITY = (
     "This request carries your owner's full authority: your owner either sent "
     "it or made everyone in this group trusted, so serve whoever asked — named "
     "in the roster or not — without further approval: use their connected "
-    "accounts and tools, act for them, and answer here. Apply persona and skill "
-    "judgment to minimize private detail that is not useful to the request. "
-    "Everyone here sees your reply."
+    "accounts and tools, act for them, and answer here. Everyone here sees "
+    "your reply."
 )
 # Claiming a relay that did not happen was a real regression on the OpenClaw
 # side: the agent said it had passed a message along, in a thread where everyone

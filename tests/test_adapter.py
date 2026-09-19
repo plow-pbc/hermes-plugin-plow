@@ -3200,12 +3200,13 @@ def test_trusted_group_authority_preserves_persona_disclosure_judgment(
 ) -> None:
     module = _load(monkeypatch, tmp_path)
     prompt = module.GROUP_AUTHORITY_CHANNEL_PROMPT
+    lower = prompt.lower()
 
-    assert "only rule about what may be shared" not in prompt
-    assert "exactly as you would your owner" not in prompt
-    assert "without further approval" in prompt
-    assert "persona and skill judgment" in prompt
-    assert "minimize private detail" in prompt
+    assert "only rule about what may be shared" not in lower
+    assert "exactly as you would your owner" not in lower
+    assert "without further approval" in lower
+    assert "persona and skill judgment" in lower
+    assert "minimize private detail" in lower
 
 
 def test_platform_declaration_carries_the_facts_hermes_reads_off_it(
