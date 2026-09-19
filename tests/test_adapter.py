@@ -3195,6 +3195,20 @@ def test_owner_turn_prompt_names_ownership(monkeypatch: pytest.MonkeyPatch, tmp_
     assert "owner" in module.OWNER_CHANNEL_PROMPT.lower()
 
 
+def test_trusted_group_authority_preserves_persona_disclosure_judgment(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
+) -> None:
+    module = _load(monkeypatch, tmp_path)
+    prompt = module.GROUP_AUTHORITY_CHANNEL_PROMPT
+    lower = prompt.lower()
+
+    assert "only rule about what may be shared" not in lower
+    assert "exactly as you would your owner" not in lower
+    assert "without further approval" in lower
+    assert "persona and skill judgment" in lower
+    assert "minimize private detail" in lower
+
+
 def test_platform_declaration_carries_the_facts_hermes_reads_off_it(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
 ) -> None:
