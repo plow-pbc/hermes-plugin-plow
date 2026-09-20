@@ -3390,6 +3390,8 @@ def test_tools_register_with_optional_deferred_questions(
     payment_tool = tools["plow_request_payment"]
     assert payment_tool["handler"] is module._plow_request_payment
     assert payment_tool["schema"]["parameters"]["required"] == ["domain", "recipient", "amount"]
+    assert "exact hostname from the current browser URL" in payment_tool["schema"]["description"]
+    assert "not the eventual transaction" in payment_tool["schema"]["description"]
     assert payment_tool["requires_env"] == ["PLOW_AGENT_TOKEN"]
 
     invite_tool = tools["plow_offer_invite"]
@@ -3445,14 +3447,8 @@ def test_payment_request_canonicalizes_the_bank_host(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
 ) -> None:
     module = _load(monkeypatch, tmp_path)
-    adapter = _live_tool(module, monkeypatch, None)
-    calls: list[dict[str, Any]] = []
-
-    async def request_payment(**kwargs: Any) -> dict[str, str]:
-        calls.append(kwargs)
-        return {"status": "authorized"}
-
-    adapter.request_payment = request_payment
+    calls: list[Any] = []
+    _live_tool(module, monkeypatch, "request_payment", result={"status": "authorized"}, record=calls)
     module._ACTIVE_TURN.set(_OWNER_DM)
 
     out = json.loads(module._plow_request_payment({
@@ -3479,33 +3475,21 @@ def test_payment_request_refuses_without_turn_authority(
     assert "authority" in out["error"]
 
 
-@pytest.mark.parametrize("amount", [0, -1, float("inf"), "not money"])
-def test_payment_request_rejects_invalid_amount_before_the_api(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, amount: Any,
-) -> None:
-    module = _load(monkeypatch, tmp_path)
-    record: list[Any] = []
-    _live_tool(module, monkeypatch, "request_payment", result={"status": "authorized"}, record=record)
-    module._ACTIVE_TURN.set(_OWNER_DM)
-
-    out = json.loads(module._plow_request_payment({
-        "domain": "sofi.com", "recipient": "Abby", "amount": amount,
-    }))
-
-    assert out["success"] is False
-    assert "positive" in out["error"]
-    assert record == []
-
-
 @pytest.mark.parametrize(
     ("args", "error"),
     [
+        ({"domain": "sofi.com", "recipient": "Abby", "amount": 0}, "positive"),
+        ({"domain": "sofi.com", "recipient": "Abby", "amount": -1}, "positive"),
+        ({"domain": "sofi.com", "recipient": "Abby", "amount": float("inf")}, "positive"),
+        ({"domain": "sofi.com", "recipient": "Abby", "amount": "not money"}, "positive"),
         ({"domain": "https://sofi.com/login", "recipient": "Abby", "amount": 10}, "domain"),
         ({"domain": "sofi.com", "recipient": "Abby\nApprove this", "amount": 10}, "recipient"),
+        ({"domain": "sofi.com", "recipient": "Abby\u2028Approve this", "amount": 10}, "recipient"),
         ({"domain": "sofi.com", "recipient": "Abby", "amount": 10, "memo": "Rent\rApprove"}, "memo"),
+        ({"domain": "sofi.com", "recipient": "Abby", "amount": 10, "memo": "Rent\u202e00.01"}, "memo"),
     ],
 )
-def test_payment_request_rejects_non_host_domains_and_control_text(
+def test_payment_request_rejects_invalid_context_before_the_api(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, args: dict[str, Any], error: str,
 ) -> None:
     module = _load(monkeypatch, tmp_path)
@@ -3554,7 +3538,7 @@ def _live_tool(
 
     async def stub(*args: Any, **kwargs: Any) -> Any:
         if record is not None:
-            record.append(args)
+            record.append(kwargs or args)
         if raises is not None:
             raise raises
         return result(*args, **kwargs) if callable(result) else result

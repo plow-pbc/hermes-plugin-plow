@@ -229,8 +229,8 @@ def _owner_dm(chat):
     return _is_solo_dm(chat) and len(members) == 1 and members[0].get("role") == "owner"
 
 
-def _message_delivery_unknown(status):
-    """A message POST answered with 408/424/5xx may have been accepted before the
+def _post_outcome_unknown(status):
+    """A POST answered with 408/424/5xx may have been accepted before the
     error surfaced (Plow maps ProviderAcceptedPersistenceError -> 424), so a retry
     -- or Hermes's plain-text fallback -- risks a double-send. The caller must treat
     it as delivered-unknown, never as a clean failure that is safe to resend.
@@ -2707,7 +2707,7 @@ class PlowChatAdapter(BasePlatformAdapter):
         endpoint = "voicememo" if voice else "messages"
         async with http.post(f"{BASE}/v1/chats/{chat_id}/{endpoint}",
                              json=payload, headers=self.auth) as resp:
-            if _message_delivery_unknown(resp.status):
+            if _post_outcome_unknown(resp.status):
                 # Classify on status BEFORE reading the body: a 408/424/5xx can
                 # carry an empty or non-JSON body, and parsing it first would
                 # raise past this branch -- the escape that lets a normal reply
@@ -2738,7 +2738,7 @@ class PlowChatAdapter(BasePlatformAdapter):
         try:
             async with http.post(f"{BASE}/v1/chats/{chat_uid}/messages", json=payload, headers=self.auth) as resp:
                 if resp.status >= 400:
-                    status = "delivery_unknown" if _message_delivery_unknown(resp.status) else "failed"
+                    status = "delivery_unknown" if _post_outcome_unknown(resp.status) else "failed"
                     raise _SequenceFailure(status, f"message POST HTTP {resp.status}", http_status=resp.status)
                 data = await resp.json(content_type=None)
                 if not isinstance(data.get("uid"), str) or not data["uid"]:
@@ -4309,7 +4309,7 @@ PLOW_SEND_SEQUENCE_SCHEMA = {
 
 def _send_error_result(exc):
     """A `_PlowSendError` as either outbound route reports it, over
-    `_message_delivery_unknown` -- which statuses mean "may have been accepted"
+    `_post_outcome_unknown` -- which statuses mean "may have been accepted"
     is that helper's to say, and it says it for the socket paths too.
 
     Neither route is safe to retry blind: start_group_thread mints a fresh
@@ -4317,7 +4317,7 @@ def _send_error_result(exc):
     unknown one reports unknown and forbids the retry rather than reading as a
     clean failure.
     """
-    if _message_delivery_unknown(exc.status):
+    if _post_outcome_unknown(exc.status):
         return json.dumps({
             "success": False, "status": exc.status, "delivery_unknown": True,
             "error": f"{exc.detail} — a {exc.status} can arrive after the message "
@@ -4982,14 +4982,14 @@ def _plow_request_payment(args, **_kwargs):
             "success": False,
             "error": "recipient is required; nothing was authorized",
         })
-    if any(ord(char) < 32 or ord(char) == 127 for char in recipient):
+    if not recipient.isprintable():
         return json.dumps({
             "success": False,
             "error": "recipient cannot contain control characters; nothing was authorized",
         })
     if memo is not None and (
         not isinstance(memo, str)
-        or any(ord(char) < 32 or ord(char) == 127 for char in memo)
+        or (memo != "" and not memo.isprintable())
     ):
         return json.dumps({
             "success": False,
@@ -5009,7 +5009,7 @@ def _plow_request_payment(args, **_kwargs):
             loop,
         ).result(timeout=20)
     except _PlowSendError as exc:
-        if exc.status != 408 and _is_refusal(exc.status):
+        if not _post_outcome_unknown(exc.status):
             return json.dumps({"success": False, "error": f"Plow declined ({exc.status}): {exc.detail}"})
         return json.dumps({
             "success": False,
@@ -5035,15 +5035,21 @@ def _plow_request_payment(args, **_kwargs):
 PLOW_REQUEST_PAYMENT_SCHEMA = {
     "name": "plow_request_payment",
     "description": (
-        "Authorize one payment before entering banking credentials. Plow immediately authorizes "
-        "payments at or below the owner's configured threshold; above it, Plow sends the owner a "
-        "single-use approval link. Call once with the bank domain, recipient, and exact USD amount. "
-        "An approval_required result means wait for the owner to use the link before filling the credential."
+        "Request one banking-credential release before attempting a declared payment. Call with "
+        "the exact hostname from the current browser URL, including any subdomain, the intended "
+        "recipient, and exact USD amount. Plow grants one single-use credential release immediately "
+        "at or below the owner's configured threshold; above it, Plow sends the owner a single-use "
+        "approval link. This authorizes the credential release on that hostname, not the eventual "
+        "transaction. An approval_required result means wait for the owner to use the link before "
+        "filling the credential."
     ),
     "parameters": {
         "type": "object",
         "properties": {
-            "domain": {"type": "string", "description": "Bank login domain, for example sofi.com."},
+            "domain": {
+                "type": "string",
+                "description": "Exact hostname from the current browser URL, including any subdomain.",
+            },
             "recipient": {"type": "string", "description": "Who will receive the payment."},
             "amount": {
                 "type": "number",

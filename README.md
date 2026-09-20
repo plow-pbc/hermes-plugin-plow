@@ -46,8 +46,8 @@ The directory is named for the plugin id so the install can be a directory copy:
 > `agent.created_at` on `GET /v1/agents/me` (a first install replays what reached a chat after
 > the agent was created — [`plow-pbc/plow#2103`](https://github.com/plow-pbc/plow/pull/2103)),
 > `POST /v1/payment-approvals` (`plow_request_payment` — the API immediately
-> authorizes a payment at or below the owner's configured threshold and sends
-> the owner a single-use approval link above it), and
+> grants one banking-credential release at or below the owner's configured
+> threshold and sends the owner a single-use approval link above it), and
 > `PUT /v1/contacts/{handle}` (`plow_name_contact` — the handle-keyed contact
 > book, superseding the per-participant contact route of
 > [`plow-pbc/plow#1752`](https://github.com/plow-pbc/plow/pull/1752),
