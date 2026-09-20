@@ -10,6 +10,7 @@ import contextvars
 import re
 import logging
 import os
+import random
 
 import aiohttp
 
@@ -20,15 +21,18 @@ BASE = os.environ.get("PLOW_API_BASE", "https://api.plow.co").rstrip("/")
 # against a dead backend, with no signal that anything was wrong.
 RECONNECT_BACKOFF_BASE_SECONDS = 30
 RECONNECT_BACKOFF_CAP_SECONDS = 300
-# The API closes every socket with this code as an instance goes down for a
-# rolling deploy (plow#2140). The backend is not dead -- another instance is
-# already accepting -- so this one close reconnects at once, unbacked off.
-WS_CLOSE_MOVED = 4010
+# How long the immediate first retry spreads itself over. One deploy drops
+# every agent at once, so a fleet reconnecting in lockstep is a thundering
+# herd against an API that is still bringing instances up.
+RECONNECT_JITTER_SECONDS = 0.25
 log = logging.getLogger(__name__)
 
 
 def _reconnect_backoff(attempt):
-    """Seconds to wait before retry number `attempt` (1-based)."""
+    """Seconds to wait before backed-off retry number `attempt` (1-based).
+
+    The first retry does not come from this curve at all -- see `_serve`.
+    """
     return min(RECONNECT_BACKOFF_BASE_SECONDS * (2 ** (attempt - 1)), RECONNECT_BACKOFF_CAP_SECONDS)
 
 
@@ -147,8 +151,7 @@ async def _serve(session, on_drop, on_connect, tag, *, on_fatal):
     The session calls `connected()` once its socket is up -- that, and only
     that, restarts the backoff. Elapsed time cannot stand in for it: a reach
     read, ticket mint or handshake that fails slowly takes just as long as a
-    healthy session and would pin the retry at the base forever. It returns
-    the close code its socket ended on, if it had one.
+    healthy session and would pin the retry at the base forever.
     """
     attempt = 0
 
@@ -158,10 +161,9 @@ async def _serve(session, on_drop, on_connect, tag, *, on_fatal):
         on_connect()
 
     while True:
-        close_code = None
         try:
             async with aiohttp.ClientSession() as http:
-                close_code = await session(http, connected)
+                await session(http, connected)
         except _PlowAuthError:
             log.error("[%s] credential refused (401) -- stopping the listen loop; "
                       "re-credential this agent", tag)
@@ -175,15 +177,22 @@ async def _serve(session, on_drop, on_connect, tag, *, on_fatal):
             log.warning("[%s] websocket error: %s", tag, type(exc).__name__)
         # Both endings, not just the raising one: a server-side CLOSE ends the
         # frame loop by returning, and leaving that path unmarked reported the
-        # line connected for the whole retry delay. That delay is 30s here, not
-        # the cap: a close means the socket was up, so `connected()` already
-        # reset the curve. Only repeated PRE-connect failures -- reach read,
-        # ticket mint, handshake -- ever climb to 300s.
+        # line connected for the whole retry delay. A close means the socket
+        # was up, so `connected()` already reset the curve. Only repeated
+        # PRE-connect failures -- reach read, ticket mint, handshake -- ever
+        # climb to 300s.
         on_drop()
-        if close_code == WS_CLOSE_MOVED:
-            continue
         attempt += 1
-        await asyncio.sleep(_reconnect_backoff(attempt))
+        # The first retry is immediate, whatever ended the session. The
+        # ordinary ending is a deploy: the load balancer drops the socket
+        # when the draining window expires, which arrives as a transport
+        # error with no close code at all, and the backend is already
+        # serving from another instance. Waiting 30s for it is 30s of a
+        # dead line. A SECOND consecutive failure is the first evidence
+        # that nothing is there to reconnect to, and that is where the
+        # curve starts.
+        await asyncio.sleep(random.random() * RECONNECT_JITTER_SECONDS if attempt == 1
+                            else _reconnect_backoff(attempt - 1))
 
 
 def _one_line(text):

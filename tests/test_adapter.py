@@ -1508,38 +1508,36 @@ class _Stop(Exception):
     """Raised out of the patched sleep, so `_serve`'s forever-loop ends."""
 
 
+NOW = None                                   # a retry the loop does not wait out
+IMMEDIATE_SECONDS = 0.3
+
+
 @pytest.mark.parametrize(
-    ("connects_on_attempt", "endings", "expected", "expected_drops"),
+    ("connects_on_attempt", "clean_close", "expected"),
     [
-        pytest.param(None, ["drop"], [30, 60, 120, 240, 300], 5, id="never-connects"),
-        pytest.param(2, ["drop"], [30, 30, 60], 3, id="one-healthy-session"),
+        pytest.param(None, False, [NOW, 30, 60, 120, 240, 300], id="never-connects"),
+        pytest.param(2, False, [NOW, NOW, 30], id="one-healthy-session"),
         # A server-side CLOSE ends the frame loop by returning, not raising.
-        pytest.param(None, [None], [30, 60], 2, id="graceful-close"),
-        # 4010 is a rolling deploy closing a socket the instance it lives on is
-        # about to stop serving. One more ending than the others reach, for the
-        # same two sleeps: that close reconnected at once AND spent no step of
-        # the curve, so the next real drop still starts at 30s.
-        pytest.param(1, [4010, "drop"], [30, 60], 3, id="moved-reconnects-at-once"),
-        pytest.param(1, [1001, "drop"], [30, 60], 2, id="any-other-close-waits"),
+        pytest.param(None, True, [NOW, 30], id="graceful-close"),
     ],
 )
-async def test_the_reconnect_backoff_grows_saturates_and_resets(
+async def test_the_first_reconnect_is_immediate_and_the_backoff_grows_from_the_second(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
-    connects_on_attempt: int | None, endings: list[Any], expected: list[int],
-    expected_drops: int,
+    connects_on_attempt: int | None, clean_close: bool, expected: list[float | None],
 ) -> None:
-    """Upstream's `_reconnect_backoff` curve: 30s doubling to a 300s cap -- not a flat 5s.
+    """One retry at once, then upstream's curve: 30s doubling to a 300s cap.
 
-    Flat retry was a regression (7253bad): 720 attempts an hour against a dead
-    backend. Reaching the socket restarts the curve, so the next outage starts
-    at 30s again rather than wherever the last one ended -- otherwise a
-    long-lived line ratchets toward the cap across unrelated drops and never
-    returns to base. Only `connected()` resets it: a slow *failure* takes just
-    as long as a healthy session, so elapsed time cannot stand in for it.
+    Nearly every ending is a deploy -- the load balancer drops the socket when
+    the draining window expires -- and the API is already serving from another
+    instance, so the line is dead for exactly as long as this loop waits. The
+    second consecutive failure is the first evidence of a real outage, and it
+    pays 30s, not the flat 5s a rewrite once left here (7253bad): 720 attempts
+    an hour against a dead backend.
 
-    `endings` scripts how each attempt ends -- a close code, or a raise -- with
-    the last entry repeating. Only 4010 skips the wait; the backend is up, so
-    waiting for it is 30s of a dead line for nothing.
+    Reaching the socket restarts the curve, so the next outage starts over
+    rather than ratcheting toward the cap across unrelated drops. Only
+    `connected()` resets it: a slow *failure* takes just as long as a healthy
+    session, so elapsed time cannot stand in for it.
     """
     transport = _load(monkeypatch, tmp_path)._transport
     slept: list[float] = []
@@ -1551,25 +1549,28 @@ async def test_the_reconnect_backoff_grows_saturates_and_resets(
         if len(slept) == len(expected):
             raise _Stop
 
-    async def session(http: Any, connected: Any) -> int | None:
+    async def session(http: Any, connected: Any) -> None:
         attempts["n"] += 1
         if attempts["n"] == connects_on_attempt:
             connected()                      # this row's one healthy socket
-        ending = endings[min(attempts["n"], len(endings)) - 1]
-        if ending == "drop":
-            raise RuntimeError("dropped")
-        return ending
+        if clean_close:
+            return
+        raise RuntimeError("dropped")
 
     monkeypatch.setattr(transport.asyncio, "sleep", fake_sleep)
     monkeypatch.setattr(transport.aiohttp, "ClientSession", lambda *a, **k: _Session())
     with pytest.raises(_Stop):
         await transport._serve(session, lambda: drops.append(1), lambda: None, "plow_chat",
                                on_fatal=lambda: None)
-    assert slept == expected
+    # Anything under the bar reads as NOW: an immediate retry is jittered, so
+    # it has no one value -- only a window, and it must stay inside it.
+    assert [NOW if seconds < IMMEDIATE_SECONDS else seconds for seconds in slept] == expected
+    assert all(seconds < transport.RECONNECT_JITTER_SECONDS
+               for seconds in slept if seconds < IMMEDIATE_SECONDS)
     # Every ended attempt marks the line down -- a session that returns is as
     # disconnected as one that raises, and reporting otherwise leaves the line
     # "connected" for the whole retry delay.
-    assert len(drops) == expected_drops
+    assert len(drops) == len(expected)
 
 
 @pytest.mark.parametrize("agent_name", [None, "Elm"], ids=["unnamed", "named"])

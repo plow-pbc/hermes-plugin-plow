@@ -136,7 +136,6 @@ class PlowEmailAdapter(BasePlatformAdapter):
                 async for frame in ws:
                     if frame.type == aiohttp.WSMsgType.TEXT:
                         await self._on_frame(frame.json(), http)
-                return ws.close_code
 
         await _serve(session, self._mark_disconnected, self._mark_connected, PLATFORM_NAME,
                      on_fatal=self._credential_refused)
