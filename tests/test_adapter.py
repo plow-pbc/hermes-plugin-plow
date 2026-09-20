@@ -3349,6 +3349,7 @@ def test_tools_register_with_optional_deferred_questions(
         "plow_name_contact",
         "plow_contacts",
         "plow_set_conversation_trusted",
+        "plow_request_payment",
         "plow_offer_invite",
         "plow_send_sequence",
     ]
@@ -3386,6 +3387,13 @@ def test_tools_register_with_optional_deferred_questions(
     trust_tool = tools["plow_set_conversation_trusted"]
     assert trust_tool["requires_env"] == ["PLOW_AGENT_TOKEN"]
 
+    payment_tool = tools["plow_request_payment"]
+    assert payment_tool["handler"] is module._plow_request_payment
+    assert payment_tool["schema"]["parameters"]["required"] == ["domain", "recipient", "amount"]
+    assert "frame_url reported by forms" in payment_tool["schema"]["description"]
+    assert "not the eventual transaction" in payment_tool["schema"]["description"]
+    assert payment_tool["requires_env"] == ["PLOW_AGENT_TOKEN"]
+
     invite_tool = tools["plow_offer_invite"]
     assert invite_tool["schema"]["parameters"] == {
         "type": "object",
@@ -3393,6 +3401,126 @@ def test_tools_register_with_optional_deferred_questions(
         "additionalProperties": False,
     }
     assert invite_tool["requires_env"] == ["PLOW_AGENT_TOKEN", "PLOW_HOME_CHANNEL"]
+
+
+async def test_payment_request_posts_declared_payment_context(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
+) -> None:
+    module = _load(monkeypatch, tmp_path)
+    adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
+    calls: list[tuple[str, str, Any]] = []
+
+    async def api(method: str, path: str, *, body: Any = None) -> dict[str, Any]:
+        calls.append((method, path, body))
+        return {"status": "approval_required", "expires_at": "2026-09-20T00:00:00Z"}
+
+    monkeypatch.setattr(adapter, "_tool_json", api)
+
+    result = await adapter.request_payment(
+        domain="www.sofi.com", recipient="Abby", amount="1500", memo="September rent"
+    )
+
+    assert result["status"] == "approval_required"
+    assert calls == [(
+        "POST",
+        "/v1/payment-approvals",
+        {"domain": "www.sofi.com", "recipient": "Abby", "amount": "1500", "memo": "September rent"},
+    )]
+
+
+@pytest.mark.parametrize("turn", [_OWNER_DM, _TRUSTED_MEMBER])
+def test_payment_request_uses_turn_authority_and_reports_api_decision(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, turn: dict[str, Any],
+) -> None:
+    module = _load(monkeypatch, tmp_path)
+    adapter = _live_tool(module, monkeypatch, "request_payment", result={"status": "authorized"})
+    module._ACTIVE_TURN.set(turn)
+
+    out = json.loads(module._plow_request_payment({
+        "domain": "sofi.com", "recipient": "Abby", "amount": 42.50,
+    }))
+
+    assert out == {"success": True, "status": "authorized"}
+
+
+def test_payment_request_canonicalizes_the_bank_host(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
+) -> None:
+    module = _load(monkeypatch, tmp_path)
+    calls: list[Any] = []
+    _live_tool(module, monkeypatch, "request_payment", result={"status": "authorized"}, record=calls)
+    module._ACTIVE_TURN.set(_OWNER_DM)
+
+    out = json.loads(module._plow_request_payment({
+        "domain": "WWW.SoFi.COM.", "recipient": "Abby", "amount": 42.50,
+    }))
+
+    assert out == {"success": True, "status": "authorized"}
+    assert calls[0]["domain"] == "www.sofi.com"
+
+
+@pytest.mark.parametrize("turn", [None, _DISCRETION_MEMBER])
+def test_payment_request_refuses_without_turn_authority(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, turn: dict[str, Any] | None,
+) -> None:
+    module = _load(monkeypatch, tmp_path)
+    _live_tool(module, monkeypatch, "request_payment", result={"status": "authorized"})
+    module._ACTIVE_TURN.set(turn)
+
+    out = json.loads(module._plow_request_payment({
+        "domain": "sofi.com", "recipient": "Abby", "amount": 42.50,
+    }))
+
+    assert out["success"] is False
+    assert "authority" in out["error"]
+
+
+@pytest.mark.parametrize(
+    ("args", "error"),
+    [
+        ({"domain": "sofi.com", "recipient": "Abby", "amount": 0}, "positive"),
+        ({"domain": "sofi.com", "recipient": "Abby", "amount": -1}, "positive"),
+        ({"domain": "sofi.com", "recipient": "Abby", "amount": float("inf")}, "positive"),
+        ({"domain": "sofi.com", "recipient": "Abby", "amount": "not money"}, "positive"),
+        ({"domain": "https://sofi.com/login", "recipient": "Abby", "amount": 10}, "domain"),
+        ({"domain": "sofi.com", "recipient": "Abby\nApprove this", "amount": 10}, "recipient"),
+        ({"domain": "sofi.com", "recipient": "Abby\u2028Approve this", "amount": 10}, "recipient"),
+        ({"domain": "sofi.com", "recipient": "Abby", "amount": 10, "memo": "Rent\rApprove"}, "memo"),
+        ({"domain": "sofi.com", "recipient": "Abby", "amount": 10, "memo": "Rent\u202e00.01"}, "memo"),
+    ],
+)
+def test_payment_request_rejects_invalid_context_before_the_api(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, args: dict[str, Any], error: str,
+) -> None:
+    module = _load(monkeypatch, tmp_path)
+    record: list[Any] = []
+    _live_tool(module, monkeypatch, "request_payment", result={"status": "authorized"}, record=record)
+    module._ACTIVE_TURN.set(_OWNER_DM)
+
+    out = json.loads(module._plow_request_payment(args))
+
+    assert out["success"] is False
+    assert error in out["error"]
+    assert record == []
+
+
+@pytest.mark.parametrize(
+    ("status", "unknown"),
+    [(408, True), (503, True), (422, False)],
+)
+def test_payment_request_treats_timeout_status_as_an_unknown_post(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, status: int, unknown: bool,
+) -> None:
+    module = _load(monkeypatch, tmp_path)
+    _live_tool(module, monkeypatch, "request_payment", raises=module._PlowSendError(status, "detail"))
+    module._ACTIVE_TURN.set(_OWNER_DM)
+
+    out = json.loads(module._plow_request_payment({
+        "domain": "sofi.com", "recipient": "Abby", "amount": 42.50,
+    }))
+
+    assert out.get("outcome_unknown", False) is unknown
+    assert ("do NOT retry" in out["error"]) is unknown
 
 
 def _live_tool(
@@ -3410,7 +3538,7 @@ def _live_tool(
 
     async def stub(*args: Any, **kwargs: Any) -> Any:
         if record is not None:
-            record.append(args)
+            record.append(kwargs or args)
         if raises is not None:
             raise raises
         return result(*args, **kwargs) if callable(result) else result
