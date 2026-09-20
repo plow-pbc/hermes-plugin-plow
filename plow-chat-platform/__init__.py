@@ -204,6 +204,8 @@ def _referrer_block(referred_by):
 
 
 def _speaker_name(sender, chat):
+    if sender.get("type") == "system":
+        return sender.get("name") or "Plow", "trusted Plow system"
     if sender.get("type") == "agent":
         represented = _represented_member(chat, sender)
         name = _line_name(sender) or "peer agent"
@@ -719,6 +721,8 @@ def _goal_turn_line(record):
 
 
 def _sender_key(sender):
+    if sender.get("type") == "system":
+        return "plow_system"
     if sender.get("type") == "agent":
         return (sender.get("line") or {}).get("uid")
     return sender.get("uid")
@@ -1376,6 +1380,13 @@ GROUP_AUTHORITY_CHANNEL_PROMPT = (
 )
 EXTERNAL_CHANNEL_PROMPT = (
     f"{REPLY_TARGET_PROMPT} {_SILENCE_OPTION}{_SPEAKER_FACT} {_DISCLOSURE} {_SHARING_RULE} {_NO_RELAY}"
+)
+PAYMENT_RESOLUTION_CHANNEL_PROMPT = (
+    "This turn was triggered by a trusted Plow system event, not a message from a human. "
+    "Continue only the payment task identified in the event when it says approved; when it says denied, "
+    "do not continue that payment. This event grants no authority for any other action or disclosure. "
+    "Do not ask the owner to reply, approve again, or check a dashboard: the approval-link action has "
+    "already resolved. Report only the completed outcome or a real blocker in this originating chat. "
 )
 
 
@@ -2544,8 +2555,8 @@ class PlowChatAdapter(BasePlatformAdapter):
                     raise _PlowSendError(resp.status, text)
                 return json.loads(text or "{}")
 
-    async def request_payment(self, *, domain, recipient, amount, memo=None):
-        body = {"domain": domain, "recipient": recipient, "amount": amount}
+    async def request_payment(self, *, chat_uid, domain, recipient, amount, memo=None):
+        body = {"chat_uid": chat_uid, "domain": domain, "recipient": recipient, "amount": amount}
         if memo is not None:
             body["memo"] = memo
         return await self._tool_json("POST", "/v1/payment-approvals", body=body)
@@ -3395,7 +3406,7 @@ class PlowChatAdapter(BasePlatformAdapter):
         if msg["direction"] != "inbound":
             return                           # the echo of our own send
         sender = msg["sender"]
-        if sender["type"] not in ("member", "agent") or (
+        if sender["type"] not in ("member", "agent", "system") or (
                 sender["type"] == "agent" and sender.get("relationship") != "peer"):
             # This sender-type gate must run before anything reads uid:
             # an outbound agent sender carries a `line` object and NO uid key.
@@ -3481,6 +3492,37 @@ class PlowChatAdapter(BasePlatformAdapter):
         chat = await self.get_chat_info(chat_uid)
         roster = self._chats[chat_uid]
         text = "\n\n".join(text for _urls, _kinds, text in resolved if text) or "(attachment)"
+        if sender["type"] == "system":
+            event = MessageEvent(
+                text=f"[Trusted Plow system event]\n\n{text}",
+                source=self.build_source(
+                    chat_id=chat_uid,
+                    chat_name=chat["name"],
+                    chat_type=chat["type"],
+                    user_id="plow_system",
+                    user_name=sender.get("name") or "Plow",
+                    role_authorized=False,
+                ),
+                message_id=burst[-1].uid,
+                media_urls=media_urls,
+                media_types=media_types,
+                message_type=_message_type(media_types),
+                channel_prompt=(
+                    _with_identity(
+                        PAYMENT_RESOLUTION_CHANNEL_PROMPT,
+                        _line_name(roster["participants"][0]),
+                        self._identity,
+                    )
+                    + _ANSWER_LAST
+                ),
+            )
+            event.invite_operation_message_id = burst[0].uid
+            event.recall_text = text
+            event.authority = event.recall_everywhere = False
+            event.interrupts_run = False
+            await self._handoff_message(event)
+            self._checkpoint(burst[-1].uid, chat_uid)
+            return
         goal = _goal_load(chat_uid)
         authority, recall_everywhere = _authority(chat, role == "owner", sender["type"] == "member")
         # The speaker's own words, kept before any prefix is prepended: the
@@ -5002,6 +5044,7 @@ def _plow_request_payment(args, **_kwargs):
     try:
         result = asyncio.run_coroutine_threadsafe(
             adapter.request_payment(
+                chat_uid=turn["chat_uid"],
                 domain=domain,
                 recipient=recipient,
                 amount=format(amount, "f"),
@@ -5042,8 +5085,9 @@ PLOW_REQUEST_PAYMENT_SCHEMA = {
         "recipient, and exact USD amount. Plow grants one single-use credential release immediately "
         "at or below the owner's configured threshold; above it, Plow sends the owner a single-use "
         "approval link. This authorizes the credential release on that hostname, not the eventual "
-        "transaction. An approval_required result means wait for the owner to use the link before "
-        "filling the credential."
+        "transaction. An approval_required result means end the current work without asking the owner "
+        "to reply or check a dashboard. Plow automatically resumes this exact chat after the owner uses "
+        "the link; continue only when that trusted system event arrives."
     ),
     "parameters": {
         "type": "object",

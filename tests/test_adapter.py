@@ -508,6 +508,12 @@ def _peer_envelope(event_id: str, chat_id: str, message_id: str) -> dict[str, An
     return frame
 
 
+def _system_envelope(event_id: str, chat_id: str, message_id: str, body: str) -> dict[str, Any]:
+    frame = _envelope(event_id, chat_id, message_id, body=body)
+    frame["data"]["message"]["sender"] = {"type": "system", "name": "Plow"}
+    return frame
+
+
 def _collaboration_chat() -> dict[str, Any]:
     return {
         "uid": "cht_a",
@@ -909,6 +915,42 @@ async def test_inbound_burst_boundaries(
     await adapter._on_frame(_envelope("evt_1_late", "cht_a", "msg_1"))
     await _settle(adapter)
     assert len(handled) == len(turns)
+
+
+async def test_payment_resolution_system_event_wakes_exact_chat_without_owner_authority(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    module = _load(monkeypatch, tmp_path)
+    adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
+    adapter._set_reach([_chat("cht_a")])
+    _mark_anchored(adapter, "cht_a")
+    module.INBOUND_DEBOUNCE_SECONDS = 0.01
+    handled: list[tuple[Any, dict[str, Any]]] = []
+
+    async def handle(event: Any) -> None:
+        await adapter.on_processing_start(event)
+        handled.append((event, dict(adapter._active_turn.get())))
+        await adapter.on_processing_complete(event, None)
+
+    monkeypatch.setattr(adapter, "handle_message", handle)
+    body = (
+        "Payment approved for $1500.00 to Abby at login.sofi.com. "
+        "Continue the payment task now."
+    )
+    await adapter._on_frame(_system_envelope("evt_payment", "cht_a", "msg_payment", body))
+    await _settle(adapter)
+
+    assert len(handled) == 1
+    event, turn = handled[0]
+    assert event.source.chat_id == "cht_a"
+    assert event.source.user_id == "plow_system"
+    assert event.source.role_authorized is False
+    assert event.authority is False
+    assert turn["authority"] is False
+    assert body in event.text
+    assert "trusted plow system event" in event.text.lower()
+    assert "Continue only the payment task" in event.channel_prompt
+    assert "not a message from a human" in event.channel_prompt
 
 
 async def test_burst_invite_operation_uses_oldest_uncheckpointed_uid(
@@ -3404,6 +3446,7 @@ def test_tools_register_with_optional_deferred_questions(
     assert payment_tool["schema"]["parameters"]["required"] == ["domain", "recipient", "amount"]
     assert "frame_url reported by forms" in payment_tool["schema"]["description"]
     assert "not the eventual transaction" in payment_tool["schema"]["description"]
+    assert "automatically resumes" in payment_tool["schema"]["description"]
     assert payment_tool["requires_env"] == ["PLOW_AGENT_TOKEN"]
 
     invite_tool = tools["plow_offer_invite"]
@@ -3429,14 +3472,20 @@ async def test_payment_request_posts_declared_payment_context(
     monkeypatch.setattr(adapter, "_tool_json", api)
 
     result = await adapter.request_payment(
-        domain="www.sofi.com", recipient="Abby", amount="1500", memo="September rent"
+        chat_uid="cht_a", domain="www.sofi.com", recipient="Abby", amount="1500", memo="September rent"
     )
 
     assert result["status"] == "approval_required"
     assert calls == [(
         "POST",
         "/v1/payment-approvals",
-        {"domain": "www.sofi.com", "recipient": "Abby", "amount": "1500", "memo": "September rent"},
+        {
+            "chat_uid": "cht_a",
+            "domain": "www.sofi.com",
+            "recipient": "Abby",
+            "amount": "1500",
+            "memo": "September rent",
+        },
     )]
 
 
