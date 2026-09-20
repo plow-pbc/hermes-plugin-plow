@@ -1583,10 +1583,10 @@ async def test_a_moved_close_reconnects_without_waiting_out_the_backoff(
 
     async def session(http: Any, connected: Any) -> int | None:
         attempts["n"] += 1
-        connected()
         if attempts["n"] > 1:
             raise RuntimeError("dropped")    # ends the loop through the sleep
-        return close_code
+        connected()                          # never on the drop: that would
+        return close_code                    # reset the curve and hide a step
 
     monkeypatch.setattr(transport.asyncio, "sleep", fake_sleep)
     monkeypatch.setattr(transport.aiohttp, "ClientSession", lambda *a, **k: _Session())
