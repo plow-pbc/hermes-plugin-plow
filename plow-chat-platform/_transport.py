@@ -20,6 +20,10 @@ BASE = os.environ.get("PLOW_API_BASE", "https://api.plow.co").rstrip("/")
 # against a dead backend, with no signal that anything was wrong.
 RECONNECT_BACKOFF_BASE_SECONDS = 30
 RECONNECT_BACKOFF_CAP_SECONDS = 300
+# The API closes every socket with this code as an instance goes down for a
+# rolling deploy (plow#2140). The backend is not dead -- another instance is
+# already accepting -- so this one close reconnects at once, unbacked off.
+WS_CLOSE_MOVED = 4010
 log = logging.getLogger(__name__)
 
 
@@ -143,7 +147,8 @@ async def _serve(session, on_drop, on_connect, tag, *, on_fatal):
     The session calls `connected()` once its socket is up -- that, and only
     that, restarts the backoff. Elapsed time cannot stand in for it: a reach
     read, ticket mint or handshake that fails slowly takes just as long as a
-    healthy session and would pin the retry at the base forever.
+    healthy session and would pin the retry at the base forever. It returns
+    the close code its socket ended on, if it had one.
     """
     attempt = 0
 
@@ -153,9 +158,10 @@ async def _serve(session, on_drop, on_connect, tag, *, on_fatal):
         on_connect()
 
     while True:
+        close_code = None
         try:
             async with aiohttp.ClientSession() as http:
-                await session(http, connected)
+                close_code = await session(http, connected)
         except _PlowAuthError:
             log.error("[%s] credential refused (401) -- stopping the listen loop; "
                       "re-credential this agent", tag)
@@ -174,6 +180,8 @@ async def _serve(session, on_drop, on_connect, tag, *, on_fatal):
         # reset the curve. Only repeated PRE-connect failures -- reach read,
         # ticket mint, handshake -- ever climb to 300s.
         on_drop()
+        if close_code == WS_CLOSE_MOVED:
+            continue
         attempt += 1
         await asyncio.sleep(_reconnect_backoff(attempt))
 

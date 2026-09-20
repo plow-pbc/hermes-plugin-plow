@@ -1560,6 +1560,44 @@ async def test_the_reconnect_backoff_grows_saturates_and_resets(
     assert len(drops) == len(expected)
 
 
+@pytest.mark.parametrize(
+    ("close_code", "attempts_before_the_first_sleep"),
+    [
+        pytest.param(4010, 2, id="moved"),
+        pytest.param(1001, 1, id="any-other-close"),
+    ],
+)
+async def test_a_moved_close_reconnects_without_waiting_out_the_backoff(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
+    close_code: int, attempts_before_the_first_sleep: int,
+) -> None:
+    """4010 is the rolling deploy closing a socket an instance is about to stop
+    serving; the backend is up, so waiting 30s for it is 30s of a dead line."""
+    transport = _load(monkeypatch, tmp_path)._transport
+    slept: list[float] = []
+    attempts = {"n": 0}
+
+    async def fake_sleep(seconds: float) -> None:
+        slept.append(seconds)
+        raise _Stop
+
+    async def session(http: Any, connected: Any) -> int | None:
+        attempts["n"] += 1
+        connected()
+        if attempts["n"] > 1:
+            raise RuntimeError("dropped")    # ends the loop through the sleep
+        return close_code
+
+    monkeypatch.setattr(transport.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(transport.aiohttp, "ClientSession", lambda *a, **k: _Session())
+    with pytest.raises(_Stop):
+        await transport._serve(session, lambda: None, lambda: None, "plow_chat",
+                               on_fatal=lambda: None)
+    assert attempts["n"] == attempts_before_the_first_sleep
+    # Nor does it spend a step of the curve: the next real drop still waits 30s.
+    assert slept == [30]
+
+
 @pytest.mark.parametrize("agent_name", [None, "Elm"], ids=["unnamed", "named"])
 @pytest.mark.parametrize(
     ("group", "role", "base"),
