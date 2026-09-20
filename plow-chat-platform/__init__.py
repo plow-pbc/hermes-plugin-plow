@@ -3351,6 +3351,7 @@ class PlowChatAdapter(BasePlatformAdapter):
                     # Paced work does not outlive the session that can
                     # deliver instructions to stop it.
                     self._goal_pause_wakes()
+                return ws.close_code
 
         await _serve(session, self._mark_disconnected, self._mark_connected, PLATFORM_NAME,
                      on_fatal=self._credential_refused)
