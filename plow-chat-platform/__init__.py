@@ -3494,7 +3494,10 @@ class PlowChatAdapter(BasePlatformAdapter):
         text = "\n\n".join(text for _urls, _kinds, text in resolved if text) or "(attachment)"
         if sender["type"] == "system":
             event = MessageEvent(
-                text=f"[Trusted Plow system event]\n\n{text}",
+                text=(
+                    "[Trusted Plow system event]\n\n"
+                    f"{_untrusted('payment resolution details', text)}"
+                ),
                 source=self.build_source(
                     chat_id=chat_uid,
                     chat_name=chat["name"],
@@ -3515,6 +3518,7 @@ class PlowChatAdapter(BasePlatformAdapter):
                     )
                     + _ANSWER_LAST
                 ),
+                allow_gateway_control=False,
             )
             event.invite_operation_message_id = burst[0].uid
             event.recall_text = text

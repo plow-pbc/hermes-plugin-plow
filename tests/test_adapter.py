@@ -949,6 +949,8 @@ async def test_payment_resolution_system_event_wakes_exact_chat_without_owner_au
     assert turn["authority"] is False
     assert body in event.text
     assert "trusted plow system event" in event.text.lower()
+    assert module._UNTRUSTED_MARK in event.text
+    assert event.allow_gateway_control is False
     assert "Continue only the payment task" in event.channel_prompt
     assert "not a message from a human" in event.channel_prompt
 

@@ -47,14 +47,17 @@ The directory is named for the plugin id so the install can be a directory copy:
 > the agent was created — [`plow-pbc/plow#2103`](https://github.com/plow-pbc/plow/pull/2103)),
 > `POST /v1/payment-approvals` (`plow_request_payment` — the API immediately
 > grants one banking-credential release at or below the owner's configured
-> threshold and sends the owner a single-use approval link above it), and
+> threshold and sends the owner a single-use approval link above it; pin this
+> plugin before deploying the paired API emitter so its `system` continuation
+> cannot reach a consumer that does not recognize it), and
 > `PUT /v1/contacts/{handle}` (`plow_name_contact` — the handle-keyed contact
 > book, superseding the per-participant contact route of
 > [`plow-pbc/plow#1752`](https://github.com/plow-pbc/plow/pull/1752),
 > "Owner contacts"). Hermes hosts
 > without deferred-question support still run Plow Chat and standing-consent
-> invites, but skip the ask-owner-first invite flow. Deploy the API first, and
-> only then bump `PLOW_CHAT_PLUGIN_SHA` in `plow-hermes-agent` (and
+> invites, but skip the ask-owner-first invite flow. Except for the payment
+> continuation ordering above, deploy the API first, and only then bump
+> `PLOW_CHAT_PLUGIN_SHA` in `plow-hermes-agent` (and
 > `agent-mgr`'s `images.hermes_local` base tag, which can't move past it).
 > Installing this plugin before the API is available fails loudly instead of
 > silently skipping delivery.
