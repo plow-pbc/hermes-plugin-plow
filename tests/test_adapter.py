@@ -3538,6 +3538,25 @@ def test_payment_request_refuses_without_turn_authority(
     assert "authority" in out["error"]
 
 
+def test_payment_request_refuses_email_turn_that_cannot_resume(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    module = _load(monkeypatch, tmp_path)
+    _live_tool(module, monkeypatch, "request_payment", result={"status": "authorized"})
+    module._ACTIVE_TURN.set(
+        {"chat_uid": "cht_email", "owner": True, "authority": True, "email": True}
+    )
+
+    out = json.loads(
+        module._plow_request_payment(
+            {"domain": "sofi.com", "recipient": "Abby", "amount": 42.50}
+        )
+    )
+
+    assert out["success"] is False
+    assert "phone chat" in out["error"]
+
+
 @pytest.mark.parametrize(
     ("args", "error"),
     [

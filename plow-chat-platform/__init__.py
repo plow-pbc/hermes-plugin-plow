@@ -5002,6 +5002,11 @@ def _plow_request_payment(args, **_kwargs):
             "success": False,
             "error": "a payment request requires an active turn with the owner's authority; nothing was authorized",
         })
+    if turn.get("email"):
+        return json.dumps({
+            "success": False,
+            "error": "payment approval requires an active Plow phone chat so Plow can resume it; nothing was authorized",
+        })
     domain = str(args.get("domain") or "").strip().lower().rstrip(".")
     recipient = str(args.get("recipient") or "").strip()
     memo = args.get("memo")
@@ -5083,8 +5088,9 @@ def _plow_request_payment(args, **_kwargs):
 PLOW_REQUEST_PAYMENT_SCHEMA = {
     "name": "plow_request_payment",
     "description": (
-        "Request one banking-credential release before attempting a declared payment. Call with "
-        "the exact hostname of the frame containing the bank field — the frame_url reported by forms — "
+        "Request one banking-credential release before attempting a declared payment. Use this tool "
+        "only from a Plow phone chat, where Plow can resume the task after approval. Provide the exact "
+        "hostname of the frame containing the bank field — the frame_url reported by forms — "
         "including any subdomain, the intended "
         "recipient, and exact USD amount. Plow grants one single-use credential release immediately "
         "at or below the owner's configured threshold; above it, Plow sends the owner a single-use "
