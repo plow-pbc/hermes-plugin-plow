@@ -5036,7 +5036,8 @@ PLOW_REQUEST_PAYMENT_SCHEMA = {
     "name": "plow_request_payment",
     "description": (
         "Request one banking-credential release before attempting a declared payment. Call with "
-        "the exact hostname from the current browser URL, including any subdomain, the intended "
+        "the exact hostname of the frame containing the bank field — the frame_url reported by forms — "
+        "including any subdomain, the intended "
         "recipient, and exact USD amount. Plow grants one single-use credential release immediately "
         "at or below the owner's configured threshold; above it, Plow sends the owner a single-use "
         "approval link. This authorizes the credential release on that hostname, not the eventual "
@@ -5048,7 +5049,10 @@ PLOW_REQUEST_PAYMENT_SCHEMA = {
         "properties": {
             "domain": {
                 "type": "string",
-                "description": "Exact hostname from the current browser URL, including any subdomain.",
+                "description": (
+                    "Exact hostname of the frame containing the bank field, from the frame_url "
+                    "reported by forms, including any subdomain."
+                ),
             },
             "recipient": {"type": "string", "description": "Who will receive the payment."},
             "amount": {

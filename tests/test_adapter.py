@@ -3390,7 +3390,7 @@ def test_tools_register_with_optional_deferred_questions(
     payment_tool = tools["plow_request_payment"]
     assert payment_tool["handler"] is module._plow_request_payment
     assert payment_tool["schema"]["parameters"]["required"] == ["domain", "recipient", "amount"]
-    assert "exact hostname from the current browser URL" in payment_tool["schema"]["description"]
+    assert "frame_url reported by forms" in payment_tool["schema"]["description"]
     assert "not the eventual transaction" in payment_tool["schema"]["description"]
     assert payment_tool["requires_env"] == ["PLOW_AGENT_TOKEN"]
 
