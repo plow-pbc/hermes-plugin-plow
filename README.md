@@ -565,10 +565,10 @@ Both halves need the attachments API — `plow-pbc/plow#1435`. Against an older
 API the inbound path sees no `attachments` field (a `KeyError`, loud, per
 REVIEW.md) and an outbound declare returns `404`. That `KeyError` fires inside
 the frame loop on every inbound message, so the socket is torn down and
-reconnected, and the phone line is mute in between. That gap is **30 seconds**,
-not the five this warning used to name: the failure is post-connect, so the
-socket has already called `connected()` and reset the backoff, and each retry
-starts the curve over rather than climbing it. Six times longer, every message:
+reconnected, and the phone line is mute in between. The first retry is
+immediate (jittered under 250ms), but the socket dies far too fast to count as
+a healthy session, so every retry after it climbs the curve: **30 seconds, then
+60, to a five-minute cap**. Each message mutes the line for longer than the last:
 `PLOW_CHAT_PLUGIN_SHA` in `plow-hermes-agent` must not be bumped to this
 commit — and `agent-mgr`'s `images.hermes_local` base tag can't move past it
 — until `plow-pbc/plow#1435` is deployed to every API the fleet's agents talk
