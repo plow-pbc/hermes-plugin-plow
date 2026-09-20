@@ -4955,7 +4955,7 @@ def _plow_request_payment(args, **_kwargs):
             "success": False,
             "error": "a payment request requires an active turn with the owner's authority; nothing was authorized",
         })
-    domain = str(args.get("domain") or "").strip()
+    domain = str(args.get("domain") or "").strip().lower().rstrip(".")
     recipient = str(args.get("recipient") or "").strip()
     memo = args.get("memo")
     try:
@@ -4967,15 +4967,33 @@ def _plow_request_payment(args, **_kwargs):
             "success": False,
             "error": "amount must be a positive USD value no greater than 9999.999999; nothing was authorized",
         })
-    if not domain or not recipient:
+    hostname = re.fullmatch(
+        r"(?=.{1,253}\Z)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
+        r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?",
+        domain,
+    )
+    if hostname is None:
         return json.dumps({
             "success": False,
-            "error": "domain and recipient are required; nothing was authorized",
+            "error": "domain must be a DNS hostname with no scheme, path, or port; nothing was authorized",
         })
-    if memo is not None and not isinstance(memo, str):
+    if not recipient:
         return json.dumps({
             "success": False,
-            "error": "memo must be text; nothing was authorized",
+            "error": "recipient is required; nothing was authorized",
+        })
+    if any(ord(char) < 32 or ord(char) == 127 for char in recipient):
+        return json.dumps({
+            "success": False,
+            "error": "recipient cannot contain control characters; nothing was authorized",
+        })
+    if memo is not None and (
+        not isinstance(memo, str)
+        or any(ord(char) < 32 or ord(char) == 127 for char in memo)
+    ):
+        return json.dumps({
+            "success": False,
+            "error": "memo must be text without control characters; nothing was authorized",
         })
     if _live is None:
         return json.dumps({"success": False, "error": "the Plow Chat gateway is not connected; nothing was authorized"})
@@ -4991,7 +5009,7 @@ def _plow_request_payment(args, **_kwargs):
             loop,
         ).result(timeout=20)
     except _PlowSendError as exc:
-        if _is_refusal(exc.status):
+        if exc.status != 408 and _is_refusal(exc.status):
             return json.dumps({"success": False, "error": f"Plow declined ({exc.status}): {exc.detail}"})
         return json.dumps({
             "success": False,
