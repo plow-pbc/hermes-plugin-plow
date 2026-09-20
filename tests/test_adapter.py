@@ -1513,17 +1513,20 @@ IMMEDIATE_SECONDS = 0.3
 
 
 @pytest.mark.parametrize(
-    ("connects_on_attempt", "clean_close", "expected"),
+    ("connects_on", "clean_close", "seconds_up", "expected"),
     [
-        pytest.param(None, False, [NOW, 30, 60, 120, 240, 300], id="never-connects"),
-        pytest.param(2, False, [NOW, NOW, 30], id="one-healthy-session"),
-        # A server-side CLOSE ends the frame loop by returning, not raising.
-        pytest.param(None, True, [NOW, 30], id="graceful-close"),
+        pytest.param(None, False, 0, [NOW, 30, 60, 120, 240, 300], id="never-connects"),
+        pytest.param(2, False, 600, [NOW, NOW, 30], id="one-healthy-session"),
+        # A server-side CLOSE ends the frame loop by returning, not raising --
+        # and this is the shape a sick backend takes: the handshake succeeds
+        # every time and the socket is gone at once.
+        pytest.param("every", True, 0, [NOW, 30, 60], id="accepts-then-closes-at-once"),
     ],
 )
 async def test_the_first_reconnect_is_immediate_and_the_backoff_grows_from_the_second(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
-    connects_on_attempt: int | None, clean_close: bool, expected: list[float | None],
+    connects_on: int | str | None, clean_close: bool, seconds_up: int,
+    expected: list[float | None],
 ) -> None:
     """One retry at once, then upstream's curve: 30s doubling to a 300s cap.
 
@@ -1534,15 +1537,19 @@ async def test_the_first_reconnect_is_immediate_and_the_backoff_grows_from_the_s
     pays 30s, not the flat 5s a rewrite once left here (7253bad): 720 attempts
     an hour against a dead backend.
 
-    Reaching the socket restarts the curve, so the next outage starts over
-    rather than ratcheting toward the cap across unrelated drops. Only
-    `connected()` resets it: a slow *failure* takes just as long as a healthy
-    session, so elapsed time cannot stand in for it.
+    A socket that STAYS up restarts the curve, so the next outage starts over
+    rather than ratcheting toward the cap across unrelated drops. Neither half
+    of that stands alone: a slow *failure* takes just as long as a healthy
+    session, so elapsed time cannot say it, and a backend that accepts and
+    drops at once reaches `connected()` just as a healthy one does, so the
+    handshake cannot either -- resetting there is four handshakes a second,
+    forever, against a server that is already failing.
     """
     transport = _load(monkeypatch, tmp_path)._transport
     slept: list[float] = []
     drops: list[int] = []
     attempts = {"n": 0}
+    clock = {"t": 1000.0}
 
     async def fake_sleep(seconds: float) -> None:
         slept.append(seconds)
@@ -1551,12 +1558,14 @@ async def test_the_first_reconnect_is_immediate_and_the_backoff_grows_from_the_s
 
     async def session(http: Any, connected: Any) -> None:
         attempts["n"] += 1
-        if attempts["n"] == connects_on_attempt:
-            connected()                      # this row's one healthy socket
+        if connects_on == "every" or attempts["n"] == connects_on:
+            connected()
+            clock["t"] += seconds_up         # how long this row's socket lasts
         if clean_close:
             return
         raise RuntimeError("dropped")
 
+    monkeypatch.setattr(transport.time, "monotonic", lambda: clock["t"])
     monkeypatch.setattr(transport.asyncio, "sleep", fake_sleep)
     monkeypatch.setattr(transport.aiohttp, "ClientSession", lambda *a, **k: _Session())
     with pytest.raises(_Stop):

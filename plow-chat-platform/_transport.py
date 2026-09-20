@@ -11,6 +11,7 @@ import re
 import logging
 import os
 import random
+import time
 
 import aiohttp
 
@@ -25,6 +26,10 @@ RECONNECT_BACKOFF_CAP_SECONDS = 300
 # every agent at once, so a fleet reconnecting in lockstep is a thundering
 # herd against an API that is still bringing instances up.
 RECONNECT_JITTER_SECONDS = 0.25
+# How long a socket must stay up to count as a healthy session, and so to earn
+# the curve a fresh start. A server that accepts and then drops at once
+# reaches the handshake just as a healthy one does.
+HEALTHY_SESSION_SECONDS = 30
 log = logging.getLogger(__name__)
 
 
@@ -148,16 +153,18 @@ async def _serve(session, on_drop, on_connect, tag, *, on_fatal):
     gateway's fatal-status fields, so a line that will never come back reads
     as dead rather than healthy in `hermes status`.
 
-    The session calls `connected()` once its socket is up -- that, and only
-    that, restarts the backoff. Elapsed time cannot stand in for it: a reach
-    read, ticket mint or handshake that fails slowly takes just as long as a
-    healthy session and would pin the retry at the base forever.
+    The session calls `connected()` once its socket is up. That is what
+    restarts the backoff -- but only for a socket that then STAYS up: elapsed
+    time alone cannot stand in for it (a reach read, ticket mint or handshake
+    that fails slowly takes just as long as a healthy session) and the
+    handshake alone cannot either, which is the rest of the story below.
     """
     attempt = 0
+    up_since = None
 
     def connected():
-        nonlocal attempt
-        attempt = 0
+        nonlocal up_since
+        up_since = time.monotonic()
         on_connect()
 
     while True:
@@ -177,11 +184,15 @@ async def _serve(session, on_drop, on_connect, tag, *, on_fatal):
             log.warning("[%s] websocket error: %s", tag, type(exc).__name__)
         # Both endings, not just the raising one: a server-side CLOSE ends the
         # frame loop by returning, and leaving that path unmarked reported the
-        # line connected for the whole retry delay. A close means the socket
-        # was up, so `connected()` already reset the curve. Only repeated
-        # PRE-connect failures -- reach read, ticket mint, handshake -- ever
-        # climb to 300s.
+        # line connected for the whole retry delay.
         on_drop()
+        # A backend that accepts the socket and drops it at once reaches
+        # `connected()` every time, so resetting there would hold the retry
+        # at the jitter forever -- four handshakes a second against a server
+        # already failing. Only a session that lasted earns the reset.
+        if up_since is not None and time.monotonic() - up_since >= HEALTHY_SESSION_SECONDS:
+            attempt = 0
+        up_since = None
         attempt += 1
         # The first retry is immediate, whatever ended the session. The
         # ordinary ending is a deploy: the load balancer drops the socket
