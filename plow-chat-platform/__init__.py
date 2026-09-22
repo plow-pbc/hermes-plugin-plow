@@ -2350,9 +2350,15 @@ class PlowChatAdapter(BasePlatformAdapter):
         body = content.strip()
         # Hermes renders the proxy's billing failure as the final reply,
         # including its JSON body and provider-switching advice.
-        if re.match(r"^(?:Billing or credits exhausted: )?HTTP 402: \{\"detail\":\s*\"You're out of Plow credits\.", body):
+        credits = re.match(
+            r"^(?:Billing or credits exhausted: )?HTTP 402: \{\"detail\":\s*\"(You're out of Plow credits\.[^\"]*)\"",
+            body,
+        )
+        if credits:
             log.warning("plow_credit_error_replaced status=402 body_length=%d", len(body))
-            body = "I've run out of Plow credit for now — top up in the portal and I'll pick this back up."
+            # The API owns this sentence and it carries the top-up link; relaying
+            # it verbatim is what gets the owner something tappable (plow#2182).
+            body = credits.group(1)
         turn = self._active_turn.get()
         # The sentinel ENDS the answer, and whatever the model wrote above it
         # is its working-out, not a message: Elm posted "This is Daniel asking
