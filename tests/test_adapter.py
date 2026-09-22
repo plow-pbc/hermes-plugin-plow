@@ -4744,24 +4744,21 @@ def test_write_file_scratch_path_moves_under_the_safe_root(
     assert out == {"action": "modify", "args": {"path": "/var/lib/hermes/tmp/pipeline/listing.txt"}}
 
 
-@pytest.mark.parametrize("args,root", [
-    ({"path": "/var/lib/hermes/x.md", "content": "hi"}, "/var/lib/hermes"),   # well-shaped call
-    ({"path": "/var/lib/hermes/notes.md", "content": "x"}, "/var/lib/hermes"),  # already inside the root
-    ({"path": "/tmp/../etc/passwd", "content": "x"}, "/var/lib/hermes"),      # climbs out of /tmp
-    ({"path": "relative/notes.md", "content": "x"}, "/var/lib/hermes"),       # not a scratch path
-    ({"path": "/tmp/x.txt", "content": "x"}, None),                           # nothing denies the write
-    ({"content": {"a": 1}}, "/var/lib/hermes"),                               # no path: content still repaired
+@pytest.mark.parametrize("path,root", [
+    ("/var/lib/hermes/notes.md", "/var/lib/hermes"),   # already inside the root
+    ("/tmp/../etc/passwd", "/var/lib/hermes"),         # climbs out of /tmp, so not a scratch path
+    ("relative/notes.md", "/var/lib/hermes"),          # not a scratch path
+    ("/tmp/x.txt", None),                              # no root configured: nothing denies the write
 ])
 def test_write_file_calls_left_alone(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, args: dict, root: str | None,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, path: str, root: str | None,
 ) -> None:
     module = _load(monkeypatch, tmp_path)
     if root:
         monkeypatch.setenv("HERMES_WRITE_SAFE_ROOT", root)
     else:
         monkeypatch.delenv("HERMES_WRITE_SAFE_ROOT", raising=False)
-    out = module._pre_tool_call("write_file", args)
-    assert "path" not in (out or {}).get("args", {})
+    assert module._pre_tool_call("write_file", {"path": path, "content": "x"}) is None
 
 
 # What `adapter.send_mail` answers with, as the tool reads it back. The API
