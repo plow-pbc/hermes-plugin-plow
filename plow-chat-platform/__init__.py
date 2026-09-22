@@ -4099,9 +4099,38 @@ def _route_tool_result(tool_name, args, result, **_kwargs):
         return None
 
 
+# Where a model puts a scratch file when it forgets the agent's write-safe root.
+_SCRATCH_PREFIXES = ("/tmp/", "/var/tmp/")
+
+
+def _write_file_args(args):
+    """The args `write_file` can execute, for a call the model shaped wrong.
+
+    Two shapes, both off production cron turns (#226): `content` as a JSON
+    object, and a scratch path outside `HERMES_WRITE_SAFE_ROOT`. The tool
+    rejects each with a result that names no action, so a main that cannot
+    re-plan replays the identical call until the tool-loop guardrail kills the
+    turn. Repairing the call is what the model meant; `{}` leaves a
+    well-shaped one alone."""
+    fixed = {}
+    content = args.get("content")
+    if isinstance(content, (dict, list)):
+        fixed["content"] = json.dumps(content, indent=2, ensure_ascii=False)
+    path, root = args.get("path"), os.environ.get("HERMES_WRITE_SAFE_ROOT")
+    if isinstance(path, str) and root:
+        # normpath first: a path that merely starts "/tmp/" and then climbs out
+        # of it is not a scratch path, and must not be relocated into the root.
+        real = os.path.normpath(path)
+        prefix = next((p for p in _SCRATCH_PREFIXES if real.startswith(p)), None)
+        if prefix and not real.startswith(os.path.normpath(root) + os.sep):
+            fixed["path"] = os.path.join(root, "tmp", real[len(prefix):])
+    return fixed
+
+
 def _pre_tool_call(tool_name, args, **_kwargs):
-    """Hold an outbound email for the owner, and hold a conflict override to a
-    turn with the owner's authority, whatever the latch MCP server is named.
+    """Repair a misshapen `write_file` call, hold an outbound email for the
+    owner, and hold a conflict override to a turn with the owner's authority,
+    whatever the latch MCP server is named.
 
     Hermes's `approve` directive is a gate the model cannot flip itself: the
     gateway posts the request into the requesting room and waits for
@@ -4111,7 +4140,11 @@ def _pre_tool_call(tool_name, args, **_kwargs):
     again puts the question to somebody who has already answered it. What it
     still earns is the authority check -- a turn without the owner's
     authority cannot have fixed the owner's time, so an override from it is
-    refused outright. Returns None for every other call."""
+    refused outright. The `write_file` repair earns no gate at all: see
+    `_write_file_args`. Returns None for every other call."""
+    if tool_name == "write_file":
+        fixed = _write_file_args(args) if isinstance(args, dict) else {}
+        return {"action": "modify", "args": fixed} if fixed else None
     if not str(tool_name).endswith("plow_run_command"):
         return None
     argv = (args or {}).get("argv") if isinstance(args, dict) else None

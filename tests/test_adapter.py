@@ -4722,6 +4722,45 @@ def test_other_tools_and_non_sends_pass_untouched(
     assert module._pre_tool_call(tool_name, args) is None
 
 
+@pytest.mark.parametrize("content", [{"nested": "dict"}, [{"a": 1}, {"b": 2}]])
+def test_write_file_structured_content_is_serialized(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, content: Any,
+) -> None:
+    """The model meant to write this object as text; rejecting it just loops the turn."""
+    module = _load(monkeypatch, tmp_path)
+    out = module._pre_tool_call("write_file", {"path": "/var/lib/hermes/x.json", "content": content})
+    assert out["action"] == "modify"
+    assert json.loads(out["args"]["content"]) == content
+    assert "path" not in out["args"]
+
+
+def test_write_file_scratch_path_moves_under_the_safe_root(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
+) -> None:
+    """`/tmp` is denied on a cloud agent; the model wanted a scratch file, not that path."""
+    module = _load(monkeypatch, tmp_path)
+    monkeypatch.setenv("HERMES_WRITE_SAFE_ROOT", "/var/lib/hermes")
+    out = module._pre_tool_call("write_file", {"path": "/tmp/pipeline/listing.txt", "content": "x"})
+    assert out == {"action": "modify", "args": {"path": "/var/lib/hermes/tmp/pipeline/listing.txt"}}
+
+
+@pytest.mark.parametrize("path,root", [
+    ("/var/lib/hermes/notes.md", "/var/lib/hermes"),   # already inside the root
+    ("/tmp/../etc/passwd", "/var/lib/hermes"),         # climbs out of /tmp, so not a scratch path
+    ("relative/notes.md", "/var/lib/hermes"),          # not a scratch path
+    ("/tmp/x.txt", None),                              # no root configured: nothing denies the write
+])
+def test_write_file_calls_left_alone(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, path: str, root: str | None,
+) -> None:
+    module = _load(monkeypatch, tmp_path)
+    if root:
+        monkeypatch.setenv("HERMES_WRITE_SAFE_ROOT", root)
+    else:
+        monkeypatch.delenv("HERMES_WRITE_SAFE_ROOT", raising=False)
+    assert module._pre_tool_call("write_file", {"path": path, "content": "x"}) is None
+
+
 # What `adapter.send_mail` answers with, as the tool reads it back. The API
 # answers 202 `acceptance_unknown` when Gmail may have taken the mail and not
 # confirmed it: no thread id, no message id, and nothing to check it by.
