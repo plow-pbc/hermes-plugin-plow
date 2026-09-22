@@ -5509,7 +5509,7 @@ def _verbose_adapter(module: Any, http: Any, monkeypatch: pytest.MonkeyPatch) ->
 
 
 @pytest.mark.parametrize("prefix", ["", "Billing or credits exhausted: "])
-async def test_plow_credit_exhaustion_sends_one_plain_sentence(
+async def test_plow_credit_exhaustion_relays_the_api_sentence_with_its_link(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: pathlib.Path,
     prefix: str,
@@ -5519,7 +5519,8 @@ async def test_plow_credit_exhaustion_sends_one_plain_sentence(
     http = _SettingsHTTP(_me(verbose=False))
     adapter = _verbose_adapter(module, http, monkeypatch)
     adapter._active_turn.set(_OWNER_DM)
-    error = prefix + 'HTTP 402: {"detail":"You\'re out of Plow credits. Top up at https://app.plow.co/dashboard to keep going."}'
+    detail = "You're out of Plow credits. Top up ($5 minimum) to keep going: https://app.plow.co/dashboard"
+    error = prefix + 'HTTP 402: {"detail":"' + detail + '"}'
     error += (
         "\n\nplow reported that billing, credits, or account entitlement is exhausted for anthropic/claude-sonnet-5."
         "\nAdd credits or update billing with that provider, then retry."
@@ -5529,9 +5530,8 @@ async def test_plow_credit_exhaustion_sends_one_plain_sentence(
     result = await adapter.send("cht_a", error, metadata={"notify": True})
 
     assert result.success
-    assert http.posts == [(f"{module.BASE}/v1/chats/cht_a/messages", {
-        "body": "I've run out of Plow credit for now — top up in the portal and I'll pick this back up.",
-    })]
+    # The owner gets the API's own sentence — link intact — not a link-free paraphrase.
+    assert http.posts == [(f"{module.BASE}/v1/chats/cht_a/messages", {"body": detail})]
 
     assert [(record.levelno, record.getMessage()) for record in caplog.records] == [
         (logging.WARNING, f"plow_credit_error_replaced status=402 body_length={len(error)}"),
