@@ -9034,6 +9034,7 @@ async def test_only_the_owners_own_dm_text_interrupts_a_busy_run(
     runner = Runner()
     adapter.gateway_runner = runner
     adapter.set_busy_session_handler(runner.busy)
+    adapter._active_sessions = {"k": asyncio.Event()}   # the run it waits behind holds the guard
     busy = adapter._busy_session_handler
     for event in handled[1:]:
         assert await busy(event, "k") is False
@@ -9045,6 +9046,77 @@ async def test_only_the_owners_own_dm_text_interrupts_a_busy_run(
     runner.mode = "queue"                       # demoted: subagents or compression in flight
     assert await busy(handled[0], "k") is True
     assert calls == [("queue", handled[0].text)]
+
+
+async def test_an_owner_interrupt_is_not_parked_when_the_run_ends_under_it(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+) -> None:
+    """The owner answers while the run is in its tail -- reply sent, typing
+    being stopped. The gateway's interrupt resolution awaits two worker-thread
+    hops (`run_busy.py:489` -> `:244`/`:256`) before anything is queued. If the
+    run's task reaches `_finish_session_task` (`base.py:4061-4083`) in between,
+    it finds the pending slot empty, drops the session guard and exits, and a
+    message queued after that is parked: a filled slot with no guard and no
+    task, which nothing drains until the owner writes again -- and then that
+    later message runs first. Seen on a live line: a reply sent a few seconds
+    after the agent's answer sat unanswered until the owner wrote again."""
+    module = _load(monkeypatch, tmp_path)
+    adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
+    adapter._set_reach([_dm_chat()])
+    _mark_anchored(adapter, "cht_a")
+    handled = _capture_events(monkeypatch, adapter)
+    await adapter._on_frame(_envelope("e1", "cht_a", "m1", body="actually, make it Friday"), object())
+    await _settle(adapter)
+    (event,) = handled
+    assert event.interrupts_run
+    handled.clear()
+
+    # The base's per-session bookkeeping (`base.py:1832-1834`), mid-run: the
+    # run's task holds the guard and nothing is pending yet.
+    key = "agent:main:plow_chat:dm:cht_a"
+    adapter._active_sessions = {key: asyncio.Event()}
+    adapter._pending_messages = {}
+    in_hops = asyncio.Event()
+    hops_done = asyncio.get_running_loop().create_future()
+
+    class Runner:
+        async def busy(self, event: Any, session_key: str) -> bool:
+            return False                        # the gateway's queue-mode text branch
+
+        def _peek_session_state(self, session_key: str) -> Any:
+            return SimpleNamespace(turn=SimpleNamespace(agent=None))   # the agent already returned
+
+        async def _resolve_busy_steer_or_redirect(self, event: Any, key: str, mode: str, running: Any) -> Any:
+            in_hops.set()
+            await hops_done                     # `_session_has_compression_in_flight`'s to_thread hops
+            return SimpleNamespace(effective_mode=mode, redirected=False)
+
+        def _queue_or_replace_pending_event(self, session_key: str, event: Any) -> None:
+            adapter._pending_messages[session_key] = event      # `_enqueue_fifo`, run_busy.py:54
+
+        async def _interrupt_running_agent_for_busy_event(self, event: Any, adapter_: Any, running: Any) -> None:
+            raise AssertionError("there is no run left to interrupt")
+
+    runner = Runner()
+    adapter.gateway_runner = runner
+    adapter.set_busy_session_handler(runner.busy)
+    busy = asyncio.create_task(adapter._busy_session_handler(event, key))
+    hopping = asyncio.create_task(in_hops.wait())
+    await asyncio.wait({busy, hopping}, return_when=asyncio.FIRST_COMPLETED)
+    hopping.cancel()
+
+    # The run's task reaches `_finish_session_task` now: the slot is still
+    # empty, so it releases the guard for good.
+    assert key not in adapter._pending_messages
+    del adapter._active_sessions[key]
+    hops_done.set_result(None)
+    assert await busy is True
+
+    assert key not in adapter._pending_messages, "the owner's message sits in a pending slot nothing will drain"
+    assert handled == [event]                   # started as its own turn instead
+
+
 def test_the_tool_says_to_search_before_reporting_what_a_chat_said(monkeypatch, tmp_path):
     """Chunk 2, prompt-only: the listing names rooms and shows nothing said in
     them, so answering 'what did Joe say' from it is guessing."""
