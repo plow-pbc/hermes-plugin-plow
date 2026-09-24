@@ -1732,6 +1732,15 @@ class PlowChatAdapter(BasePlatformAdapter):
             outcome = await runner._resolve_busy_steer_or_redirect(event, session_key, "interrupt", agent)
             if outcome.redirected:
                 return True
+            # That await crosses two worker threads (`run_busy.py:489`). A run
+            # that ended meanwhile found nothing pending and dropped its guard
+            # (`base.py:4061-4083`); queued now, the text would wait for the
+            # owner's next message. There is no run left, so it starts one.
+            if session_key not in self._active_sessions:
+                log.info("[plow_chat] run ended under the owner's text for %s; starting it as its own turn",
+                         session_key)
+                await self.handle_message(event)
+                return True
             runner._queue_or_replace_pending_event(session_key, event)
             if outcome.effective_mode == "interrupt" and hasattr(agent, "interrupt"):
                 await runner._interrupt_running_agent_for_busy_event(event, self, agent)
