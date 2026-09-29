@@ -443,16 +443,16 @@ _NON_OWNER_EMAIL_TURN = {"chat_uid": "cht_m", "owner": False, "dm": False, "auth
 @pytest.mark.parametrize(
     ("turn", "args", "allowed"),
     [
-        pytest.param(_NON_OWNER_EMAIL_TURN, {"to": "cht_m", "body": "Thanks!"}, True, id="non-owner-own-thread"),
+        pytest.param(_NON_OWNER_EMAIL_TURN, {"to": "cht_m", "body": "Thanks!\n\nElm"}, True, id="non-owner-own-thread"),
         pytest.param(_NON_OWNER_EMAIL_TURN, {"to": "cht_n", "body": "x"}, False, id="non-owner-other-thread"),
         pytest.param(_NON_OWNER_EMAIL_TURN, {"to": ["x@example.com"], "subject": "s", "body": "x"}, False,
                      id="non-owner-new-thread"),
         pytest.param(_NON_OWNER_EMAIL_TURN, {"action": "list"}, False, id="non-owner-list"),
         pytest.param(_DISCRETION_TURN, {"to": "cht_m", "body": "x"}, False, id="untrusted-group-member"),
         pytest.param(None, {"to": "cht_m", "body": "x"}, False, id="no-turn"),
-        pytest.param(_OWNER_DM_TURN, {"to": "cht_n", "body": "Yes, Friday works."}, True, id="owner-dm-any-thread"),
-        pytest.param(_TRUSTED_GROUP_TURN, {"to": "cht_n", "body": "x"}, True, id="trusted-group"),
-        pytest.param(_OWNER_EMAIL_TURN, {"to": "cht_n", "body": "x"}, True, id="owner-email-any-thread"),
+        pytest.param(_OWNER_DM_TURN, {"to": "cht_n", "body": "Yes, Friday works.\n\nElm"}, True, id="owner-dm-any-thread"),
+        pytest.param(_TRUSTED_GROUP_TURN, {"to": "cht_n", "body": "x\n\nElm"}, True, id="trusted-group"),
+        pytest.param(_OWNER_EMAIL_TURN, {"to": "cht_n", "body": "x\n\nElm"}, True, id="owner-email-any-thread"),
     ],
 )
 def test_plow_send_email_reaches_only_what_the_turn_may(
@@ -489,11 +489,11 @@ def test_a_reply_from_another_chat_is_recorded_in_the_threads_session(
     mirrored = _stub_mirror(monkeypatch)
     module._ACTIVE_TURN.set(_OWNER_DM_TURN)
 
-    out = json.loads(module._plow_send_email({"to": "cht_m", "body": "Friday works."}))
+    out = json.loads(module._plow_send_email({"to": "cht_m", "body": "Friday works.\n\nElm"}))
 
     assert out == {"sent": True, "chat_uid": "cht_m"}
     assert [(c["platform"], c["chat_id"], c["text"]) for c in mirrored] == [
-        ("plow_email", "cht_m", "Friday works.")]
+        ("plow_email", "cht_m", "Friday works.\n\nElm")]
 
 
 @pytest.mark.parametrize(
@@ -527,19 +527,19 @@ def test_a_new_thread_returns_its_chat_and_opens_its_session_with_what_was_sent(
     module._ACTIVE_TURN.set(turn)
 
     out = json.loads(module._plow_send_email(
-        {"to": to, "subject": "Friday", "body": "Are you free Friday?"}))
+        {"to": to, "subject": "Friday", "body": "Are you free Friday?\n\nElm"}))
 
     assert out == {"sent": True, "chat_uid": "cht_new"}
     assert http.posts == [(f"{module.BASE}/v1/chats", {"line_uid": "ln_em", "members": ["dana@example.com"],
-                                                        "subject": "Friday", "body": "Are you free Friday?"})]
+                                                        "subject": "Friday", "body": "Are you free Friday?\n\nElm"})]
     assert module._email_origins().get("cht_new") == origin
     [source] = mail.sessions
     assert (source.platform, source.chat_id, source.chat_type) == ("plow_email", "cht_new", "group")
     [seed] = mirrored
     assert (seed["platform"], seed["chat_id"], seed["session_id"]) == ("plow_email", "cht_new", "sess_new")
     where = origin or one_to_one
-    assert seed["text"] == (f"(I started this thread from chat {where}.)\n\nAre you free Friday?" if where
-                            else "Are you free Friday?")
+    assert seed["text"] == (f"(I started this thread from chat {where}.)\n\nAre you free Friday?\n\nElm" if where
+                            else "Are you free Friday?\n\nElm")
 
 
 def test_a_sent_new_thread_keeps_its_chat_uid_when_its_origin_cannot_be_recorded(
@@ -555,7 +555,7 @@ def test_a_sent_new_thread_keeps_its_chat_uid_when_its_origin_cannot_be_recorded
     module.EMAIL_ORIGINS.mkdir()                 # an origin file that cannot be read
     module._ACTIVE_TURN.set(_OWNER_DM_TURN)
 
-    out = json.loads(module._plow_send_email({"to": ["dana@example.com"], "subject": "Hi", "body": "Hello"}))
+    out = json.loads(module._plow_send_email({"to": ["dana@example.com"], "subject": "Hi", "body": "Hello\n\nElm"}))
 
     assert out == {"sent": True, "chat_uid": "cht_new"}
 
@@ -579,7 +579,7 @@ def test_a_new_thread_with_no_chat_uid_says_so_and_is_never_resent(
     _email_tool(module, monkeypatch, http)
     module._ACTIVE_TURN.set(_OWNER_DM_TURN)
 
-    out = json.loads(module._plow_send_email({"to": ["dana@example.com"], "subject": "Hi", "body": "Hello"}))
+    out = json.loads(module._plow_send_email({"to": ["dana@example.com"], "subject": "Hi", "body": "Hello\n\nElm"}))
 
     assert out["sent"] == sent and out["chat_uid"] is None
     assert out["chat_unrecorded_reason"] == new_mail["chat_unrecorded_reason"]
@@ -637,3 +637,24 @@ def test_register_declares_both_platforms_on_one_transport(
     assert "cron_deliver_env_var" not in email
     assert email["check_fn"]()
     assert isinstance(email["adapter_factory"](SimpleNamespace(extra={})), module.plow_email.PlowEmailAdapter)
+
+
+@pytest.mark.parametrize("turn", [_OWNER_DM_TURN, _TRUSTED_GROUP_TURN, _OWNER_EMAIL_TURN])
+@pytest.mark.parametrize("to", ["cht_m", ["dana@example.com"]])
+def test_email_requires_the_mailbox_persona_signature_before_sending(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, turn: dict[str, Any], to: str | list[str],
+) -> None:
+    module, _entry = _load_email(monkeypatch, tmp_path)
+    http = _MailHTTP([_mail_chat("cht_m")], new_mail={"status": "sent", "chat_uid": None})
+    _email_tool(module, monkeypatch, http)
+    _stub_mirror(monkeypatch)
+    module._ACTIVE_TURN.set(turn)
+
+    refused = json.loads(module._plow_send_email({"to": to, "subject": "Budget", "body": "Approved.\n\nAlex"}))
+    assert refused["success"] is False
+    assert "Elm" in refused["error"] and "nothing was sent" in refused["error"]
+    assert http.posts == []
+
+    sent = json.loads(module._plow_send_email({"to": to, "subject": "Budget", "body": "Alex approved.\n\nElm"}))
+    assert sent["sent"] is True
+    assert http.posts[0][1]["body"] == "Alex approved.\n\nElm"

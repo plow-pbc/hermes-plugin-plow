@@ -8939,3 +8939,16 @@ def test_the_tool_says_to_search_before_reporting_what_a_chat_said(monkeypatch, 
     # without this agent, so the honest answer names what could not be found.
     assert "is not proof nobody replied" in description
     assert "never 'no reply yet'" in description
+
+
+@pytest.mark.asyncio
+async def test_a_file_marker_in_a_sequence_is_refused_before_any_delivery(monkeypatch, tmp_path):
+    module, adapter, turn, root, http = _sequence_fixture(monkeypatch, tmp_path)
+    result = await adapter.send_sequence({"items": [
+        {"type": "text", "body": "Attachment round trip"},
+        {"type": "text", "body": "MEDIA:/var/lib/hermes/cache/documents/note.txt"},
+    ]}, turn)
+    assert result["success"] is False
+    assert result["completed"] == [] and http.posts == 0
+    assert "final reply" in result["failure"]["error"]
+    assert not turn["reply_delivered"], "the real attachment in the final reply must still be deliverable"
