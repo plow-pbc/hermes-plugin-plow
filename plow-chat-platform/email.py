@@ -15,6 +15,7 @@ Nothing this adapter sends reaches a thread. Mail leaves only through the
 `send` hands it to the phone line, addressed to the chat the thread came from.
 """
 import asyncio
+import json
 import logging
 import os
 
@@ -271,7 +272,9 @@ class PlowEmailAdapter(BasePlatformAdapter):
             return SendResult(success=True)
         subject = _one_line(self._chats[chat_id].get("display_name")) or "(no subject)"
         sender = _one_line((turn or {}).get("sender"))   # this turn's own sender, not the latest mail's
-        label = f'Email "{subject}"' + (f" from {sender}" if sender else "") + ":"
+        # Sender-chosen text, so each stays one quoted value in the owner's chat and session.
+        label = f"Email {json.dumps(subject, ensure_ascii=False)}" + (
+            f" from {json.dumps(sender, ensure_ascii=False)}" if sender else "") + ":"
         # Imported here: the package imports this module before it defines
         # the phone line, and every send comes long after both are loaded.
         from . import _deliver_email_text
