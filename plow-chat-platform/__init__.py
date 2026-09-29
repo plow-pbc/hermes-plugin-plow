@@ -3254,7 +3254,7 @@ class PlowChatAdapter(BasePlatformAdapter):
         _woken = True
         await self._handoff_message(event)
 
-    async def _history(self, http, chat_uid, limit):
+    async def _history(self, http, chat_uid, limit, *, retry=False, socket_closed=None):
         """A chat's messages newest-first, a page at a time on a uid cursor,
         until the caller stops or they run out."""
         cursor = None
@@ -3262,11 +3262,19 @@ class PlowChatAdapter(BasePlatformAdapter):
             url = f"{BASE}/v1/chats/{chat_uid}/messages?limit={limit}"
             if cursor:
                 url += f"&starting_after={cursor}"
-            async with http.get(url, headers=self.auth) as resp:
-                # An error page is not an empty page: treating a 401 or a 500
-                # as "nothing missed" would move the baseline past the gap.
-                _auth_raise_for_status(resp)
-                body = await resp.json(content_type=None)
+            try:
+                async with http.get(url, headers=self.auth) as resp:
+                    # An error page is not an empty page: treating a 401 or a 500
+                    # as "nothing missed" would move the baseline past the gap.
+                    _auth_raise_for_status(resp)
+                    body = await resp.json(content_type=None)
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                if not retry or (socket_closed is not None and socket_closed.is_set()):
+                    raise
+                log.warning("[plow_chat] history page failed for %s: %s; retrying",
+                            chat_uid, type(exc).__name__)
+                await asyncio.sleep(1)
+                continue
             page = body.get("data") or []
             for m in page:
                 yield m
@@ -3274,7 +3282,7 @@ class PlowChatAdapter(BasePlatformAdapter):
                 return
             cursor = page[-1]["uid"]
 
-    async def _backfill(self, http, chat_uid):
+    async def _backfill(self, http, chat_uid, socket_closed=None):
         """Process what arrived while the socket was down.
 
         Frames are not replayable and a disconnected socket misses events
@@ -3292,11 +3300,14 @@ class PlowChatAdapter(BasePlatformAdapter):
         # checkpoint to stop at the loop simply pages to exhaustion, which for a
         # chat that started empty is the handful of messages actually missed.
         missed = []
+        baseline = self._last_uids.get(chat_uid)
+        page_size = 50
         # The checkpoint bounds this, not a page count: stopping early
         # would drop the OLDEST missed messages while still advancing the
         # baseline past them, which is the loss it exists to prevent.
-        async for m in self._history(http, chat_uid, limit=50):
-            if m["uid"] == self._last_uids.get(chat_uid):
+        async for m in self._history(http, chat_uid, limit=page_size, retry=True,
+                                     socket_closed=socket_closed):
+            if m["uid"] == baseline:
                 break
             missed.append(m)
         for m in reversed(missed):           # oldest-first
@@ -3352,19 +3363,34 @@ class PlowChatAdapter(BasePlatformAdapter):
             async with _socket(http, ticket) as ws:
                 connected()
                 log.info("[plow_chat] websocket connected")
+                frames = asyncio.Queue()
+                socket_closed = asyncio.Event()
+
+                async def read_frames():
+                    try:
+                        async for frame in ws:
+                            frames.put_nowait(frame)
+                    finally:
+                        socket_closed.set()
+                        frames.put_nowait(None)
+
+                reader = asyncio.create_task(read_frames())
                 try:
                     for chat_uid in self.chat_uids:
-                        await self._backfill(http, chat_uid)
+                        await self._backfill(http, chat_uid, socket_closed)
                     # Armed only now: each wake waits out its own chat's
                     # backlog, so it cannot run ahead of an offline `/goal
                     # clear` still sitting in the queue.
                     self._goal_arm_wakes()
                     if not _woken:
                         await self._prime(_first_boot)
-                    async for frame in ws:
+                    while (frame := await frames.get()) is not None:
                         if frame.type == aiohttp.WSMsgType.TEXT:
                             await self._on_frame(frame.json(), http)
+                    reader.result()
                 finally:
+                    reader.cancel()
+                    await asyncio.gather(reader, return_exceptions=True)
                     # Paced work does not outlive the session that can
                     # deliver instructions to stop it.
                     self._goal_pause_wakes()

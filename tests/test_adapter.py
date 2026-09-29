@@ -32,6 +32,7 @@ from typing import Any, Iterator
 from unittest import mock
 
 import pytest
+from aiohttp import ClientConnectionError, WSMsgType, web
 
 PLUGIN = pathlib.Path(__file__).resolve().parents[1] / "plow-chat-platform" / "__init__.py"
 
@@ -387,6 +388,117 @@ class _Resp:
     def raise_for_status(self) -> None:
         if self.status >= 400:
             raise RuntimeError(f"HTTP {self.status}")
+
+
+async def test_backfill_answers_socket_ping_while_history_is_slow(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
+) -> None:
+    module = _load(monkeypatch, tmp_path)
+    adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
+    _mark_anchored(adapter, "cht_a")
+    module._woken = True
+    history_started = asyncio.Event()
+    pong_received = asyncio.Event()
+
+    async def history(_request: web.Request) -> web.Response:
+        history_started.set()
+        try:
+            await asyncio.wait_for(pong_received.wait(), 0.5)
+        except asyncio.TimeoutError:
+            pass
+        return web.json_response({"data": [], "has_more": False})
+
+    async def socket(request: web.Request) -> web.WebSocketResponse:
+        ws = web.WebSocketResponse(autoping=False)
+        await ws.prepare(request)
+        await history_started.wait()
+        await ws.ping()
+        try:
+            frame = await ws.receive(timeout=0.5)
+            if frame.type == WSMsgType.PONG:
+                pong_received.set()
+        except asyncio.TimeoutError:
+            pass
+        await ws.close()
+        return ws
+
+    app = web.Application()
+    app.router.add_get("/v1/chats/cht_a/messages", history)
+    app.router.add_get("/v1/ws", socket)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+    monkeypatch.setattr(module, "BASE", f"http://127.0.0.1:{port}")
+    monkeypatch.setattr(module._transport, "BASE", module.BASE)
+    monkeypatch.setattr(module, "_ticket", mock.AsyncMock(return_value="ticket"))
+
+    async def one_session(session: Any, _on_drop: Any, _on_connect: Any, _tag: str, **_kw: Any) -> None:
+        async with module.aiohttp.ClientSession() as http:
+            await session(http, lambda: None)
+
+    monkeypatch.setattr(module, "_serve", one_session)
+    try:
+        await adapter._listen()
+        assert pong_received.is_set(), "the socket must answer pings before history finishes"
+    finally:
+        await runner.cleanup()
+
+
+async def test_backfill_retries_a_failed_page_without_refetching_completed_pages(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
+) -> None:
+    module = _load(monkeypatch, tmp_path)
+    adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
+    adapter._last_uids["cht_a"] = "old"
+    reads: list[str] = []
+
+    class FailedPage(_Resp):
+        async def __aenter__(self) -> _Resp:
+            raise ClientConnectionError("history page failed")
+
+    class History:
+        def get(self, url: str, **_kw: Any) -> _Resp:
+            after = url.partition("starting_after=")[2]
+            reads.append(after)
+            if after == "2" and reads.count("2") == 1:
+                return FailedPage({})
+            if after:
+                return _Resp({"data": [{"uid": "1"}, {"uid": "old"}], "has_more": False})
+            return _Resp({"data": [{"uid": "3"}, {"uid": "2"}], "has_more": True})
+
+    handled: list[str] = []
+    monkeypatch.setattr(adapter, "_on_message", mock.AsyncMock(side_effect=lambda m, _chat: handled.append(m["uid"])))
+    await adapter._backfill(History(), "cht_a")
+    assert reads == ["", "2", "2"]
+    assert handled == ["1", "2", "3"]
+
+
+async def test_reconnect_backfill_resumes_after_the_last_handled_message(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
+) -> None:
+    module = _load(monkeypatch, tmp_path)
+    adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
+    adapter._last_uids["cht_a"] = "old"
+    history = _Session(backfill=[{"uid": uid} for uid in ("3", "2", "1", "old")])
+    handled: list[str] = []
+    fail_once = True
+
+    async def handoff(message: dict[str, str], chat_uid: str) -> None:
+        nonlocal fail_once
+        if message["uid"] == "2" and fail_once:
+            fail_once = False
+            raise OSError("handoff failed")
+        handled.append(message["uid"])
+        adapter._checkpoint(message["uid"], chat_uid)
+
+    monkeypatch.setattr(adapter, "_on_message", handoff)
+    with pytest.raises(OSError):
+        await adapter._backfill(history, "cht_a")
+    assert adapter._load_checkpoint("cht_a") == "1"
+    await adapter._backfill(history, "cht_a")
+    assert handled == ["1", "2", "3"]
 
 
 class _ChatResourceHTTP:
