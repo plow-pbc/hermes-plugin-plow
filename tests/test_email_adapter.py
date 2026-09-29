@@ -432,8 +432,6 @@ def test_a_reply_from_another_chat_is_recorded_in_the_threads_session(
     [
         pytest.param(_TRUSTED_GROUP_TURN, "cht_t", ["dana@example.com"], id="from-a-phone-chat-reports-there"),
         pytest.param(_OWNER_EMAIL_TURN, None, ["dana@example.com"], id="from-an-email-turn-reports-to-the-1:1"),
-        # Seen live: a model passing its one address bare, not in a list.
-        pytest.param(_OWNER_DM_TURN, "cht_a", "dana@example.com", id="one-address-passed-bare"),
     ],
 )
 def test_a_new_thread_returns_its_chat_and_opens_its_session_with_what_was_sent(
@@ -458,7 +456,7 @@ def test_a_new_thread_returns_its_chat_and_opens_its_session_with_what_was_sent(
     assert out == {"sent": True, "chat_uid": "cht_new"}
     assert http.posts == [(f"{module.BASE}/v1/email-lines/ln_em/messages",
                            {"to": ["dana@example.com"], "subject": "Friday", "body": "Are you free Friday?"})]
-    assert module._email_origin("cht_new") == origin
+    assert module._email_origins().get("cht_new") == origin
     [source] = mail.sessions
     assert (source.platform, source.chat_id, source.chat_type) == ("plow_email", "cht_new", "group")
     [seed] = mirrored
@@ -513,16 +511,15 @@ def test_list_names_each_thread_with_its_subject_people_and_last_activity(
 
 
 def test_plow_send_message_sends_no_email(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> None:
-    """An address, or an email thread's chat id, is refused before anything
-    reaches Plow, and the refusal names plow_send_email."""
+    """An address is refused before anything reaches Plow, and the refusal
+    names plow_send_email."""
     module, _entry = _load_email(monkeypatch, tmp_path)
     http = _MailHTTP([_mail_chat("cht_m")])
     _email_tool(module, monkeypatch, http)
     module._ACTIVE_TURN.set(_OWNER_DM_TURN)
 
-    for to in (["dana@example.com"], "cht_m"):
-        out = json.loads(module._plow_send_message({"to": to, "body": "hi"}))
-        assert out["success"] is False and "plow_send_email" in out["error"]
+    out = json.loads(module._plow_send_message({"to": ["dana@example.com"], "body": "hi"}))
+    assert out["success"] is False and "plow_send_email" in out["error"]
     assert http.posts == []
 
 

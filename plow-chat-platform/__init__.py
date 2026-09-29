@@ -2475,9 +2475,7 @@ class PlowChatAdapter(BasePlatformAdapter):
         With no 1:1 it is logged and reported as sent, so Hermes does not
         queue it. It is recorded in that chat's session with the thread's
         chat uid, so the owner's "send it" there knows what and where."""
-        origin = _email_origin(thread_uid)
-        if origin in self.chat_uids:
-            await self._fresh_cross_chat(origin)
+        origin = _email_origins().get(thread_uid)
         chat = self._chats.get(origin) or {}
         if origin in self.chat_uids and (_owner_dm(chat) or chat.get("trusted") and _owner_participant(chat)):
             target = origin
@@ -3925,10 +3923,6 @@ def _email_origins():
         return {}
 
 
-def _email_origin(thread_uid):
-    return _email_origins().get(thread_uid)
-
-
 def _record_email_origin(thread_uid, origin):
     with _email_origins_lock:
         origins = {**_email_origins(), thread_uid: origin}
@@ -4487,7 +4481,7 @@ def _plow_send_message(args, **_kwargs):
     group via start_group_thread, so the owner is CC'd by construction -- a
     person is never a 1:1, since a Plow dm is structurally owner<->agent and a
     third party is reachable only in a group. Email is plow_send_email's: an
-    address here, or an email thread's `cht_` id, is refused and names it.
+    address here is refused and names it.
     A `cht_` id or a `#title` names an EXISTING chat and posts there
     through send(), whose owner-CC guard refuses a hand-picked room the owner
     is not in. `action="list"` enumerates the owner's chats with participants,
@@ -4550,9 +4544,6 @@ def _plow_send_message(args, **_kwargs):
                                "error": f"{to!r} matched {len(matches)} chats; "
                                         "use action=list and pass a cht_ id"})
         target = matches[0]
-    if plow_email._live is not None and target in plow_email._live[0]._chats:
-        return json.dumps({"success": False, "error": f"{target} is an email thread: reply in it with "
-                                                      "plow_send_email; nothing was sent"})
 
     try:
         result = asyncio.run_coroutine_threadsafe(
@@ -4728,8 +4719,6 @@ def _plow_send_email(args, **_kwargs):
         except Exception as exc:  # noqa: BLE001 - a failed read is not an empty mailbox
             return json.dumps({"success": False, "error": f"could not list your email threads ({type(exc).__name__})"})
     body, subject = (args.get("body") or "").strip(), (args.get("subject") or "").strip()
-    if isinstance(to, str) and "@" in to and not to.startswith("cht_"):
-        to = [to]                            # one address, passed bare
     if not body:
         return json.dumps({"success": False, "error": "body is required; nothing was sent"})
     if isinstance(to, str) and to.startswith("cht_"):
