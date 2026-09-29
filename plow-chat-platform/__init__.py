@@ -1531,7 +1531,7 @@ class PlowChatAdapter(BasePlatformAdapter):
         # pre-existing and never handed to hermes.
         self._anchored_chats = {self.home_chat_uid: CHECKPOINT.exists()}
         self._last_uids = {self.home_chat_uid: self._load_checkpoint(self.home_chat_uid)}
-        self._backfill_scans: dict[str, tuple[str | None, list[dict[str, Any]]]] = {}
+        self._backfill_scans: dict[str, tuple[str | None, list[tuple[dict[str, Any], asyncio.Task | None]]]] = {}
         self._typing_last_sent = {}           # chat uid -> when its last `start` went out
         self._goal_wakes = {}                 # chat uid -> the one task pacing its goal
         self._goal_locks = {}                 # chat uid -> its load-modify-save lock
@@ -3293,6 +3293,8 @@ class PlowChatAdapter(BasePlatformAdapter):
         # chat, if the socket dropped before hermes accepted it. With no
         # checkpoint to stop at the loop simply pages to exhaustion, which for a
         # chat that started empty is the handful of messages actually missed.
+        if chat_uid in self._inbound:
+            await self._inbound[chat_uid][0].join()
         baseline, missed = self._backfill_scans.get(
             chat_uid, (self._last_uids.get(chat_uid), []))
         if missed:
@@ -3303,20 +3305,28 @@ class PlowChatAdapter(BasePlatformAdapter):
             async for m in self._history(http, chat_uid, limit=1):
                 latest = m["uid"]
                 break
-            if latest != missed[0]["uid"]:
+            if latest != missed[0][0]["uid"]:
                 missed = []
         self._backfill_scans[chat_uid] = (baseline, missed)
         page_size = 50
         # The checkpoint bounds this, not a page count: stopping early
         # would drop the oldest missed messages while advancing past them.
         async for m in self._history(http, chat_uid, limit=page_size,
-                                     starting_after=missed[-1]["uid"] if missed else None):
+                                     starting_after=missed[-1][0]["uid"] if missed else None):
             if m["uid"] == baseline:
                 break
-            missed.append(m)
+            # Signed media URLs expire while a later page or reconnect waits.
+            # Resolve them as they arrive, just as live frames do.
+            media = (m.get("attachments") or
+                     (m.get("reply_to") or {}).get("message", {}).get("attachments"))
+            resolved = (asyncio.create_task(_resolve_parts(m))
+                        if m.get("direction") == "inbound" and media else None)
+            missed.append((m, resolved))
         self._backfill_scans.pop(chat_uid, None)
-        for m in reversed(missed):           # oldest-first
-            if await self._on_message(m, chat_uid) is False:
+        for m, resolved in reversed(missed):  # oldest-first
+            accepted = (await self._on_message(m, chat_uid, resolved)
+                        if resolved else await self._on_message(m, chat_uid))
+            if accepted is False:
                 # An ignored message is still part of the recovered history.
                 # Earlier queued turns must be handed off before its uid can
                 # become the durable resume point.
@@ -3440,7 +3450,7 @@ class PlowChatAdapter(BasePlatformAdapter):
         self._seen_events.append(event_id)
         del self._seen_events[:-512]
 
-    async def _on_message(self, msg, chat_uid):
+    async def _on_message(self, msg, chat_uid, resolved=None):
         """One inbound message, from the socket or from the backfill, queued
         for the chat's server. False means it needed no hand-off."""
         if msg["direction"] != "inbound":
@@ -3469,7 +3479,7 @@ class PlowChatAdapter(BasePlatformAdapter):
                 uid,
                 sender,
                 msg["body"].startswith("/"),
-                asyncio.create_task(_resolve_parts(msg)),
+                resolved or asyncio.create_task(_resolve_parts(msg)),
                 bool(msg["body"].strip()),
                 msg.get("reply_to"),
             )

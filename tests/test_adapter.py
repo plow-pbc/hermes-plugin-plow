@@ -536,6 +536,32 @@ async def test_backfill_waits_for_earlier_inbound_before_checkpointing_an_echo(
     assert adapter._load_checkpoint("cht_a") == "echo"
 
 
+async def test_backfill_waits_for_in_flight_handoff_before_reading_its_baseline(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
+) -> None:
+    module = _load(monkeypatch, tmp_path)
+    adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
+    assert adapter._checkpoint("older", "cht_a")
+    queue: asyncio.Queue[Any] = asyncio.Queue()
+    queue.put_nowait(object())
+    adapter._inbound["cht_a"] = (queue, None)
+    reads: list[str] = []
+
+    class History:
+        def get(self, url: str, **_kw: Any) -> _Resp:
+            reads.append(url)
+            return _Resp({"data": [{"uid": "newer", "direction": "outbound"},
+                                   {"uid": "older", "direction": "outbound"}], "has_more": False})
+
+    task = asyncio.create_task(adapter._backfill(History(), "cht_a"))
+    await asyncio.sleep(0)
+    assert not reads, "the queued handoff may still advance the checkpoint"
+    assert adapter._checkpoint("newer", "cht_a")
+    queue.task_done()
+    await task
+    assert adapter._load_checkpoint("cht_a") == "newer"
+
+
 async def test_failed_third_page_keeps_the_first_two_for_the_next_session(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
 ) -> None:
@@ -570,6 +596,58 @@ async def test_failed_third_page_keeps_the_first_two_for_the_next_session(
     await adapter._backfill(http, "cht_a")
     assert reads == ["", "5", "4", "4", "4", "3", "2"]
     assert adapter._load_checkpoint("cht_a") == "5"
+
+
+async def test_cached_backfill_media_is_fetched_before_its_url_expires(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
+) -> None:
+    module = _load(monkeypatch, tmp_path)
+    adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
+    assert adapter._checkpoint("", "cht_a")
+    _mark_anchored(adapter, "cht_a")
+    handled = _capture_events(monkeypatch, adapter)
+    media_fetches: list[str] = []
+    media_fetched = asyncio.Event()
+    url_expired = False
+
+    async def fetch(item: dict[str, Any], _kind: str) -> str | None:
+        media_fetches.append(item["uid"])
+        media_fetched.set()
+        return None if url_expired else "/cache/photo.png"
+
+    monkeypatch.setattr(module, "_fetch_attachment", fetch)
+    failed = False
+    message = _envelope("evt_1", "cht_a", "newest", body="look",
+                        attachments=[_attachment()])["data"]["message"]
+
+    class FailedPage(_Resp):
+        async def __aenter__(self) -> _Resp:
+            raise ClientConnectionError("older page failed")
+
+    class History:
+        def get(self, url: str, **_kw: Any) -> _Resp:
+            nonlocal failed
+            if "limit=1" in url:
+                return _Resp({"data": [{"uid": "newest"}], "has_more": True})
+            after = url.partition("starting_after=")[2]
+            if after == "older" and not failed:
+                failed = True
+                return FailedPage({})
+            if not after:
+                return _Resp({"data": [message, {"uid": "older", "direction": "outbound"}], "has_more": True})
+            return _Resp({"data": [], "has_more": False})
+
+    http = History()
+    with pytest.raises(ClientConnectionError):
+        await adapter._backfill(http, "cht_a")
+    await asyncio.wait_for(media_fetched.wait(), 1)
+    assert media_fetches == ["att_photo"], "fetch while the signed URL is fresh"
+    url_expired = True
+    await adapter._backfill(http, "cht_a")
+    await _settle(adapter)
+    assert len(handled) == 1
+    assert handled[0]["media_urls"] == ["/cache/photo.png"]
+    assert media_fetches == ["att_photo"]
 
 
 async def test_resumed_scan_restarts_when_the_socket_gap_added_a_message(
@@ -1268,8 +1346,10 @@ async def test_a_backfilled_duplicate_of_an_in_flight_uid_is_dropped(
     frame = _envelope("evt_1", "cht_a", "msg_1")
     await adapter._on_frame(frame)
     await entered.wait()                     # the hand-off is in flight, unacked
-    await adapter._backfill(_Session(backfill=[frame["data"]["message"]]), "cht_a")
+    task = asyncio.create_task(adapter._backfill(_Session(backfill=[frame["data"]["message"]]), "cht_a"))
+    await asyncio.sleep(0)
     release.set()
+    await task
     await _settle(adapter)
 
     assert handled == ["msg_1"]
