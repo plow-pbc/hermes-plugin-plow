@@ -2471,16 +2471,20 @@ class PlowChatAdapter(BasePlatformAdapter):
     async def deliver_for_email(self, thread_uid, text):
         """Post what an email turn produced for the owner, never to the thread:
         in the chat the thread was started from while that chat is still the
-        owner's own or a trusted group they sit in, else the owner's 1:1.
-        With no 1:1 it is logged and reported as sent, so Hermes does not
-        queue it. It is recorded in that chat's session with the thread's
-        chat uid, so the owner's "send it" there knows what and where."""
+        owner's own or a trusted group they sit in, else the owner's 1:1 --
+        the home chat when it is one, or any granted chat that is, since a
+        home can be set to a group. With no 1:1 it is logged and reported as
+        sent, so Hermes does not queue it. It is recorded in that chat's
+        session with the thread's chat uid, so the owner's "send it" there
+        knows what and where."""
         origin = _email_origins().get(thread_uid)
         chat = self._chats.get(origin) or {}
+        one_to_one = next((uid for uid in (self.home_chat_uid, *self.chat_uids)
+                           if _owner_dm(self._chats.get(uid) or {})), None)
         if origin in self.chat_uids and (_owner_dm(chat) or chat.get("trusted") and _owner_participant(chat)):
             target = origin
-        elif _owner_dm(self._chats.get(self.home_chat_uid) or {}):
-            target = self.home_chat_uid
+        elif one_to_one:
+            target = one_to_one
         else:
             log.warning("[plow_email] no 1:1 for what %s produced; dropped", thread_uid)
             return SendResult(success=True)

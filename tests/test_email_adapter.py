@@ -241,12 +241,13 @@ async def test_an_email_turn_confines_the_chat_tools_and_never_sends_from_the_ow
     assert module._ACTIVE_TURN.get() is None
 
 
-def _phone(module: Any, monkeypatch: pytest.MonkeyPatch, *, home_is_owner_dm: bool = True) -> Any:
+def _phone(module: Any, monkeypatch: pytest.MonkeyPatch, *, home_is_owner_dm: bool = True,
+           extra: tuple[dict[str, Any], ...] = ()) -> Any:
     """The phone line as a live tool target: the owner's 1:1 (cht_a), a
     trusted group and a discretion group, each seating the owner."""
     phone = _live_tool(module, monkeypatch, None)
     phone._set_reach([_chat("cht_a", group=not home_is_owner_dm), _chat("cht_t", group=True, trusted=True),
-                      _chat("cht_g", group=True)])
+                      _chat("cht_g", group=True), *extra])
     return phone
 
 
@@ -304,22 +305,31 @@ async def test_an_email_turns_text_goes_to_the_owner_and_never_the_thread(
         [("plow_chat", delivered_to, f"{copy}\n(email thread cht_m)")] if delivered_to else [])
 
 
-async def test_with_no_1_1_an_email_turns_text_is_dropped_and_reported_sent(
+@pytest.mark.parametrize(("extra", "delivered_to"), [
+    pytest.param((), None, id="no-1:1-anywhere"),
+    pytest.param((_chat("cht_d"),), "cht_d", id="a-granted-1:1-when-the-home-is-a-group"),
+])
+async def test_with_the_home_a_group_the_owners_copy_finds_their_1_1_or_is_dropped(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
+    extra: tuple[dict[str, Any], ...], delivered_to: str | None,
 ) -> None:
-    """Somewhere to go or nowhere: never the thread, and never a failure that
-    Hermes would queue for redelivery."""
+    """The home chat can be set to a group, and the owner's 1:1 is then another
+    granted chat. With none at all the text goes nowhere: never the thread,
+    and never a failure that Hermes would queue for redelivery."""
     module, _entry = _load_email(monkeypatch, tmp_path)
     mail = _adapter(module)
     mail._set_reach([_mail_chat("cht_m")])
-    _phone(module, monkeypatch, home_is_owner_dm=False)
+    _phone(module, monkeypatch, home_is_owner_dm=False, extra=extra)
     http = _HTTP()
     monkeypatch.setattr(module.aiohttp, "ClientSession", lambda *a, **k: http)
+    _stub_mirror(monkeypatch)
     module._ACTIVE_TURN.set({"chat_uid": "cht_m", "owner": False, "dm": False, "authority": False, "email": True})
 
     result = await mail.send("cht_m", "Declined.", metadata={"notify": True})
 
-    assert result.success and http.posts == []
+    assert result.success
+    assert [url for url, _ in http.posts] == (
+        [f"{module.BASE}/v1/chats/{delivered_to}/messages"] if delivered_to else [])
 
 
 class _MailHTTP(_HTTP):
