@@ -520,6 +520,43 @@ def test_list_names_each_thread_with_its_subject_people_and_last_activity(
     assert http.posts == []
 
 
+@pytest.mark.parametrize(("mailbox", "signer"), [
+    pytest.param({"uid": "ln_em", "display_name": "Elm"}, "Elm", id="the-mailbox-persona"),
+    pytest.param(None, "yourself", id="no-mailbox"),
+])
+async def test_plow_send_email_tells_every_chat_to_sign_as_the_mailbox_persona(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, mailbox: dict[str, Any] | None, signer: str,
+) -> None:
+    """A send from the owner's own chat has no email-turn prompt behind it, so
+    the tool itself names who signs: the mailbox's persona, read at connect
+    and written onto the schema Hermes registered."""
+    module = _load(monkeypatch, tmp_path)
+    ctx = SimpleNamespace(tools={}, register_platform=lambda **kw: None, register_hook=lambda *a, **kw: None,
+                          register_tool=lambda **kw: ctx.tools.update({kw["name"]: kw}))
+    module.register(ctx)
+    phone = module.PlowChatAdapter(SimpleNamespace(extra={}))
+    me = {"line": {"uid": "ln_e", "provider_key": "+16505550100"}, "agent": {"uid": "agt_1", "created_at": "x"},
+          "mailbox": mailbox, "signup": None}
+
+    class _ConnectHTTP(_HTTP):
+        def get(self, url: str, *, headers: dict[str, str]) -> _Resp:
+            if url.endswith("/v1/agents/me"):
+                return _Resp(me)
+            if url.endswith("/v1/auth/profile"):
+                return _Resp({}, status=404)
+            return _Resp({"object": "list", "data": [_chat("cht_a")], "has_more": False})
+
+    monkeypatch.setattr(module.aiohttp, "ClientSession", lambda *a, **k: _ConnectHTTP())
+
+    async def listen_once() -> None: ...
+
+    monkeypatch.setattr(phone, "_listen", listen_once)
+    await phone.connect()
+
+    description = ctx.tools["plow_send_email"]["schema"]["description"]
+    assert f"sign it as {signer}, never as your owner" in description
+
+
 def test_plow_send_message_sends_no_email(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> None:
     """An address is refused before anything reaches Plow, and the refusal
     names plow_send_email."""
