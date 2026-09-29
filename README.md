@@ -38,11 +38,12 @@ The directory is named for the plugin id so the install can be a directory copy:
 > `POST /v1/chats` (outbound thread creation — `plow_send_message`'s person-targeting
 > 404s against an older API, so that API change deploys before any
 > `agent-mgr` SHA advance),
-> `POST /v1/email-lines/{uid}/messages` (an email address in `plow_send_message`'s `to`,
-> with a `subject`, goes out from the mailbox that shares this agent's persona; the API
-> seats the owner in `cc` from the credential, so the plugin sends none — deploy
-> [`plow-pbc/plow#1959`](https://github.com/plow-pbc/plow/pull/1959), which does that
-> seating, before this plugin SHA is pinned, or every new email is refused with a 403),
+> `POST /v1/email-lines/{uid}/messages` returning the new thread's `chat_uid`, and `mailbox`
+> on `GET /v1/agents/me` (`plow_send_email` starts a thread from the mailbox `/me` names
+> and replies in a thread by its chat uid; the API seats the owner in `cc` from the
+> credential, so the plugin sends none — deploy
+> [`plow-pbc/plow#2221`](https://github.com/plow-pbc/plow/pull/2221) before this plugin SHA
+> is pinned, or every new thread fails with "this agent's persona has no mailbox"),
 > `agent.created_at` on `GET /v1/agents/me` (a first install replays what reached a chat after
 > the agent was created — [`plow-pbc/plow#2103`](https://github.com/plow-pbc/plow/pull/2103)),
 > `POST /v1/payment-approvals` (`plow_request_payment` — the API immediately
@@ -241,11 +242,21 @@ platform holding its own socket. Every chat resource names its line's
 adapter serves the `imessage` ones, so a mail never renders as an SMS room
 and a text never renders as an email. Sessions are keyed
 `plow_email:<dm|group>:<cht_id>`; the platform hint names the line's
-address, read off the thread's own agent participant at connect. Replies go
-out through the same chat send endpoint — plow dispatches on the provider —
-with no approval gate: this is the agent's own line, like its number. Only
-the turn's answer, a cron delivery, or a turn-less send is ever mailed;
-mid-turn prose and the runtime's diagnostics are dropped. No cron home
+address, read off the thread's own agent participant at connect.
+
+Nothing the adapter sends reaches a thread. Mail leaves only through
+`plow_send_email`: `to` a thread's chat uid replies in it through the chat
+send endpoint (plow dispatches on the provider, reply-all in the same Gmail
+thread), `to` a list of addresses with a `subject` starts a new thread, and
+`action=list` names the threads. A non-owner's email turn may only reply in
+its own thread and sends no text at all; every other use needs the owner's
+authority. What an email turn ends with, a cron delivery and the runtime's
+error notice go privately to the owner instead: to the phone chat the thread
+was started from while it is the owner's own or a trusted group they sit in
+(recorded in `$HERMES_HOME/plow_email_origins.json`), else the owner's 1:1,
+opening with a line naming the email, and recorded in that chat's session
+with the thread's uid. A closing `NO_REPLY`, mid-turn prose and the runtime's
+diagnostics go nowhere. No cron home
 (`PLOW_HOME_CHANNEL` stays the phone line's), no roster policy on
 multi-address threads, no backfill across a socket gap, and no delivered
 attachments in v1 — an attachment-only mail arrives as a placeholder naming
@@ -287,8 +298,7 @@ passes `confirm=true` for an explicit owner request. Opening a trusted thread is
 owner-only too, through `plow_send_message(..., trusted=true)` on an owner turn —
 no `confirm` there. `trusted` applies only to a group being created; opening onto
 an existing thread adopts that thread's own trust, and the returned value is
-authoritative. It has nothing to say about an email address in `to` — no group is
-created there, so it is ignored rather than gated. Member turns and calls outside an active chat turn cannot change either.
+authoritative. Member turns and calls outside an active chat turn cannot change either.
 
 This plugin version requires a Plow API that publishes the required `trusted`
 chat field and `PUT /v1/chats/{uid}/trusted`. Deploy that API first: against an

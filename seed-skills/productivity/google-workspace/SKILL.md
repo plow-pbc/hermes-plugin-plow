@@ -1,7 +1,7 @@
 ---
 name: google-workspace
 description: "Gmail and Google Calendar through the owner's Mac."
-version: 2.5.0
+version: 2.6.0
 ---
 
 # Google Workspace — through the owner's Mac
@@ -21,11 +21,12 @@ Mac-managed instances):
    only source for the command and its arguments — do not carry a
    spelling from memory or from this file. The Mac mints its own
    short-lived Google token; you never see or need one.
-2. A new email you send as yourself is not `gmail send` at all: use
-   `plow_send_message` with the address in `to` and a `subject`, and it
-   leaves from your own mailbox with your owner copied, under the same
-   authority a text needs and with no approval card. `gmail send` below
-   is only for mail your owner wants out of their own account.
+2. Email you send as yourself is not `gmail send` at all: use
+   `plow_send_email` (a thread's chat id to reply, or addresses and a
+   `subject` to start one), and it leaves from your own mailbox with your
+   owner copied, under the same authority a text needs and with no
+   approval card. `gmail send` below is only for mail your owner wants out
+   of their own account.
 3. Sending an email from your owner's account needs a turn with the
    owner's authority — the owner anywhere, or a human in a group the
    owner trusts. On such a turn the

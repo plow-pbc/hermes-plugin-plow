@@ -72,8 +72,9 @@ async def _granted_chats(http, auth):
 
 
 # What an adapter holds before its first identity read, and what a member's
-# turn is shown: no offer, no number, no agent, no birth, no roster.
-_NO_IDENTITY = {"signup": None, "number": None, "agent": None, "created_at": None, "lines": ()}
+# turn is shown: no offer, no number, no agent, no birth, no mailbox, no roster.
+_NO_IDENTITY = {"signup": None, "number": None, "agent": None, "created_at": None, "mailbox": None,
+                "lines": ()}
 
 
 async def _read_identity(http, auth):
@@ -81,7 +82,8 @@ async def _read_identity(http, auth):
 
     `GET /v1/agents/me` -- not the `/v1/agents/cloud/me` alias, which serves
     the old shape with no `agent` key -- for the signup block, this agent's
-    number, uid and birth. 200 answers those; 404 is the documented "this token
+    number, uid, birth and the mailbox that shares its persona (null when the
+    persona has none). 200 answers those; 404 is the documented "this token
     is not one agent" (a wildcard or multi-line grant) and answers none of
     them, so the caller keeps what it holds. Anything else is not an answer
     about identity: through the credential seam (a 401 is terminal), then fail
@@ -101,7 +103,8 @@ async def _read_identity(http, auth):
         if resp.status == 200:
             me = await resp.json(content_type=None)
             identity = {"signup": me.get("signup"), "number": (me.get("line") or {}).get("provider_key"),
-                        "agent": me["agent"]["uid"], "created_at": me["agent"]["created_at"]}
+                        "agent": me["agent"]["uid"], "created_at": me["agent"]["created_at"],
+                        "mailbox": me.get("mailbox")}
         elif resp.status != 404:
             _auth_raise_for_status(resp)
             raise RuntimeError(f"the identity read returned HTTP {resp.status}")
@@ -409,6 +412,23 @@ def _split(listing, provider):
     neither unknown (no reach refresh) nor outside the grant (no warning)."""
     served = {chat["uid"]: chat for chat in listing if _provider(chat) == provider}
     return served, frozenset(chat["uid"] for chat in listing) - served.keys()
+
+
+# The model's one legal way to stay silent. An empty response is not silence:
+# hermes' conversation loop retries empty content at full input cost and the
+# retry pressure makes the model verbalize its silence instead ("(no reply
+# needed)"), which then delivers as a real message. The sentinel gives the
+# turn non-empty content that send() drops before delivery: the marker alone,
+# or the marker closing a turn whose working-out came first.
+NO_REPLY_SENTINEL = "NO_REPLY"
+
+
+def _ends_silent(body):
+    """Does this text close on the sentinel? Whatever the model wrote above it
+    is its working-out, and ".NO_REPLY" or "*NO_REPLY*" is the same answer
+    decorated, which gateway/response_filters.py already tolerates upstream."""
+    lines = [line for line in body.splitlines() if line.strip()]
+    return bool(lines) and lines[-1].strip().strip(".*_ `") == NO_REPLY_SENTINEL
 
 
 # Hermes' own diagnostics reach an adapter through plain send() carrying no

@@ -31,6 +31,7 @@ from test_adapter import (
     _load,
     _mark_anchored,
     _settle,
+    _stub_mirror,
 )
 
 ADDRESS = "elm@plow.co"
@@ -114,11 +115,11 @@ async def test_a_mail_thread_is_plow_emails_turn_and_never_plow_chats(
     frame is a plow_email turn -- platform, chat_type and chat_id are the
     three fields upstream's build_session_key (gateway/session.py:641) joins
     into `<ns>:plow_email:<chat_type>:<chat_uid>` -- and the phone line's
-    frame is not this platform's. The prompt is the owner fact, plus the
-    roster on an owner's own turn; no trust prose; the hint rides the
+    frame is not this platform's. The prompt names the mailbox persona as the
+    writer, who is on the thread, the one route to it and where the final
+    text goes, plus the roster on an owner's own turn; the hint rides the
     platform entry. On a member's mail it is still the line's owner who is
-    named, and only an
-    owner's mail carries owner authority. An attachment-only mail is not
+    named, and only an owner's mail carries owner authority. An attachment-only mail is not
     silently "(empty email)": the placeholder names the count and one line is
     logged. A thread whose roster has no owner at all is the one shape that
     cannot be rendered: it must name itself on the way out, because the
@@ -149,8 +150,14 @@ async def test_a_mail_thread_is_plow_emails_turn_and_never_plow_chats(
     assert event["text"] == expected_text and event["message_id"] == "msg_1"
     roster = module._lines_fact(IDENTITY)
     assert "that is you" in roster, "the mail line's own persona is marked"
-    assert event["channel_prompt"] == (f"{module._owner_fact(OWNER)} {roster}" if role == "owner"
-                                        else module._owner_fact(OWNER))
+    prompt = event["channel_prompt"]
+    assert f"You are Elm, and {ADDRESS} is your own mailbox." in prompt, "the persona writes, not the owner"
+    assert module._owner_fact(OWNER) in prompt
+    assert ("Dana <dana@example.com>" in prompt) is group, "who else is on the thread"
+    assert "plow_send_email" in prompt and "cht_m" in prompt, "the one route to this thread"
+    assert module.NO_REPLY_SENTINEL in prompt, "the final text is the owner's, and may be nothing"
+    assert (roster in prompt) is (role == "owner"), "the roster rides owner turns only"
+    assert ("This email is from your owner." in prompt) is (role == "owner")
     if attachments:
         assert "cht_m: attachment-only mail (1 attachment(s))" in caplog.text
 
@@ -229,51 +236,292 @@ async def test_an_email_turn_confines_the_chat_tools_and_never_sends_from_the_ow
     assert record == ([(OWNER[1].upper(), {"display_name": "Sam"})] if owner else []) + [
         ("dana@example.com", {"display_name": "Dana"})]
     gate = module._pre_tool_call("mcp__latch__plow_run_command", {"argv": _SEND_ARGV}, session_id="s1")
-    assert gate["action"] == "block"
+    assert gate["action"] == "block" and "plow_send_email" in gate["message"], "the refusal names the real route"
     await mail.on_processing_complete(event, None)
     assert module._ACTIVE_TURN.get() is None
 
 
+def _phone(module: Any, monkeypatch: pytest.MonkeyPatch, *, home_is_owner_dm: bool = True) -> Any:
+    """The phone line as a live tool target: the owner's 1:1 (cht_a), a
+    trusted group and a discretion group, each seating the owner."""
+    phone = _live_tool(module, monkeypatch, None)
+    phone._set_reach([_chat("cht_a", group=not home_is_owner_dm), _chat("cht_t", group=True, trusted=True),
+                      _chat("cht_g", group=True)])
+    return phone
+
+
 @pytest.mark.parametrize(
-    ("target", "turn", "metadata", "body", "posted", "success"),
+    ("turn", "metadata", "body", "origin", "delivered_to"),
     [
-        pytest.param("cht_m", None, None, "Attached below.", True, True, id="turn-less"),
-        pytest.param("cht_m", ("cht_m", True), {"notify": True}, "Attached below.", True, True, id="the-answer"),
-        pytest.param("cht_m", None, {"job_id": "j1"}, "Weekly digest", True, True, id="cron"),
-        pytest.param("cht_m", ("cht_m", True), None, "Looking that up now.", False, True, id="mid-turn-prose"),
-        pytest.param("cht_m", None, {"notify": True}, "⏳ Working — still on it", False, True, id="diagnostic"),
-        pytest.param("cht_m", ("cht_m", False), {"notify": True}, "Here it is.", True, True, id="member-reply"),
-        pytest.param("cht_n", ("cht_m", False), {"notify": True}, "Here it is.", False, False, id="member-cross-thread"),
-        pytest.param("cht_a", None, {"notify": True}, "Hi", False, False, id="not-an-email-thread"),
-        pytest.param("cht_m", None, {"notify": True}, "Attached below.", True, False, id="plow-refused-it"),
+        pytest.param(("cht_m", True), {"notify": True}, "Here it is.", None, "cht_a", id="owner-answer"),
+        pytest.param(("cht_m", False), {"notify": True}, "Not mine to act on; I'll let it close.", None,
+                     "cht_a", id="non-owner-final"),
+        # The runtime's error notice arrives after the turn has closed.
+        pytest.param(None, None, "Sorry, I encountered an error (Boom).", None, "cht_a", id="error-notice"),
+        pytest.param(None, {"job_id": "j1"}, "Weekly digest", None, "cht_a", id="cron"),
+        pytest.param(("cht_m", True), {"notify": True}, "Here it is.", "cht_t", "cht_t",
+                     id="started-from-a-trusted-group"),
+        pytest.param(("cht_m", True), {"notify": True}, "Here it is.", "cht_g", "cht_a",
+                     id="an-untrusted-origin-falls-back-to-the-1:1"),
+        pytest.param(("cht_m", True), None, "Looking that up now.", None, None, id="mid-turn-prose"),
+        pytest.param(None, {"notify": True}, "⏳ Working — still on it", None, None, id="diagnostic"),
+        pytest.param(("cht_m", False), {"notify": True}, "Not addressed to me.\nNO_REPLY", None, None,
+                     id="closing-silence"),
     ],
 )
-async def test_a_reply_goes_to_the_chat_send_endpoint_and_only_the_answer_goes(
+async def test_an_email_turns_text_goes_to_the_owner_and_never_the_thread(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
-    target: str, turn: tuple[str, bool] | None, metadata: dict[str, Any] | None,
-    body: str, posted: bool, success: bool,
+    turn: tuple[str, bool] | None, metadata: dict[str, Any] | None,
+    body: str, origin: str | None, delivered_to: str | None,
 ) -> None:
-    """Every send here is an email, so only the turn's answer (`notify`), a
-    cron delivery (`job_id`) or a turn-less send goes out -- the model's
-    working-out and Hermes' own diagnostics never do, and there is no verbose
-    carve-out. The endpoint is the chat send; plow dispatches on the chat's
-    provider (design §3). A member's turn is confined to its own thread, and
-    a send plow refuses fails loudly rather than reading as delivered."""
+    """Nothing the adapter sends reaches a thread. What a turn ends with, a
+    cron delivery and the runtime's error notice go to the chat the thread was
+    started from while it is still the owner's own or a trusted group, else to
+    the owner's 1:1, opening with a line naming the email, and are recorded in
+    that chat's session with the thread's uid. Working-out, diagnostics and a
+    closing NO_REPLY go nowhere."""
     module, _entry = _load_email(monkeypatch, tmp_path)
     mail = _adapter(module)
-    mail._set_reach([_chat("cht_a"), _mail_chat("cht_m"), _mail_chat("cht_n")])
-    http = _HTTP(status=400 if posted and not success else 200)
-    monkeypatch.setattr(module.plow_email.aiohttp, "ClientSession", lambda *a, **k: http)
+    mail._set_reach([_mail_chat("cht_m")])
+    mail._senders["cht_m"] = "Dana"
+    _phone(module, monkeypatch)
+    http = _HTTP()
+    monkeypatch.setattr(module.aiohttp, "ClientSession", lambda *a, **k: http)
+    mirrored = _stub_mirror(monkeypatch)
+    if origin:
+        module._record_email_origin("cht_m", origin)
     if turn:
         module._ACTIVE_TURN.set({"chat_uid": turn[0], "owner": turn[1], "dm": False,
                                  "authority": turn[1], "email": True})
 
-    result = await mail.send(target, body, metadata=metadata)
+    result = await mail.send("cht_m", body, metadata=metadata)
 
-    assert result.success is success
-    assert http.posts == ([(f"{module.BASE}/v1/chats/{target}/messages", {"body": body})] if posted else [])
-    assert result.message_id == ("msg_sent" if posted and success else None)
-    assert success or result.error.startswith("Plow Email")
+    assert result.success
+    copy = f'Email "Re: invoice" from Dana:\n{body}'
+    assert http.posts == ([(f"{module.BASE}/v1/chats/{delivered_to}/messages", {"body": copy})]
+                          if delivered_to else [])
+    assert [(c["platform"], c["chat_id"], c["text"]) for c in mirrored] == (
+        [("plow_chat", delivered_to, f"{copy}\n(email thread cht_m)")] if delivered_to else [])
+
+
+async def test_with_no_1_1_an_email_turns_text_is_dropped_and_reported_sent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
+) -> None:
+    """Somewhere to go or nowhere: never the thread, and never a failure that
+    Hermes would queue for redelivery."""
+    module, _entry = _load_email(monkeypatch, tmp_path)
+    mail = _adapter(module)
+    mail._set_reach([_mail_chat("cht_m")])
+    _phone(module, monkeypatch, home_is_owner_dm=False)
+    http = _HTTP()
+    monkeypatch.setattr(module.aiohttp, "ClientSession", lambda *a, **k: http)
+    module._ACTIVE_TURN.set({"chat_uid": "cht_m", "owner": False, "dm": False, "authority": False, "email": True})
+
+    result = await mail.send("cht_m", "Declined.", metadata={"notify": True})
+
+    assert result.success and http.posts == []
+
+
+class _MailHTTP(_HTTP):
+    """The API as plow_send_email reaches it: the chat listing, a thread's
+    newest message, the chat send and the new-mail send."""
+
+    def __init__(self, listing: list[dict[str, Any]], *, new_mail: dict[str, Any] | None = None,
+                 status: int = 200) -> None:
+        super().__init__(status)
+        self.listing, self.new_mail, self.gets = listing, new_mail, []
+
+    def get(self, url: str, *, headers: dict[str, str]) -> _Resp:
+        self.gets.append(url)
+        if url.endswith("/messages?limit=1"):
+            return _Resp({"object": "list", "data": [{"uid": "msg_9", "created_at": "2026-09-28T12:00:00Z"}],
+                          "has_more": False})
+        return _Resp({"object": "list", "data": self.listing, "has_more": False})
+
+    def post(self, url: str, *, json: dict[str, Any], headers: dict[str, str]) -> _Resp:
+        self.posts.append((url, json))
+        if "/email-lines/" in url:
+            return _Resp(self.new_mail, 202 if self.new_mail["status"] != "sent" else 201)
+        return _Resp({"uid": "msg_sent"} if self.status < 400 else {"detail": "nope"}, self.status)
+
+
+def _email_tool(module: Any, monkeypatch: pytest.MonkeyPatch, http: _MailHTTP) -> Any:
+    """Both lines live for the tool, one loop between them, the API stubbed."""
+    phone = _phone(module, monkeypatch)
+    phone._identity = IDENTITY
+    mail = _adapter(module)
+    mail._set_reach(http.listing)
+    sessions: list[Any] = []
+
+    def get_or_create_session(source: Any, touch_activity: bool) -> Any:
+        sessions.append(source)
+        return SimpleNamespace(session_id="sess_new")
+
+    mail._session_store = SimpleNamespace(get_or_create_session=get_or_create_session)
+    mail.sessions = sessions
+    monkeypatch.setattr(module.plow_email, "_live", (mail, module._live[1]))
+    monkeypatch.setattr(module.aiohttp, "ClientSession", lambda *a, **k: http)
+    return mail
+
+
+_OWNER_DM_TURN = {"chat_uid": "cht_a", "owner": True, "dm": True, "authority": True}
+_TRUSTED_GROUP_TURN = {"chat_uid": "cht_t", "owner": False, "dm": False, "authority": True}
+_DISCRETION_TURN = {"chat_uid": "cht_g", "owner": False, "dm": False, "authority": False}
+_OWNER_EMAIL_TURN = {"chat_uid": "cht_m", "owner": True, "dm": False, "authority": True, "email": True}
+_NON_OWNER_EMAIL_TURN = {"chat_uid": "cht_m", "owner": False, "dm": False, "authority": False, "email": True}
+
+
+@pytest.mark.parametrize(
+    ("turn", "args", "allowed"),
+    [
+        pytest.param(_NON_OWNER_EMAIL_TURN, {"to": "cht_m", "body": "Thanks!"}, True, id="non-owner-own-thread"),
+        pytest.param(_NON_OWNER_EMAIL_TURN, {"to": "cht_n", "body": "x"}, False, id="non-owner-other-thread"),
+        pytest.param(_NON_OWNER_EMAIL_TURN, {"to": ["x@example.com"], "subject": "s", "body": "x"}, False,
+                     id="non-owner-new-thread"),
+        pytest.param(_NON_OWNER_EMAIL_TURN, {"action": "list"}, False, id="non-owner-list"),
+        pytest.param(_DISCRETION_TURN, {"to": "cht_m", "body": "x"}, False, id="untrusted-group-member"),
+        pytest.param(None, {"to": "cht_m", "body": "x"}, False, id="no-turn"),
+        pytest.param(_OWNER_DM_TURN, {"to": "cht_n", "body": "Yes, Friday works."}, True, id="owner-dm-any-thread"),
+        pytest.param(_TRUSTED_GROUP_TURN, {"to": "cht_n", "body": "x"}, True, id="trusted-group"),
+        pytest.param(_OWNER_EMAIL_TURN, {"to": "cht_n", "body": "x"}, True, id="owner-email-any-thread"),
+    ],
+)
+def test_plow_send_email_reaches_only_what_the_turn_may(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
+    turn: dict[str, Any] | None, args: dict[str, Any], allowed: bool,
+) -> None:
+    """A non-owner's email turn may only reply in its own thread; any other
+    turn needs the owner's authority. A refusal names the route and reaches
+    no API at all."""
+    module, _entry = _load_email(monkeypatch, tmp_path)
+    http = _MailHTTP([_mail_chat("cht_m"), _mail_chat("cht_n")])
+    _email_tool(module, monkeypatch, http)
+    _stub_mirror(monkeypatch)
+    module._ACTIVE_TURN.set(turn)
+
+    out = json.loads(module._plow_send_email(args))
+
+    if allowed:
+        assert out == {"sent": True, "chat_uid": args["to"]}
+        assert http.posts == [(f"{module.BASE}/v1/chats/{args['to']}/messages", {"body": args["body"]})]
+    else:
+        assert out["success"] is False and "nothing was sent" in out["error"]
+        assert http.posts == [] and http.gets == []
+
+
+def test_a_reply_from_another_chat_is_recorded_in_the_threads_session(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
+) -> None:
+    """The owner's "send it" in their own chat lands in the thread by its chat
+    uid, and the thread's next turn knows it was said."""
+    module, _entry = _load_email(monkeypatch, tmp_path)
+    http = _MailHTTP([_mail_chat("cht_m")])
+    _email_tool(module, monkeypatch, http)
+    mirrored = _stub_mirror(monkeypatch)
+    module._ACTIVE_TURN.set(_OWNER_DM_TURN)
+
+    out = json.loads(module._plow_send_email({"to": "cht_m", "body": "Friday works."}))
+
+    assert out == {"sent": True, "chat_uid": "cht_m"}
+    assert [(c["platform"], c["chat_id"], c["text"]) for c in mirrored] == [
+        ("plow_email", "cht_m", "Friday works.")]
+
+
+@pytest.mark.parametrize(
+    ("turn", "origin"),
+    [
+        pytest.param(_TRUSTED_GROUP_TURN, "cht_t", id="from-a-phone-chat-reports-there"),
+        pytest.param(_OWNER_EMAIL_TURN, None, id="from-an-email-turn-reports-to-the-1:1"),
+    ],
+)
+def test_a_new_thread_returns_its_chat_and_opens_its_session_with_what_was_sent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
+    turn: dict[str, Any], origin: str | None,
+) -> None:
+    """A new thread goes out from this agent's own mailbox (read off
+    /v1/agents/me), comes back as a chat uid, records where it came from, and
+    its session opens with the opening message and that origin -- so its
+    first reply turn has context."""
+    module, _entry = _load_email(monkeypatch, tmp_path)
+    started = _mail_chat("cht_new", group=True)
+    http = _MailHTTP([started], new_mail={"status": "sent", "chat_uid": "cht_new", "thread_id": "t1",
+                                          "message_id": "m1", "chat_unrecorded_reason": None})
+    mail = _email_tool(module, monkeypatch, http)
+    mirrored = _stub_mirror(monkeypatch)
+    module._ACTIVE_TURN.set(turn)
+
+    out = json.loads(module._plow_send_email(
+        {"to": ["dana@example.com"], "subject": "Friday", "body": "Are you free Friday?"}))
+
+    assert out == {"sent": True, "chat_uid": "cht_new"}
+    assert http.posts == [(f"{module.BASE}/v1/email-lines/ln_em/messages",
+                           {"to": ["dana@example.com"], "subject": "Friday", "body": "Are you free Friday?"})]
+    assert module._email_origin("cht_new") == origin
+    [source] = mail.sessions
+    assert (source.platform, source.chat_id, source.chat_type) == ("plow_email", "cht_new", "group")
+    [seed] = mirrored
+    assert (seed["platform"], seed["chat_id"], seed["session_id"]) == ("plow_email", "cht_new", "sess_new")
+    assert "Are you free Friday?" in seed["text"] and (origin or "cht_a") in seed["text"]
+
+
+@pytest.mark.parametrize(
+    ("new_mail", "sent"),
+    [
+        pytest.param({"status": "sent", "chat_uid": None, "chat_unrecorded_reason": "persistence_failed"},
+                     True, id="sent-but-unrecorded"),
+        pytest.param({"status": "acceptance_unknown", "chat_uid": None,
+                      "chat_unrecorded_reason": "acceptance_unknown"}, "unknown", id="acceptance-unknown"),
+    ],
+)
+def test_a_new_thread_with_no_chat_uid_says_so_and_is_never_resent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, new_mail: dict[str, Any], sent: Any,
+) -> None:
+    """A null chat uid is reported as null with the API's reason: no chat id
+    is invented, no origin recorded, and exactly one POST went out."""
+    module, _entry = _load_email(monkeypatch, tmp_path)
+    http = _MailHTTP([], new_mail=new_mail)
+    _email_tool(module, monkeypatch, http)
+    module._ACTIVE_TURN.set(_OWNER_DM_TURN)
+
+    out = json.loads(module._plow_send_email({"to": ["dana@example.com"], "subject": "Hi", "body": "Hello"}))
+
+    assert out["sent"] == sent and out["chat_uid"] is None
+    assert out["chat_unrecorded_reason"] == new_mail["chat_unrecorded_reason"]
+    assert "Do not resend" in out["note"]
+    assert len(http.posts) == 1 and module._email_origins() == {}
+
+
+def test_list_names_each_thread_with_its_subject_people_and_last_activity(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
+) -> None:
+    """Only this mailbox's threads, each with its chat uid, subject,
+    participants and the newest message's time."""
+    module, _entry = _load_email(monkeypatch, tmp_path)
+    http = _MailHTTP([_chat("cht_a"), _mail_chat("cht_m", group=True)])
+    _email_tool(module, monkeypatch, http)
+    module._ACTIVE_TURN.set(_OWNER_DM_TURN)
+
+    out = json.loads(module._plow_send_email({"action": "list"}))
+
+    assert out == {"has_more": False, "threads": [{
+        "chat_uid": "cht_m", "subject": "Re: invoice", "last_activity": "2026-09-28T12:00:00Z",
+        "participants": [{"name": "Sam", "email": "sam@example.com", "role": "owner"},
+                         {"name": "Dana", "email": "dana@example.com", "role": "member"}]}]}
+    assert http.posts == []
+
+
+def test_plow_send_message_sends_no_email(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> None:
+    """An address, or an email thread's chat id, is refused before anything
+    reaches Plow, and the refusal names plow_send_email."""
+    module, _entry = _load_email(monkeypatch, tmp_path)
+    http = _MailHTTP([_mail_chat("cht_m")])
+    _email_tool(module, monkeypatch, http)
+    module._ACTIVE_TURN.set(_OWNER_DM_TURN)
+
+    for to in (["dana@example.com"], "cht_m"):
+        out = json.loads(module._plow_send_message({"to": to, "body": "hi"}))
+        assert out["success"] is False and "plow_send_email" in out["error"]
+    assert http.posts == []
 
 
 async def test_the_email_line_names_its_own_terminal_stop(
