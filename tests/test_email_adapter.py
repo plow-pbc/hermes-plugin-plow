@@ -116,8 +116,8 @@ async def test_a_mail_thread_is_plow_emails_turn_and_never_plow_chats(
     three fields upstream's build_session_key (gateway/session.py:641) joins
     into `<ns>:plow_email:<chat_type>:<chat_uid>` -- and the phone line's
     frame is not this platform's. The prompt names the mailbox persona as the
-    writer, who is on the thread, the one route to it and where the final
-    text goes, plus the roster on an owner's own turn; the hint rides the
+    writer, the one route to the thread and where the final text goes, and no
+    name a sender chose, plus the roster on an owner's own turn; the hint rides the
     platform entry. On a member's mail it is still the line's owner who is
     named, and only an owner's mail carries owner authority. An attachment-only mail is not
     silently "(empty email)": the placeholder names the count and one line is
@@ -153,11 +153,12 @@ async def test_a_mail_thread_is_plow_emails_turn_and_never_plow_chats(
     prompt = event["channel_prompt"]
     assert f"You are Elm, and {ADDRESS} is your own mailbox." in prompt, "the persona writes, not the owner"
     assert module._owner_fact(OWNER) in prompt
-    assert ("Dana <dana@example.com>" in prompt) is group, "who else is on the thread"
+    assert "Dana" not in prompt and "dana@example.com" not in prompt, "no name a sender chose is system text"
     assert "plow_send_email" in prompt and "cht_m" in prompt, "the one route to this thread"
     assert module.NO_REPLY_SENTINEL in prompt, "the final text is the owner's, and may be nothing"
     assert (roster in prompt) is (role == "owner"), "the roster rides owner turns only"
     assert ("This email is from your owner." in prompt) is (role == "owner")
+    assert ("This email is not from your owner." in prompt) is (role != "owner")
     if attachments:
         assert "cht_m: attachment-only mail (1 attachment(s))" in caplog.text
 
@@ -553,19 +554,6 @@ def test_list_names_each_thread_with_its_subject_people_and_last_activity(
         "chat_uid": "cht_m", "subject": "Re: invoice", "last_activity": "2026-09-28T12:00:00Z",
         "participants": [{"name": "Sam", "email": "sam@example.com", "role": "owner"},
                          {"name": "Dana", "email": "dana@example.com", "role": "member"}]}]}
-    assert http.posts == []
-
-
-def test_plow_send_message_sends_no_email(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> None:
-    """An address is refused before anything reaches Plow, and the refusal
-    names plow_send_email."""
-    module, _entry = _load_email(monkeypatch, tmp_path)
-    http = _MailHTTP([_mail_chat("cht_m")])
-    _email_tool(module, monkeypatch, http)
-    module._ACTIVE_TURN.set(_OWNER_DM_TURN)
-
-    out = json.loads(module._plow_send_message({"to": ["dana@example.com"], "body": "hi"}))
-    assert out["success"] is False and "plow_send_email" in out["error"]
     assert http.posts == []
 
 

@@ -38,7 +38,6 @@ from ._transport import (
     _owner_fact,
     _owner_handle,
     _owner_identity,
-    _participant_identity,
     _refresh_identity,
     _self_agent_line,
     _serve,
@@ -67,26 +66,19 @@ def check_requirements():
     return bool(os.environ.get("PLOW_AGENT_TOKEN"))
 
 
-def _member(participant):
-    """One person on a thread as the prompt names them: name and address."""
-    name, handle = _participant_identity(participant), _one_line(participant.get("provider_key"))
-    return f"{name} <{handle}>" if handle and name != handle else name or handle
-
-
-def _turn_prompt(chat, sender, owner_turn):
-    """What every email turn is told: who it is, whose mailbox this is, who is
-    on the thread, that only plow_send_email reaches it, and that the final
-    text is the owner's. The persona is the mailbox line's own name."""
+def _turn_prompt(chat, owner_turn):
+    """What every email turn is told: who it is, whose mailbox this is, that
+    only plow_send_email reaches the thread, and that the final text is the
+    owner's. System-authority text, so it carries only the mailbox persona,
+    the owner's own fact and routing -- never a name a sender chose, which
+    reaches the model as the message's own sender label."""
     persona = _agent_name(chat)
-    others = [_member(p) for p in chat.get("participants") or []
-              if p.get("type") == "member" and p.get("role") != "owner"]
     return " ".join([
         f"You are {persona or 'a Plow assistant'}, and {_self_agent_line(chat).get('provider_key')} "
         "is your own mailbox.",
         _owner_fact(_owner_identity(chat)),
-        (f"On this thread: {', '.join(others)}, and your owner, who is copied on everything."
-         if others else "Your owner is copied on everything on this thread."),
-        "This email is from your owner." if owner_turn else f"This email is from {sender}, not your owner.",
+        "Your owner is copied on everything on this thread.",
+        "This email is from your owner." if owner_turn else "This email is not from your owner.",
         "Nothing reaches this thread unless you send it with plow_send_email to this thread's chat "
         f"id, {chat['uid']}.",
         "Your final text is private: it goes to your owner in the chat they use with you, never to "
@@ -218,8 +210,7 @@ class PlowEmailAdapter(BasePlatformAdapter):
         chat = self._chats[chat_uid]
         info = await self.get_chat_info(chat_uid)
         try:
-            channel_prompt = _turn_prompt(chat, _one_line(sender.get("display_name")) or sender["uid"],
-                                          sender.get("role") == "owner")
+            channel_prompt = _turn_prompt(chat, sender.get("role") == "owner")
         except RuntimeError as exc:
             # `_serve` logs the exception type only, so log the message here --
             # this mail is already event-deduped and would otherwise vanish silently.
