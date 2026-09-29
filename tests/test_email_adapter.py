@@ -506,11 +506,13 @@ def test_a_reply_from_another_chat_is_recorded_in_the_threads_session(
         pytest.param(_OWNER_EMAIL_TURN, None, ["dana@example.com"],
                      {"home_is_owner_dm": False, "extra": (_chat("cht_d"),)}, "cht_d",
                      id="from-an-email-turn-with-the-home-a-group"),
+        pytest.param(_OWNER_EMAIL_TURN, None, ["dana@example.com"], {"home_is_owner_dm": False}, None,
+                     id="from-an-email-turn-with-no-1:1-names-no-chat"),
     ],
 )
 def test_a_new_thread_returns_its_chat_and_opens_its_session_with_what_was_sent(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
-    turn: dict[str, Any], origin: str | None, to: Any, phone_reach: dict[str, Any], one_to_one: str,
+    turn: dict[str, Any], origin: str | None, to: Any, phone_reach: dict[str, Any], one_to_one: str | None,
 ) -> None:
     """A new thread goes out from this agent's own mailbox (read off
     /v1/agents/me), comes back as a chat uid, records where it came from, and
@@ -535,7 +537,9 @@ def test_a_new_thread_returns_its_chat_and_opens_its_session_with_what_was_sent(
     assert (source.platform, source.chat_id, source.chat_type) == ("plow_email", "cht_new", "group")
     [seed] = mirrored
     assert (seed["platform"], seed["chat_id"], seed["session_id"]) == ("plow_email", "cht_new", "sess_new")
-    assert "Are you free Friday?" in seed["text"] and f"from chat {origin or one_to_one}." in seed["text"]
+    where = origin or one_to_one
+    assert seed["text"] == (f"(I started this thread from chat {where}.)\n\nAre you free Friday?" if where
+                            else "Are you free Friday?")
 
 
 @pytest.mark.parametrize(

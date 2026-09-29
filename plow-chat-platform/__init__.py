@@ -4677,8 +4677,8 @@ async def _email_start(adapter, mail, to, subject, body, turn):
         if thread_uid not in mail._chats:
             mail._set_reach((await adapter._tool_json("GET", "/v1/chats"))["data"])
         session_id = await mail.thread_session(thread_uid)
-        await asyncio.to_thread(_mirror_sent, thread_uid, f"(I started this thread from chat {origin}.)\n\n{body}",
-                                session_id, platform=plow_email.PLATFORM_NAME)
+        opener = f"(I started this thread from chat {origin}.)\n\n{body}" if origin else body
+        await asyncio.to_thread(_mirror_sent, thread_uid, opener, session_id, platform=plow_email.PLATFORM_NAME)
     except Exception as exc:  # noqa: BLE001 - the mail is out; only its context is missing
         log.warning("[plow_email] opener not recorded for %s: %s", thread_uid, exc)
     return {"sent": True, "chat_uid": thread_uid}
