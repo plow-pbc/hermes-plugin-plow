@@ -488,6 +488,24 @@ async def test_stuck_handoff_does_not_block_another_chats_backfill_or_live_frame
     module.BACKFILL_HANDOFF_WAIT_SECONDS = 0.01
     failed_a, handled_live, release_a, handled_a_live = (asyncio.Event() for _ in range(4))
     handled: list[str] = []
+    armed_before_clear: list[bool] = []
+    woke_before_clear: list[str] = []
+    if recover_a:
+        module._goal_save("cht_a", module._goal_new("book the campsite"))
+        start_wake = adapter._goal_start_wake
+
+        def track_wake(chat_uid: str) -> None:
+            prior = adapter._goal_wakes.get(chat_uid)
+            start_wake(chat_uid)
+            if chat_uid == "cht_a" and adapter._goal_wakes.get(chat_uid) is not prior:
+                armed_before_clear.append(("cht_a", "a_gap") not in adapter._seen)
+
+        async def goal_wake(chat_uid: str) -> None:
+            if module._goal_load(chat_uid)["status"] == module.GOAL_ACTIVE:
+                woke_before_clear.append(chat_uid)
+
+        monkeypatch.setattr(adapter, "_goal_start_wake", track_wake)
+        monkeypatch.setattr(adapter, "_goal_wake", goal_wake)
 
     async def deliver(burst: list[Any], _resolved: Any, chat_uid: str) -> None:
         if chat_uid == "cht_a" and not release_a.is_set():
@@ -495,6 +513,8 @@ async def test_stuck_handoff_does_not_block_another_chats_backfill_or_live_frame
             raise RuntimeError("chat A handoff keeps failing")
         handled.extend(m.uid for m in burst)
         adapter._checkpoint(burst[-1].uid, chat_uid)
+        if any(m.uid == "a_gap" for m in burst):
+            module._goal_save("cht_a", module._goal_retire(module._goal_load("cht_a"), "cleared"))
         if "b_live" in handled:
             handled_live.set()
             if recover_a:
@@ -515,7 +535,7 @@ async def test_stuck_handoff_does_not_block_another_chats_backfill_or_live_frame
     class History(_Session):
         def get(self, url: str, **_kw: Any) -> _Resp:
             if "/cht_a/messages" in url and recover_a:
-                return _Resp({"data": [_envelope("a_gap_evt", "cht_a", "a_gap")["data"]["message"],
+                return _Resp({"data": [_envelope("a_gap_evt", "cht_a", "a_gap", body="/goal clear")["data"]["message"],
                                        a_pending["data"]["message"]], "has_more": False})
             if "/cht_a/messages" in url and not preexisting:
                 return _Resp({"data": [{"uid": "a_echo", "direction": "outbound"},
@@ -552,6 +572,10 @@ async def test_stuck_handoff_does_not_block_another_chats_backfill_or_live_frame
                            else ["b_old", "b_live"])
         assert adapter._load_checkpoint("cht_a") == ("a_live" if recover_a else None)
         assert adapter._load_checkpoint("cht_b") == "b_live"
+        if recover_a:
+            assert armed_before_clear == [False], "goal pacing is armed after the offline clear is queued"
+            assert woke_before_clear == []
+            assert module._goal_load("cht_a")["status"] == "cleared"
     finally:
         server = adapter._inbound["cht_a"][1]
         server.cancel()

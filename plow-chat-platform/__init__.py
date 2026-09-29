@@ -1542,6 +1542,7 @@ class PlowChatAdapter(BasePlatformAdapter):
         self._goal_wakes = {}                 # chat uid -> the one task pacing its goal
         self._goal_locks = {}                 # chat uid -> its load-modify-save lock
         self._goal_paced = False              # pacing runs only inside a live socket session
+        self._goal_deferred: set[str] = set()  # chats whose offline instructions are still being recovered
         self._active_turn = _ACTIVE_TURN
         # The turn-start Mac wake, scheduled and never awaited. Held so it is
         # not garbage-collected mid-flight, and so a wake already running is
@@ -2046,7 +2047,7 @@ class PlowChatAdapter(BasePlatformAdapter):
     def _goal_start_wake(self, chat_uid):
         """One pacing task per chat. A second would double the wake rate every
         time a turn completed, and none at all runs while the gate is closed."""
-        if not self._goal_paced:
+        if not self._goal_paced or chat_uid in self._goal_deferred:
             return
         task = self._goal_wakes.get(chat_uid)
         if task is not None and not task.done():
@@ -3443,6 +3444,7 @@ class PlowChatAdapter(BasePlatformAdapter):
                     # Armed only now: each wake waits out its own chat's
                     # backlog, so it cannot run ahead of an offline `/goal
                     # clear` still sitting in the queue.
+                    self._goal_deferred = set(deferred)
                     self._goal_arm_wakes()
                     if not _woken:
                         await self._prime(_first_boot)
@@ -3452,6 +3454,10 @@ class PlowChatAdapter(BasePlatformAdapter):
                             deferred.pop(chat_uid).result()
                             for message in buffered.pop(chat_uid, ()):
                                 await self._on_frame(message, http)
+                            self._goal_deferred.discard(chat_uid)
+                            record = _goal_load(chat_uid)
+                            if record and record.get("status") == GOAL_ACTIVE:
+                                self._goal_start_wake(chat_uid)
                         elif frame.type == aiohttp.WSMsgType.TEXT:
                             message = frame.json()
                             chat_uid = message.get("chat_id")
@@ -3469,6 +3475,7 @@ class PlowChatAdapter(BasePlatformAdapter):
                     # Paced work does not outlive the session that can
                     # deliver instructions to stop it.
                     self._goal_pause_wakes()
+                    self._goal_deferred.clear()
 
         await _serve(session, self._mark_disconnected, self._mark_connected, PLATFORM_NAME,
                      on_fatal=self._credential_refused)
