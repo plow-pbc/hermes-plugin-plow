@@ -1465,6 +1465,7 @@ INBOUND_DEBOUNCE_SECONDS = 2.0
 # throttle in `send_typing` rather than beside it.
 TYPING_COOLDOWN_SECONDS = 60
 HAND_OFF_RETRY_SECONDS = 5.0
+BACKFILL_HANDOFF_WAIT_SECONDS = 5.0
 
 
 def _server_died(task):
@@ -3298,8 +3299,19 @@ class PlowChatAdapter(BasePlatformAdapter):
         # chat, if the socket dropped before hermes accepted it. With no
         # checkpoint to stop at the loop simply pages to exhaustion, which for a
         # chat that started empty is the handful of messages actually missed.
-        if chat_uid in self._inbound:
-            await self._inbound[chat_uid][0].join()
+        async def handoff_caught_up():
+            if chat_uid not in self._inbound:
+                return True
+            try:
+                await asyncio.wait_for(self._inbound[chat_uid][0].join(),
+                                       BACKFILL_HANDOFF_WAIT_SECONDS)
+            except asyncio.TimeoutError:
+                log.warning("[plow_chat] backfill deferred for %s: hand-off still pending", chat_uid)
+                return False
+            return True
+
+        if not await handoff_caught_up():
+            return
         baseline, missed = self._backfill_scans.get(
             chat_uid, (self._last_uids.get(chat_uid), []))
         if missed:
@@ -3336,8 +3348,8 @@ class PlowChatAdapter(BasePlatformAdapter):
                 # An ignored message is still part of the recovered history.
                 # Earlier queued turns must be handed off before its uid can
                 # become the durable resume point.
-                if chat_uid in self._inbound:
-                    await self._inbound[chat_uid][0].join()
+                if not await handoff_caught_up():
+                    return
                 self._checkpoint(m["uid"], chat_uid)
         if missed:
             log.info("[plow_chat] backfilled %d missed message(s)", len(missed))

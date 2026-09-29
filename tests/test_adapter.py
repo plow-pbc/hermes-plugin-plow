@@ -473,6 +473,78 @@ async def test_socket_close_cancels_a_backfill_waiting_on_handoff(
     assert entered.is_set() and cancelled.is_set()
 
 
+@pytest.mark.parametrize("preexisting", [True, False], ids=["before-backfill", "during-backfill"])
+async def test_stuck_handoff_does_not_block_another_chats_backfill_or_live_frame(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, preexisting: bool,
+) -> None:
+    module = _load(monkeypatch, tmp_path)
+    adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
+    adapter._set_reach([_chat("cht_a"), _chat("cht_b")])
+    assert adapter._checkpoint("", "cht_a")
+    assert adapter._checkpoint("", "cht_b")
+    module._woken = True
+    module.HAND_OFF_RETRY_SECONDS = 0.1
+    module.BACKFILL_HANDOFF_WAIT_SECONDS = 0.01
+    failed_a, handled_live = asyncio.Event(), asyncio.Event()
+    handled: list[str] = []
+
+    async def deliver(burst: list[Any], _resolved: Any, chat_uid: str) -> None:
+        if chat_uid == "cht_a":
+            failed_a.set()
+            raise RuntimeError("chat A handoff keeps failing")
+        handled.extend(m.uid for m in burst)
+        adapter._checkpoint(burst[-1].uid, chat_uid)
+        if "b_live" in handled:
+            handled_live.set()
+
+    monkeypatch.setattr(adapter, "_deliver", deliver)
+    a_pending = _envelope("a_evt", "cht_a", "a_pending")
+    if preexisting:
+        await adapter._on_frame(a_pending)
+        await failed_a.wait()
+    b_old = _envelope("b_old_evt", "cht_b", "b_old")["data"]["message"]
+    b_live = _envelope("b_live_evt", "cht_b", "b_live")
+    reads: list[str] = []
+
+    class History(_Session):
+        def get(self, url: str, **_kw: Any) -> _Resp:
+            if "/cht_a/messages" in url and not preexisting:
+                return _Resp({"data": [{"uid": "a_echo", "direction": "outbound"},
+                                       a_pending["data"]["message"]], "has_more": False})
+            if "/cht_b/messages" in url:
+                reads.append(url)
+                return _Resp({"data": [b_old], "has_more": False})
+            return _Resp({"data": [], "has_more": False})
+
+    class Socket(_WS):
+        def __init__(self) -> None:
+            self.sent = False
+
+        async def __anext__(self) -> Any:
+            if not self.sent:
+                self.sent = True
+                return SimpleNamespace(type=WSMsgType.TEXT, json=lambda: b_live)
+            await handled_live.wait()
+            raise StopAsyncIteration
+
+    async def one_session(session: Any, _on_drop: Any, _on_connect: Any, _tag: str, **_kw: Any) -> None:
+        await session(History(), lambda: None)
+
+    monkeypatch.setattr(module, "_socket", lambda *_args: Socket())
+    monkeypatch.setattr(module, "_ticket", mock.AsyncMock(return_value="ticket"))
+    monkeypatch.setattr(module, "_serve", one_session)
+    try:
+        await asyncio.wait_for(adapter._listen(), 1)
+        assert reads, "chat B's offline history was read"
+        assert handled == ["b_old", "b_live"]
+        assert adapter._load_checkpoint("cht_a") is None
+        assert adapter._load_checkpoint("cht_b") == "b_live"
+    finally:
+        server = adapter._inbound["cht_a"][1]
+        server.cancel()
+        await asyncio.gather(server, return_exceptions=True)
+
+
 @pytest.mark.parametrize("status", [403, 503])
 async def test_history_page_refusal_or_persistent_failure_reconnects(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, status: int,
