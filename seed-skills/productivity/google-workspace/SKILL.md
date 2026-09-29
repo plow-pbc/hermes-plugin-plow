@@ -22,8 +22,8 @@ Mac-managed instances):
    spelling from memory or from this file. The Mac mints its own
    short-lived Google token; you never see or need one.
 2. Email you send as yourself is not `gmail send` at all: use
-   `plow_send_email` (a thread's chat id to reply, or addresses and a
-   `subject` to start one), and it leaves from your own mailbox with your
+   `plow_send_email` (a thread's chat id to reply, or a list of addresses
+   and a `subject` to start one), and it leaves from your own mailbox with your
    owner copied, under the same authority a text needs and with no
    approval card. `gmail send` below is only for mail your owner wants out
    of their own account.

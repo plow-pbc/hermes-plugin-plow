@@ -386,9 +386,9 @@ class _MailHTTP(_HTTP):
         return _Resp({"uid": "msg_sent"} if self.status < 400 else {"detail": "nope"}, self.status)
 
 
-def _email_tool(module: Any, monkeypatch: pytest.MonkeyPatch, http: _MailHTTP) -> Any:
+def _email_tool(module: Any, monkeypatch: pytest.MonkeyPatch, http: _MailHTTP, **phone_reach: Any) -> Any:
     """Both lines live for the tool, one loop between them, the API stubbed."""
-    phone = _phone(module, monkeypatch)
+    phone = _phone(module, monkeypatch, **phone_reach)
     phone._identity = IDENTITY
     mail = _adapter(module)
     mail._set_reach(http.listing)
@@ -469,15 +469,20 @@ def test_a_reply_from_another_chat_is_recorded_in_the_threads_session(
 
 
 @pytest.mark.parametrize(
-    ("turn", "origin", "to"),
+    ("turn", "origin", "to", "phone_reach", "one_to_one"),
     [
-        pytest.param(_TRUSTED_GROUP_TURN, "cht_t", ["dana@example.com"], id="from-a-phone-chat-reports-there"),
-        pytest.param(_OWNER_EMAIL_TURN, None, ["dana@example.com"], id="from-an-email-turn-reports-to-the-1:1"),
+        pytest.param(_TRUSTED_GROUP_TURN, "cht_t", ["dana@example.com"], {}, "cht_a",
+                     id="from-a-phone-chat-reports-there"),
+        pytest.param(_OWNER_EMAIL_TURN, None, ["dana@example.com"], {}, "cht_a",
+                     id="from-an-email-turn-reports-to-the-1:1"),
+        pytest.param(_OWNER_EMAIL_TURN, None, ["dana@example.com"],
+                     {"home_is_owner_dm": False, "extra": (_chat("cht_d"),)}, "cht_d",
+                     id="from-an-email-turn-with-the-home-a-group"),
     ],
 )
 def test_a_new_thread_returns_its_chat_and_opens_its_session_with_what_was_sent(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
-    turn: dict[str, Any], origin: str | None, to: Any,
+    turn: dict[str, Any], origin: str | None, to: Any, phone_reach: dict[str, Any], one_to_one: str,
 ) -> None:
     """A new thread goes out from this agent's own mailbox (read off
     /v1/agents/me), comes back as a chat uid, records where it came from, and
@@ -487,7 +492,7 @@ def test_a_new_thread_returns_its_chat_and_opens_its_session_with_what_was_sent(
     started = _mail_chat("cht_new", group=True)
     http = _MailHTTP([started], new_mail={"status": "sent", "chat_uid": "cht_new", "thread_id": "t1",
                                           "message_id": "m1", "chat_unrecorded_reason": None})
-    mail = _email_tool(module, monkeypatch, http)
+    mail = _email_tool(module, monkeypatch, http, **phone_reach)
     mirrored = _stub_mirror(monkeypatch)
     module._ACTIVE_TURN.set(turn)
 
@@ -502,7 +507,7 @@ def test_a_new_thread_returns_its_chat_and_opens_its_session_with_what_was_sent(
     assert (source.platform, source.chat_id, source.chat_type) == ("plow_email", "cht_new", "group")
     [seed] = mirrored
     assert (seed["platform"], seed["chat_id"], seed["session_id"]) == ("plow_email", "cht_new", "sess_new")
-    assert "Are you free Friday?" in seed["text"] and (origin or "cht_a") in seed["text"]
+    assert "Are you free Friday?" in seed["text"] and f"from chat {origin or one_to_one}." in seed["text"]
 
 
 @pytest.mark.parametrize(

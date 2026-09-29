@@ -924,8 +924,8 @@ LATCH_PROMPT = (
     "the line. SENDING ('text Sam', 'email John') is yours: plow_send_message texts, plow_send_email "
     "emails. Resolve their name to a handle "
     "(Latch's `contacts` skill, or plow_contacts) and pass it as `to` — a number opens a group that "
-    "seats your owner, never a bare 1:1, trusted=true by default; an email leaves from your own "
-    "mailbox, your owner copied. action=list shows your chats, or email threads. Never send via the "
+    "seats your owner, never a bare 1:1, trusted=true by default; an email (`to`: an address list) "
+    "leaves from your own mailbox, your owner copied. action=list shows your chats, or email threads. Never send via the "
     "Mac's Messages or Mail: that goes out AS your owner. 'Draft an email': show the draft here, "
     "send only when your owner says so. "
     "A possessive from someone who is not your owner is about their own things — treat it as "
@@ -2472,26 +2472,29 @@ class PlowChatAdapter(BasePlatformAdapter):
             return
         await asyncio.to_thread(_mirror_sent, chat_uid, body, session.session_id)
 
+    def owner_one_to_one(self):
+        """The owner's 1:1 with this agent: the home chat when it is one, else
+        any granted chat that is, since a home can be set to a group."""
+        return next((uid for uid in (self.home_chat_uid, *self.chat_uids)
+                     if _owner_dm(self._chats.get(uid) or {})), None)
+
     async def deliver_for_email(self, thread_uid, text):
         """Post what an email turn produced for the owner, never to the thread:
         in the chat the thread was started from while that chat is still the
-        owner's own or a trusted group they sit in, else the owner's 1:1 --
-        the home chat when it is one, or any granted chat that is, since a
-        home can be set to a group. With no 1:1 it is logged and reported as
-        sent, so Hermes does not queue it. It is recorded in that chat's
+        owner's own or a trusted group they sit in, else the owner's 1:1.
+        With no 1:1 it is logged and reported as sent, so Hermes does not
+        queue it. It is recorded in that chat's
         session with the thread's chat uid, so the owner's "send it" there
         knows what and where."""
         origin = _email_origins().get(thread_uid)
         if origin in self.chat_uids:
             await self._fresh_cross_chat(origin)  # trust or the owner's seat may have changed since
         chat = self._chats.get(origin) or {}
-        one_to_one = next((uid for uid in (self.home_chat_uid, *self.chat_uids)
-                           if _owner_dm(self._chats.get(uid) or {})), None)
         if origin in self.chat_uids and (_owner_dm(chat) or chat.get("trusted") and _owner_participant(chat)):
             target = origin
-        elif one_to_one:
-            target = one_to_one
         else:
+            target = self.owner_one_to_one()
+        if target is None:
             log.warning("[plow_email] no 1:1 for what %s produced; dropped", thread_uid)
             return SendResult(success=True)
         async with aiohttp.ClientSession() as http:
@@ -4678,7 +4681,7 @@ async def _email_start(adapter, mail, to, subject, body, turn):
                 "chat_unrecorded_reason": sent.get("chat_unrecorded_reason"),
                 "note": "Plow has no chat id for this thread. Do not resend and do not guess a chat id."}
     if turn.get("email"):
-        origin = adapter.home_chat_uid
+        origin = adapter.owner_one_to_one()
     else:
         origin = turn["chat_uid"]
         _record_email_origin(thread_uid, origin)
