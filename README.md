@@ -38,7 +38,7 @@ The directory is named for the plugin id so the install can be a directory copy:
 > `POST /v1/chats` (outbound thread creation — `plow_send_message`'s person-targeting
 > 404s against an older API, so that API change deploys before any
 > `agent-mgr` SHA advance),
-> `POST /v1/email-lines/{uid}/messages` returning the new thread's `chat_uid`, and `mailbox`
+> the email form of `POST /v1/chats` (`line_uid` a mailbox) returning the new thread's `chat_uid`, and `mailbox`
 > on `GET /v1/agents/me` (`plow_send_email` starts a thread from the mailbox `/me` names
 > and replies in a thread by its chat uid; the API seats the owner in `cc` from the
 > credential, so the plugin sends none — deploy

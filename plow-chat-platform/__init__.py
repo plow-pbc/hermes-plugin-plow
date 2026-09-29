@@ -4661,8 +4661,8 @@ async def _email_start(adapter, mail, to, subject, body, turn):
     mailbox = adapter._identity.get("mailbox")
     if not mailbox:
         raise _PlowPreflightError("this agent's persona has no mailbox")
-    sent = await adapter._tool_json("POST", f"/v1/email-lines/{mailbox['uid']}/messages",
-                                    body={"to": to, "subject": subject, "body": body})
+    sent = await adapter._tool_json("POST", "/v1/chats", body={"line_uid": mailbox["uid"], "members": to,
+                                                              "subject": subject, "body": body})
     thread_uid = sent.get("chat_uid")
     if thread_uid is None:
         return {"sent": True if sent["status"] == "sent" else "unknown", "chat_uid": None,

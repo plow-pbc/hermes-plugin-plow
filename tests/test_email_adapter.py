@@ -409,7 +409,7 @@ class _MailHTTP(_HTTP):
 
     def post(self, url: str, *, json: dict[str, Any], headers: dict[str, str]) -> _Resp:
         self.posts.append((url, json))
-        if "/email-lines/" in url:
+        if url.endswith("/v1/chats"):
             return _Resp(self.new_mail, 202 if self.new_mail["status"] != "sent" else 201)
         return _Resp({"uid": "msg_sent"} if self.status < 400 else {"detail": "nope"}, self.status)
 
@@ -530,8 +530,8 @@ def test_a_new_thread_returns_its_chat_and_opens_its_session_with_what_was_sent(
         {"to": to, "subject": "Friday", "body": "Are you free Friday?"}))
 
     assert out == {"sent": True, "chat_uid": "cht_new"}
-    assert http.posts == [(f"{module.BASE}/v1/email-lines/ln_em/messages",
-                           {"to": ["dana@example.com"], "subject": "Friday", "body": "Are you free Friday?"})]
+    assert http.posts == [(f"{module.BASE}/v1/chats", {"line_uid": "ln_em", "members": ["dana@example.com"],
+                                                        "subject": "Friday", "body": "Are you free Friday?"})]
     assert module._email_origins().get("cht_new") == origin
     [source] = mail.sessions
     assert (source.platform, source.chat_id, source.chat_type) == ("plow_email", "cht_new", "group")
