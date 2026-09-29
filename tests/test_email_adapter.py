@@ -428,15 +428,17 @@ def test_a_reply_from_another_chat_is_recorded_in_the_threads_session(
 
 
 @pytest.mark.parametrize(
-    ("turn", "origin"),
+    ("turn", "origin", "to"),
     [
-        pytest.param(_TRUSTED_GROUP_TURN, "cht_t", id="from-a-phone-chat-reports-there"),
-        pytest.param(_OWNER_EMAIL_TURN, None, id="from-an-email-turn-reports-to-the-1:1"),
+        pytest.param(_TRUSTED_GROUP_TURN, "cht_t", ["dana@example.com"], id="from-a-phone-chat-reports-there"),
+        pytest.param(_OWNER_EMAIL_TURN, None, ["dana@example.com"], id="from-an-email-turn-reports-to-the-1:1"),
+        # Seen live: a model passing its one address bare, not in a list.
+        pytest.param(_OWNER_DM_TURN, "cht_a", "dana@example.com", id="one-address-passed-bare"),
     ],
 )
 def test_a_new_thread_returns_its_chat_and_opens_its_session_with_what_was_sent(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
-    turn: dict[str, Any], origin: str | None,
+    turn: dict[str, Any], origin: str | None, to: Any,
 ) -> None:
     """A new thread goes out from this agent's own mailbox (read off
     /v1/agents/me), comes back as a chat uid, records where it came from, and
@@ -451,7 +453,7 @@ def test_a_new_thread_returns_its_chat_and_opens_its_session_with_what_was_sent(
     module._ACTIVE_TURN.set(turn)
 
     out = json.loads(module._plow_send_email(
-        {"to": ["dana@example.com"], "subject": "Friday", "body": "Are you free Friday?"}))
+        {"to": to, "subject": "Friday", "body": "Are you free Friday?"}))
 
     assert out == {"sent": True, "chat_uid": "cht_new"}
     assert http.posts == [(f"{module.BASE}/v1/email-lines/ln_em/messages",

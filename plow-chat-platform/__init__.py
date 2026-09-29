@@ -4728,6 +4728,8 @@ def _plow_send_email(args, **_kwargs):
         except Exception as exc:  # noqa: BLE001 - a failed read is not an empty mailbox
             return json.dumps({"success": False, "error": f"could not list your email threads ({type(exc).__name__})"})
     body, subject = (args.get("body") or "").strip(), (args.get("subject") or "").strip()
+    if isinstance(to, str) and "@" in to and not to.startswith("cht_"):
+        to = [to]                            # one address, passed bare
     if not body:
         return json.dumps({"success": False, "error": "body is required; nothing was sent"})
     if isinstance(to, str) and to.startswith("cht_"):
@@ -4773,8 +4775,9 @@ PLOW_SEND_EMAIL_SCHEMA = {
         "additionalProperties": False,
         "properties": {
             "action": {"type": "string", "enum": ["send", "list"], "description": "send (the default) or list."},
-            "to": {"anyOf": [{"type": "string", "pattern": "^cht_[A-Za-z0-9_-]+$"},
-                             {"type": "array", "minItems": 1, "items": {"type": "string"}}],
+            # A type list, not anyOf: upstream's argument coercion reads `type`,
+            # so a model that JSON-encodes the list still arrives as a list.
+            "to": {"type": ["string", "array"], "items": {"type": "string"},
                    "description": "An email thread's chat uid to reply in it, or a list of email "
                                   "addresses to start a new thread."},
             "subject": {"type": "string", "minLength": 1,
