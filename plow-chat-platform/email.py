@@ -23,6 +23,7 @@ from gateway.config import Platform
 from gateway.platforms.base import BasePlatformAdapter, MessageEvent, SendResult
 
 from ._transport import (
+    BASE,
     NO_REPLY_SENTINEL,
     _ACTIVE_TURN,
     _DIAGNOSTIC_PREFIXES,
@@ -209,6 +210,16 @@ class PlowEmailAdapter(BasePlatformAdapter):
         if sender["type"] != "member":
             log.info("[plow_email] ignored sender.type=%r", sender["type"])
             return
+        # Re-read: ingest seats every Cc'd address, so the listing's roster can
+        # lag the mail. A failed read keeps it -- this mail has no backfill.
+        try:
+            async with aiohttp.ClientSession() as http:
+                async with http.get(f"{BASE}/v1/chats/{chat_uid}", headers=self.auth) as resp:
+                    resp.raise_for_status()
+                    self._chats[chat_uid] = await resp.json(content_type=None)
+        except Exception as exc:  # noqa: BLE001 - see above
+            log.warning("[plow_email] %s: roster re-read failed (%s); using the cached one",
+                        chat_uid, type(exc).__name__)
         chat = self._chats[chat_uid]
         info = await self.get_chat_info(chat_uid)
         try:
