@@ -198,8 +198,8 @@ the reply the wake was queued for.
 **Which chats the agent serves is not configured here at all.** The credential's
 grant (`sessions.chat_uids`, served by `GET /v1/chats`) decides, refreshed on
 every reconnect. Per-chat checkpoints persist under the agent home, and a
-reconnect backfills each granted chat from its checkpoint, so a socket gap
-drops nothing.
+reconnect catches up on at most 50 recent messages per granted chat, stopping
+at its checkpoint when present. Older history remains readable in Plow.
 
 Each process start hands hermes one wakeup turn in the home chat, signed by Plow,
 not the owner, and free to end in `NO_REPLY`: the agent just came online, on its

@@ -32,6 +32,7 @@ from typing import Any, Iterator
 from unittest import mock
 
 import pytest
+from aiohttp import WSMsgType, web
 
 PLUGIN = pathlib.Path(__file__).resolve().parents[1] / "plow-chat-platform" / "__init__.py"
 
@@ -387,6 +388,86 @@ class _Resp:
     def raise_for_status(self) -> None:
         if self.status >= 400:
             raise RuntimeError(f"HTTP {self.status}")
+
+
+async def test_backfill_answers_socket_ping_while_history_is_slow(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
+) -> None:
+    module = _load(monkeypatch, tmp_path)
+    adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
+    _mark_anchored(adapter, "cht_a")
+    module._woken = True
+    history_started = asyncio.Event()
+    pong_received = asyncio.Event()
+
+    async def history(_request: web.Request) -> web.Response:
+        history_started.set()
+        await pong_received.wait()
+        return web.json_response({"data": [], "has_more": False})
+
+    async def socket(request: web.Request) -> web.WebSocketResponse:
+        ws = web.WebSocketResponse(autoping=False)
+        await ws.prepare(request)
+        await history_started.wait()
+        await ws.ping()
+        frame = await ws.receive()
+        if frame.type == WSMsgType.PONG:
+            pong_received.set()
+        await ws.close()
+        return ws
+
+    app = web.Application()
+    app.router.add_get("/v1/chats/cht_a/messages", history)
+    app.router.add_get("/v1/ws", socket)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+    monkeypatch.setattr(module, "BASE", f"http://127.0.0.1:{port}")
+    monkeypatch.setattr(module._transport, "BASE", module.BASE)
+    monkeypatch.setattr(module, "_ticket", mock.AsyncMock(return_value="ticket"))
+
+    async def one_session(session: Any, _on_drop: Any, _on_connect: Any, _tag: str, **_kw: Any) -> None:
+        async with module.aiohttp.ClientSession() as http:
+            await session(http, lambda: None)
+
+    monkeypatch.setattr(module, "_serve", one_session)
+    try:
+        await asyncio.wait_for(adapter._listen(), 2)
+        assert pong_received.is_set(), "the socket must answer pings before history finishes"
+    finally:
+        pong_received.set()
+        await runner.cleanup()
+
+
+async def test_backfill_reads_only_one_recent_page_without_a_mark_even_after_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
+) -> None:
+    module = _load(monkeypatch, tmp_path)
+    adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
+    assert adapter._checkpoint("", "cht_a")
+    recent = [{"uid": f"recent_{i}"} for i in range(50)]
+    older = [{"uid": f"older_{i}"} for i in range(50)]
+    urls: list[str] = []
+
+    class History:
+        def get(self, url: str, **_kw: Any) -> _Resp:
+            urls.append(url)
+            if len(urls) == 1:
+                return _Resp({}, status=503)
+            return _Resp({"data": older if "starting_after=" in url else recent,
+                          "has_more": "starting_after=" not in url})
+
+    handled: list[str] = []
+    monkeypatch.setattr(adapter, "_on_message", mock.AsyncMock(side_effect=lambda m, _chat: handled.append(m["uid"])))
+    http = History()
+    with pytest.raises(RuntimeError, match="503"):
+        await adapter._backfill(http, "cht_a")
+    await adapter._backfill(http, "cht_a")
+    assert urls == [f"{module.BASE}/v1/chats/cht_a/messages?limit=50"] * 2
+    assert handled == [m["uid"] for m in reversed(recent)]
+    assert adapter._load_checkpoint("cht_a") is None
 
 
 class _ChatResourceHTTP:
@@ -1180,7 +1261,7 @@ async def test_startup_baseline_cases(
     An empty chat is the case that bit twice. It legitimately leaves the
     baseline unset, and an early return on "no baseline" meant a brand-new
     chat's first message was lost if the socket dropped before hermes accepted
-    it. With nothing to stop at, the backfill pages to exhaustion instead.
+    it. With nothing to stop at, the backfill still reads the recent page.
 
     An unreachable history must not connect at all: an agent with no
     recoverable baseline is exactly the state the checkpoint rules out, and

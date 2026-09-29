@@ -3254,9 +3254,9 @@ class PlowChatAdapter(BasePlatformAdapter):
         _woken = True
         await self._handoff_message(event)
 
-    async def _history(self, http, chat_uid, limit):
+    async def _history(self, http, chat_uid, limit, *, one_page=False):
         """A chat's messages newest-first, a page at a time on a uid cursor,
-        until the caller stops or they run out."""
+        until the caller stops or they run out. Catch-up takes one page."""
         cursor = None
         while True:
             url = f"{BASE}/v1/chats/{chat_uid}/messages?limit={limit}"
@@ -3270,7 +3270,7 @@ class PlowChatAdapter(BasePlatformAdapter):
             page = body.get("data") or []
             for m in page:
                 yield m
-            if not page or not body.get("has_more"):
+            if one_page or not page or not body.get("has_more"):
                 return
             cursor = page[-1]["uid"]
 
@@ -3278,24 +3278,12 @@ class PlowChatAdapter(BasePlatformAdapter):
         """Process what arrived while the socket was down.
 
         Frames are not replayable and a disconnected socket misses events
-        outright, so the durable message record is the only recovery. Paged
-        newest-first on a uid cursor - there is no `since` - back to the last
-        uid we handled, or to exhaustion when there is no baseline yet, then
-        replayed oldest-first so the conversation returns in order. Runs AFTER the socket is connected, never before: anything
-        arriving during the backfill then comes over the socket, and the uid
-        dedupe absorbs the overlap.
+        outright, so read the most recent page back to the last handled uid,
+        then replay oldest-first. Older history stays in Plow for context.
+        Runs after the socket connects; uid dedupe absorbs the overlap.
         """
-        # No early return on an unset baseline. That state means the chat was
-        # EMPTY when this agent anchored, so everything now in it arrived since —
-        # and returning here lost exactly that: the first turn of a brand-new
-        # chat, if the socket dropped before hermes accepted it. With no
-        # checkpoint to stop at the loop simply pages to exhaustion, which for a
-        # chat that started empty is the handful of messages actually missed.
         missed = []
-        # The checkpoint bounds this, not a page count: stopping early
-        # would drop the OLDEST missed messages while still advancing the
-        # baseline past them, which is the loss it exists to prevent.
-        async for m in self._history(http, chat_uid, limit=50):
+        async for m in self._history(http, chat_uid, limit=50, one_page=True):
             if m["uid"] == self._last_uids.get(chat_uid):
                 break
             missed.append(m)
@@ -3352,6 +3340,16 @@ class PlowChatAdapter(BasePlatformAdapter):
             async with _socket(http, ticket) as ws:
                 connected()
                 log.info("[plow_chat] websocket connected")
+                frames = asyncio.Queue()
+
+                async def read_frames():
+                    try:
+                        async for frame in ws:
+                            frames.put_nowait(frame)
+                    finally:
+                        frames.put_nowait(None)
+
+                reader = asyncio.create_task(read_frames())
                 try:
                     for chat_uid in self.chat_uids:
                         await self._backfill(http, chat_uid)
@@ -3361,10 +3359,13 @@ class PlowChatAdapter(BasePlatformAdapter):
                     self._goal_arm_wakes()
                     if not _woken:
                         await self._prime(_first_boot)
-                    async for frame in ws:
+                    while (frame := await frames.get()) is not None:
                         if frame.type == aiohttp.WSMsgType.TEXT:
                             await self._on_frame(frame.json(), http)
+                    reader.result()
                 finally:
+                    reader.cancel()
+                    await asyncio.gather(reader, return_exceptions=True)
                     # Paced work does not outlive the session that can
                     # deliver instructions to stop it.
                     self._goal_pause_wakes()
