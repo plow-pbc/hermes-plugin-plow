@@ -212,12 +212,14 @@ class PlowEmailAdapter(BasePlatformAdapter):
             return
         # Re-read: ingest seats every Cc'd address, so the listing's roster can
         # lag the mail. A failed read keeps it -- this mail has no backfill.
+        reaches = "A reply in this thread reaches"
         try:
             async with aiohttp.ClientSession() as http:
                 async with http.get(f"{BASE}/v1/chats/{chat_uid}", headers=self.auth) as resp:
                     resp.raise_for_status()
                     self._chats[chat_uid] = await resp.json(content_type=None)
         except Exception as exc:  # noqa: BLE001 - see above
+            reaches = "Last known on this thread, and may be incomplete (recipients added since are not listed)"
             log.warning("[plow_email] %s: roster re-read failed (%s); using the cached one",
                         chat_uid, type(exc).__name__)
         chat = self._chats[chat_uid]
@@ -244,7 +246,7 @@ class PlowEmailAdapter(BasePlatformAdapter):
                            + (" (your owner)" if p.get("role") == "owner" else "")
                            for p in chat.get("participants") or [] if p.get("type") == "member")
         await self.handle_message(MessageEvent(
-            text=f"{_untrusted('thread participants', f'A reply in this thread reaches: {people}.')}\n\n"
+            text=f"{_untrusted('thread participants', f'{reaches}: {people}.')}\n\n"
                  f"{body or '(empty email)'}",
             source=self.build_source(chat_id=chat_uid, chat_name=info["name"], chat_type=info["type"],
                                      user_id=sender["uid"],

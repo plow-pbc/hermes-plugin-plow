@@ -216,6 +216,8 @@ async def test_an_unknown_thread_is_delivered_even_when_the_roster_read_is_down(
     await mail._on_frame(_envelope("evt_1", "cht_m", "msg_1"), _GrantOnlyHTTP())
 
     [event] = events
+    assert "may be incomplete" in event["text"] and "reaches" not in event["text"], \
+        "a roster that could not be re-read does not claim who a reply reaches"
     assert event["source"].chat_id == "cht_m" and event["message_id"] == "msg_1"
 
 
