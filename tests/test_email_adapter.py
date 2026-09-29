@@ -219,10 +219,12 @@ async def test_an_email_turn_confines_the_chat_tools_and_never_sends_from_the_ow
     contact_adapter.contacts = _empty_book
     owner = role == "owner"
     event = SimpleNamespace(source=SimpleNamespace(chat_id="cht_m", chat_type="group", role_authorized=owner,
-                                                   user_id=f"mem_{'owner' if owner else 'other'}_cht_m"))
+                                                   user_id=f"mem_{'owner' if owner else 'other'}_cht_m",
+                                                   user_name="Sam" if owner else "Dana"))
     await mail.on_processing_start(event)
     assert module._ACTIVE_TURN.get() == {
-        "chat_uid": "cht_m", "owner": owner, "dm": False, "authority": owner, "email": True,
+        "chat_uid": "cht_m", "owner": owner, "sender": "Sam" if owner else "Dana", "dm": False,
+        "authority": owner, "email": True,
         "speaker_handle": OWNER[1] if owner else "dana@example.com", "owner_handle": OWNER[1]}
     contacts = json.loads(module._plow_contacts({}))
     assert contacts["success"] is owner
@@ -284,7 +286,6 @@ async def test_an_email_turns_text_goes_to_the_owner_and_never_the_thread(
     module, _entry = _load_email(monkeypatch, tmp_path)
     mail = _adapter(module)
     mail._set_reach([_mail_chat("cht_m")])
-    mail._senders["cht_m"] = "Dana"
     _phone(module, monkeypatch)
     http = _HTTP()
     monkeypatch.setattr(module.aiohttp, "ClientSession", lambda *a, **k: http)
@@ -292,17 +293,47 @@ async def test_an_email_turns_text_goes_to_the_owner_and_never_the_thread(
     if origin:
         module._record_email_origin("cht_m", origin)
     if turn:
-        module._ACTIVE_TURN.set({"chat_uid": turn[0], "owner": turn[1], "dm": False,
+        module._ACTIVE_TURN.set({"chat_uid": turn[0], "owner": turn[1], "sender": "Dana", "dm": False,
                                  "authority": turn[1], "email": True})
 
     result = await mail.send("cht_m", body, metadata=metadata)
 
     assert result.success
-    copy = f'Email "Re: invoice" from Dana:\n{body}'
+    copy = f'Email "Re: invoice"{" from Dana" if turn else ""}:\n{body}'
     assert http.posts == ([(f"{module.BASE}/v1/chats/{delivered_to}/messages", {"body": copy})]
                           if delivered_to else [])
     assert [(c["platform"], c["chat_id"], c["text"]) for c in mirrored] == (
         [("plow_chat", delivered_to, f"{copy}\n(email thread cht_m)")] if delivered_to else [])
+
+
+async def test_the_owners_copy_names_its_own_turns_sender_and_rechecks_the_origin(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
+) -> None:
+    """Two things can change while an email turn runs: another mail can
+    arrive on the thread, and the group the thread came from can lose its
+    trust. The copy still names the sender of the mail this turn answered,
+    and goes to the owner's 1:1 once the origin is no longer trusted."""
+    module, _entry = _load_email(monkeypatch, tmp_path)
+    mail = _adapter(module)
+    mail._set_reach([_mail_chat("cht_m", group=True)])
+    _capture_events(monkeypatch, mail)
+    phone = _phone(module, monkeypatch)
+    http = _HTTP()
+    monkeypatch.setattr(module.aiohttp, "ClientSession", lambda *a, **k: http)
+    _stub_mirror(monkeypatch)
+    module._record_email_origin("cht_m", "cht_t")
+    module._ACTIVE_TURN.set({"chat_uid": "cht_m", "owner": False, "sender": "Dana", "dm": False,
+                             "authority": False, "email": True})
+    await mail._on_frame(_envelope("evt_2", "cht_m", "msg_2", role="member"), None)  # a later mail
+
+    async def trust_revoked(chat_uid: str) -> None:
+        phone._chats[chat_uid] = _chat(chat_uid, group=True, trusted=False)
+
+    monkeypatch.setattr(phone, "_refresh_current_chat", trust_revoked)
+    await mail.send("cht_m", "Declined.", metadata={"notify": True})
+
+    assert http.posts == [(f"{module.BASE}/v1/chats/cht_a/messages",
+                           {"body": 'Email "Re: invoice" from Dana:\nDeclined.'})]
 
 
 @pytest.mark.parametrize(("extra", "delivered_to"), [

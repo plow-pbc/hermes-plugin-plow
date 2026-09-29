@@ -2482,6 +2482,8 @@ class PlowChatAdapter(BasePlatformAdapter):
         session with the thread's chat uid, so the owner's "send it" there
         knows what and where."""
         origin = _email_origins().get(thread_uid)
+        if origin in self.chat_uids:
+            await self._fresh_cross_chat(origin)  # trust or the owner's seat may have changed since
         chat = self._chats.get(origin) or {}
         one_to_one = next((uid for uid in (self.home_chat_uid, *self.chat_uids)
                            if _owner_dm(self._chats.get(uid) or {})), None)

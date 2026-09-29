@@ -110,7 +110,6 @@ class PlowEmailAdapter(BasePlatformAdapter):
         self._identity = dict(_NO_IDENTITY)   # read once per socket session, like plow_chat's
         self._chats = {}                     # uid -> chat resource, mail only
         self._foreign = frozenset()          # the phone line's uids on the same grant
-        self._senders = {}                   # uid -> who last wrote there, for the owner's label
         self._seen_events = []
         self._ws_task = None
 
@@ -218,9 +217,9 @@ class PlowEmailAdapter(BasePlatformAdapter):
             return
         chat = self._chats[chat_uid]
         info = await self.get_chat_info(chat_uid)
-        self._senders[chat_uid] = _one_line(sender.get("display_name")) or sender["uid"]
         try:
-            channel_prompt = _turn_prompt(chat, self._senders[chat_uid], sender.get("role") == "owner")
+            channel_prompt = _turn_prompt(chat, _one_line(sender.get("display_name")) or sender["uid"],
+                                          sender.get("role") == "owner")
         except RuntimeError as exc:
             # `_serve` logs the exception type only, so log the message here --
             # this mail is already event-deduped and would otherwise vanish silently.
@@ -259,7 +258,7 @@ class PlowEmailAdapter(BasePlatformAdapter):
                      else "silence" if _ends_silent(body) else "mid-turn prose", chat_id)
             return SendResult(success=True)
         subject = _one_line(self._chats[chat_id].get("display_name")) or "(no subject)"
-        sender = self._senders.get(chat_id)
+        sender = _one_line((turn or {}).get("sender"))   # this turn's own sender, not the latest mail's
         label = f'Email "{subject}"' + (f" from {sender}" if sender else "") + ":"
         # Imported here: the package imports this module before it defines
         # the phone line, and every send comes long after both are loaded.
@@ -285,7 +284,7 @@ class PlowEmailAdapter(BasePlatformAdapter):
         # whose turn it is, and the owner's own.
         chat = self._chats.get(event.source.chat_id, {})
         speaker = _speaker_participant(chat, event.source.user_id)
-        _ACTIVE_TURN.set({"chat_uid": event.source.chat_id, "owner": owner,
+        _ACTIVE_TURN.set({"chat_uid": event.source.chat_id, "owner": owner, "sender": event.source.user_name,
                           "dm": False, "authority": owner, "email": True,
                           "speaker_handle": speaker.get("provider_key") if speaker else None,
                           "owner_handle": _owner_handle(chat)})
