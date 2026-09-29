@@ -3311,7 +3311,7 @@ class PlowChatAdapter(BasePlatformAdapter):
             return True
 
         if not await handoff_caught_up():
-            return
+            return False
         baseline, missed = self._backfill_scans.get(
             chat_uid, (self._last_uids.get(chat_uid), []))
         if missed:
@@ -3349,10 +3349,11 @@ class PlowChatAdapter(BasePlatformAdapter):
                 # Earlier queued turns must be handed off before its uid can
                 # become the durable resume point.
                 if not await handoff_caught_up():
-                    return
+                    return False
                 self._checkpoint(m["uid"], chat_uid)
         if missed:
             log.info("[plow_chat] backfilled %d missed message(s)", len(missed))
+        return True
 
     async def _listen(self):
         global _live
@@ -3411,7 +3412,18 @@ class PlowChatAdapter(BasePlatformAdapter):
                     finally:
                         frames.put_nowait(None)
 
+                async def recover(chat_uid):
+                    try:
+                        while True:
+                            await self._inbound[chat_uid][0].join()
+                            if await self._backfill(http, chat_uid) is not False:
+                                return
+                    finally:
+                        frames.put_nowait(("backfill_done", chat_uid))
+
                 reader = asyncio.create_task(read_frames())
+                deferred = {}
+                buffered = {}
                 try:
                     for chat_uid in self.chat_uids:
                         backfill = asyncio.create_task(self._backfill(http, chat_uid))
@@ -3419,7 +3431,8 @@ class PlowChatAdapter(BasePlatformAdapter):
                             done, _ = await asyncio.wait((backfill, reader),
                                                          return_when=asyncio.FIRST_COMPLETED)
                             if backfill in done:
-                                await backfill
+                                if await backfill is False:
+                                    deferred[chat_uid] = asyncio.create_task(recover(chat_uid))
                             if reader in done and backfill not in done:
                                 reader.result()
                                 return
@@ -3434,10 +3447,23 @@ class PlowChatAdapter(BasePlatformAdapter):
                     if not _woken:
                         await self._prime(_first_boot)
                     while (frame := await frames.get()) is not None:
-                        if frame.type == aiohttp.WSMsgType.TEXT:
-                            await self._on_frame(frame.json(), http)
+                        if isinstance(frame, tuple) and frame[0] == "backfill_done":
+                            chat_uid = frame[1]
+                            deferred.pop(chat_uid).result()
+                            for message in buffered.pop(chat_uid, ()):
+                                await self._on_frame(message, http)
+                        elif frame.type == aiohttp.WSMsgType.TEXT:
+                            message = frame.json()
+                            chat_uid = message.get("chat_id")
+                            if chat_uid in deferred:
+                                buffered.setdefault(chat_uid, []).append(message)
+                            else:
+                                await self._on_frame(message, http)
                     reader.result()
                 finally:
+                    for task in deferred.values():
+                        task.cancel()
+                    await asyncio.gather(*deferred.values(), return_exceptions=True)
                     reader.cancel()
                     await asyncio.gather(reader, return_exceptions=True)
                     # Paced work does not outlive the session that can
