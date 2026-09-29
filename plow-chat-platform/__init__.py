@@ -3932,7 +3932,7 @@ _email_origins_lock = threading.Lock()
 def _email_origins():
     try:
         return json.loads(EMAIL_ORIGINS.read_text())
-    except (OSError, ValueError):
+    except FileNotFoundError:
         return {}
 
 
