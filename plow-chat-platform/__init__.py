@@ -728,6 +728,11 @@ def _sender_key(sender):
     return sender.get("uid")
 
 
+def _accepted_sender(sender):
+    return sender["type"] in ("member", "system") or (
+        sender["type"] == "agent" and sender.get("relationship") == "peer")
+
+
 def _write_channel_aliases(names):
     """Publish our names into the image's own friendly-name registry.
 
@@ -3320,7 +3325,8 @@ class PlowChatAdapter(BasePlatformAdapter):
             media = (m.get("attachments") or
                      (m.get("reply_to") or {}).get("message", {}).get("attachments"))
             resolved = (asyncio.create_task(_resolve_parts(m))
-                        if m.get("direction") == "inbound" and media else None)
+                        if m.get("direction") == "inbound" and media
+                        and _accepted_sender(m["sender"]) else None)
             missed.append((m, resolved))
         self._backfill_scans.pop(chat_uid, None)
         for m, resolved in reversed(missed):  # oldest-first
@@ -3396,7 +3402,19 @@ class PlowChatAdapter(BasePlatformAdapter):
                 reader = asyncio.create_task(read_frames())
                 try:
                     for chat_uid in self.chat_uids:
-                        await self._backfill(http, chat_uid)
+                        backfill = asyncio.create_task(self._backfill(http, chat_uid))
+                        try:
+                            done, _ = await asyncio.wait((backfill, reader),
+                                                         return_when=asyncio.FIRST_COMPLETED)
+                            if backfill in done:
+                                await backfill
+                            if reader in done and backfill not in done:
+                                reader.result()
+                                return
+                        finally:
+                            if not backfill.done():
+                                backfill.cancel()
+                            await asyncio.gather(backfill, return_exceptions=True)
                     # Armed only now: each wake waits out its own chat's
                     # backlog, so it cannot run ahead of an offline `/goal
                     # clear` still sitting in the queue.
@@ -3456,8 +3474,7 @@ class PlowChatAdapter(BasePlatformAdapter):
         if msg["direction"] != "inbound":
             return False                     # the echo of our own send
         sender = msg["sender"]
-        if sender["type"] not in ("member", "agent", "system") or (
-                sender["type"] == "agent" and sender.get("relationship") != "peer"):
+        if not _accepted_sender(sender):
             # This sender-type gate must run before anything reads uid:
             # an outbound agent sender carries a `line` object and NO uid key.
             log.info("[plow_chat] ignored sender.type=%r", sender["type"])

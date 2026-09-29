@@ -446,6 +446,33 @@ async def test_backfill_answers_socket_ping_while_history_is_slow(
         await runner.cleanup()
 
 
+async def test_socket_close_cancels_a_backfill_waiting_on_handoff(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
+) -> None:
+    module = _load(monkeypatch, tmp_path)
+    adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
+    _mark_anchored(adapter, "cht_a")
+    module._woken = True
+    entered, cancelled = asyncio.Event(), asyncio.Event()
+
+    async def blocked_backfill(_http: Any, _chat_uid: str) -> None:
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    async def one_session(session: Any, _on_drop: Any, _on_connect: Any, _tag: str, **_kw: Any) -> None:
+        await session(_Session(), lambda: None)
+
+    monkeypatch.setattr(adapter, "_backfill", blocked_backfill)
+    monkeypatch.setattr(module, "_socket", lambda *_args: _WS())
+    monkeypatch.setattr(module, "_ticket", mock.AsyncMock(return_value="ticket"))
+    monkeypatch.setattr(module, "_serve", one_session)
+    await asyncio.wait_for(adapter._listen(), 0.5)
+    assert entered.is_set() and cancelled.is_set()
+
+
 @pytest.mark.parametrize("status", [403, 503])
 async def test_history_page_refusal_or_persistent_failure_reconnects(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, status: int,
@@ -648,6 +675,28 @@ async def test_cached_backfill_media_is_fetched_before_its_url_expires(
     assert len(handled) == 1
     assert handled[0]["media_urls"] == ["/cache/photo.png"]
     assert media_fetches == ["att_photo"]
+
+
+async def test_backfill_does_not_fetch_media_from_an_ignored_sender(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
+) -> None:
+    module = _load(monkeypatch, tmp_path)
+    adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
+    assert adapter._checkpoint("", "cht_a")
+    message = _envelope("evt_1", "cht_a", "ignored", attachments=[_attachment()])["data"]["message"]
+    message["sender"]["type"] = "other"
+    fetched: list[str] = []
+
+    async def fetch(item: dict[str, Any], _kind: str) -> str:
+        fetched.append(item["uid"])
+        return "/cache/photo.png"
+
+    monkeypatch.setattr(module, "_fetch_attachment", fetch)
+    await adapter._backfill(_Session(backfill=[message]), "cht_a")
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert fetched == []
+    assert adapter._load_checkpoint("cht_a") == "ignored"
 
 
 async def test_resumed_scan_restarts_when_the_socket_gap_added_a_message(
