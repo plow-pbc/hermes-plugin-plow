@@ -3258,6 +3258,7 @@ class PlowChatAdapter(BasePlatformAdapter):
         """A chat's messages newest-first, a page at a time on a uid cursor,
         until the caller stops or they run out."""
         cursor = None
+        retried = False
         while True:
             url = f"{BASE}/v1/chats/{chat_uid}/messages?limit={limit}"
             if cursor:
@@ -3269,12 +3270,16 @@ class PlowChatAdapter(BasePlatformAdapter):
                     _auth_raise_for_status(resp)
                     body = await resp.json(content_type=None)
             except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-                if not retry or (socket_closed is not None and socket_closed.is_set()):
+                if (not retry or retried
+                        or isinstance(exc, aiohttp.ClientResponseError) and exc.status < 500
+                        or socket_closed is not None and socket_closed.is_set()):
                     raise
                 log.warning("[plow_chat] history page failed for %s: %s; retrying",
                             chat_uid, type(exc).__name__)
+                retried = True
                 await asyncio.sleep(1)
                 continue
+            retried = False
             page = body.get("data") or []
             for m in page:
                 yield m

@@ -32,7 +32,7 @@ from typing import Any, Iterator
 from unittest import mock
 
 import pytest
-from aiohttp import ClientConnectionError, WSMsgType, web
+from aiohttp import ClientConnectionError, ClientResponseError, WSMsgType, web
 
 PLUGIN = pathlib.Path(__file__).resolve().parents[1] / "plow-chat-platform" / "__init__.py"
 
@@ -473,6 +473,31 @@ async def test_backfill_retries_a_failed_page_without_refetching_completed_pages
     await adapter._backfill(History(), "cht_a")
     assert reads == ["", "2", "2"]
     assert handled == ["1", "2", "3"]
+
+
+@pytest.mark.parametrize("status, expected_reads", [(403, 1), (503, 2)])
+async def test_history_page_refusal_or_persistent_failure_reconnects(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, status: int, expected_reads: int,
+) -> None:
+    module = _load(monkeypatch, tmp_path)
+    adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
+    sleep = asyncio.sleep
+    monkeypatch.setattr(module.asyncio, "sleep", lambda _seconds: sleep(0))
+    reads = 0
+
+    class FailedPage(_Resp):
+        async def __aenter__(self) -> _Resp:
+            raise ClientResponseError(None, (), status=status)
+
+    class History:
+        def get(self, _url: str, **_kw: Any) -> _Resp:
+            nonlocal reads
+            reads += 1
+            return FailedPage({})
+
+    with pytest.raises(ClientResponseError):
+        await asyncio.wait_for(adapter._backfill(History(), "cht_a"), 0.1)
+    assert reads == expected_reads
 
 
 async def test_reconnect_backfill_resumes_after_the_last_handled_message(
