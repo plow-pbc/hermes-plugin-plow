@@ -38,6 +38,7 @@ from ._transport import (
     _owner_fact,
     _owner_handle,
     _owner_identity,
+    _participant_identity,
     _refresh_identity,
     _self_agent_line,
     _serve,
@@ -45,6 +46,7 @@ from ._transport import (
     _socket,
     _split,
     _ticket,
+    _untrusted,
 )
 
 PLATFORM_NAME = "plow_email"
@@ -225,8 +227,14 @@ class PlowEmailAdapter(BasePlatformAdapter):
         if not body and count:
             log.info("[plow_email] %s: attachment-only mail (%d attachment(s))", chat_uid, count)
             body = f"(email with {count} attachment(s); attachments are not delivered on this line yet)"
+        # Who a reply-all reaches, as data on the turn: these are names senders
+        # chose, so they stay out of the system-level channel prompt.
+        people = ", ".join(f"{_participant_identity(p)} ({p['provider_key']})"
+                           + (" (your owner)" if p.get("role") == "owner" else "")
+                           for p in chat.get("participants") or [] if p.get("type") == "member")
         await self.handle_message(MessageEvent(
-            text=body or "(empty email)",
+            text=f"{_untrusted('thread participants', f'A reply in this thread reaches: {people}.')}\n\n"
+                 f"{body or '(empty email)'}",
             source=self.build_source(chat_id=chat_uid, chat_name=info["name"], chat_type=info["type"],
                                      user_id=sender["uid"],
                                      user_name=sender.get("display_name") or sender["uid"],
