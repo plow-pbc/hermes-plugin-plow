@@ -446,43 +446,12 @@ async def test_backfill_answers_socket_ping_while_history_is_slow(
         await runner.cleanup()
 
 
-async def test_backfill_retries_a_failed_page_without_refetching_completed_pages(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
-) -> None:
-    module = _load(monkeypatch, tmp_path)
-    adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
-    adapter._last_uids["cht_a"] = "old"
-    reads: list[str] = []
-
-    class FailedPage(_Resp):
-        async def __aenter__(self) -> _Resp:
-            raise ClientConnectionError("history page failed")
-
-    class History:
-        def get(self, url: str, **_kw: Any) -> _Resp:
-            after = url.partition("starting_after=")[2]
-            reads.append(after)
-            if after == "2" and reads.count("2") == 1:
-                return FailedPage({})
-            if after:
-                return _Resp({"data": [{"uid": "1"}, {"uid": "old"}], "has_more": False})
-            return _Resp({"data": [{"uid": "3"}, {"uid": "2"}], "has_more": True})
-
-    handled: list[str] = []
-    monkeypatch.setattr(adapter, "_on_message", mock.AsyncMock(side_effect=lambda m, _chat: handled.append(m["uid"])))
-    await adapter._backfill(History(), "cht_a")
-    assert reads == ["", "2", "2"]
-    assert handled == ["1", "2", "3"]
-
-
-@pytest.mark.parametrize("status, expected_reads", [(403, 1), (503, 2)])
+@pytest.mark.parametrize("status", [403, 503])
 async def test_history_page_refusal_or_persistent_failure_reconnects(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, status: int, expected_reads: int,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, status: int,
 ) -> None:
     module = _load(monkeypatch, tmp_path)
     adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
-    sleep = asyncio.sleep
-    monkeypatch.setattr(module.asyncio, "sleep", lambda _seconds: sleep(0))
     reads = 0
 
     class FailedPage(_Resp):
@@ -497,33 +466,144 @@ async def test_history_page_refusal_or_persistent_failure_reconnects(
 
     with pytest.raises(ClientResponseError):
         await asyncio.wait_for(adapter._backfill(History(), "cht_a"), 0.1)
-    assert reads == expected_reads
+    assert reads == 1
 
 
-async def test_reconnect_backfill_resumes_after_the_last_handled_message(
+async def test_backfill_advances_an_empty_baseline_through_outbound_history(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
 ) -> None:
     module = _load(monkeypatch, tmp_path)
     adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
-    adapter._last_uids["cht_a"] = "old"
-    history = _Session(backfill=[{"uid": uid} for uid in ("3", "2", "1", "old")])
-    handled: list[str] = []
-    fail_once = True
+    assert adapter._checkpoint("", "cht_a")
+    reads: list[str] = []
 
-    async def handoff(message: dict[str, str], chat_uid: str) -> None:
-        nonlocal fail_once
-        if message["uid"] == "2" and fail_once:
-            fail_once = False
-            raise OSError("handoff failed")
-        handled.append(message["uid"])
-        adapter._checkpoint(message["uid"], chat_uid)
+    class History:
+        def get(self, url: str, **_kw: Any) -> _Resp:
+            after = url.partition("starting_after=")[2]
+            reads.append(after)
+            if after == "2":
+                return _Resp({"data": [{"uid": "1", "direction": "outbound"}], "has_more": False})
+            return _Resp({"data": [{"uid": uid, "direction": "outbound"} for uid in ("3", "2")],
+                          "has_more": True})
 
-    monkeypatch.setattr(adapter, "_on_message", handoff)
-    with pytest.raises(OSError):
-        await adapter._backfill(history, "cht_a")
-    assert adapter._load_checkpoint("cht_a") == "1"
-    await adapter._backfill(history, "cht_a")
-    assert handled == ["1", "2", "3"]
+    http = History()
+    await adapter._backfill(http, "cht_a")
+    assert adapter._load_checkpoint("cht_a") == "3"
+    await adapter._backfill(http, "cht_a")
+    assert reads == ["", "2", ""], "the next session must stop at the outbound checkpoint"
+
+
+@pytest.mark.parametrize("message", [
+    {"uid": "ignored", "direction": "inbound", "sender": {"type": "other"}},
+    {"uid": "empty", "direction": "inbound", "sender": {"type": "member"},
+     "body": "", "attachments": []},
+])
+async def test_backfill_checkpoints_ignored_messages(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, message: dict[str, Any],
+) -> None:
+    module = _load(monkeypatch, tmp_path)
+    adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
+    assert adapter._checkpoint("", "cht_a")
+    await adapter._backfill(_Session(backfill=[message]), "cht_a")
+    assert adapter._load_checkpoint("cht_a") == message["uid"]
+
+
+async def test_backfill_waits_for_earlier_inbound_before_checkpointing_an_echo(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
+) -> None:
+    module = _load(monkeypatch, tmp_path)
+    adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
+    assert adapter._checkpoint("", "cht_a")
+    queue: asyncio.Queue[Any] = asyncio.Queue()
+    queue.put_nowait(object())
+    reached_echo = asyncio.Event()
+
+    async def on_message(message: dict[str, str], chat_uid: str) -> bool:
+        if message["uid"] == "inbound":
+            adapter._inbound[chat_uid] = (queue, None)
+            return True
+        reached_echo.set()
+        return False
+
+    monkeypatch.setattr(adapter, "_on_message", on_message)
+    history = _Session(backfill=[{"uid": "echo"}, {"uid": "inbound"}])
+    task = asyncio.create_task(adapter._backfill(history, "cht_a"))
+    await reached_echo.wait()
+    await asyncio.sleep(0)
+    assert adapter._load_checkpoint("cht_a") is None
+    queue.task_done()
+    await task
+    assert adapter._load_checkpoint("cht_a") == "echo"
+
+
+async def test_failed_third_page_keeps_the_first_two_for_the_next_session(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
+) -> None:
+    module = _load(monkeypatch, tmp_path)
+    adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
+    assert adapter._checkpoint("", "cht_a")
+    reads: list[str] = []
+    failures = 0
+
+    class FailedPage(_Resp):
+        async def __aenter__(self) -> _Resp:
+            raise ClientConnectionError("third page failed")
+
+    class History:
+        def get(self, url: str, **_kw: Any) -> _Resp:
+            nonlocal failures
+            after = url.partition("starting_after=")[2]
+            if "limit=1" in url:
+                return _Resp({"data": [{"uid": "5"}], "has_more": True})
+            reads.append(after)
+            if after == "4" and failures < 2:
+                failures += 1
+                return FailedPage({})
+            uid = {"": "5", "5": "4", "4": "3", "3": "2", "2": "1"}[after]
+            return _Resp({"data": [{"uid": uid, "direction": "outbound"}],
+                          "has_more": uid != "1"})
+
+    http = History()
+    for _ in range(2):
+        with pytest.raises(ClientConnectionError):
+            await adapter._backfill(http, "cht_a")
+    await adapter._backfill(http, "cht_a")
+    assert reads == ["", "5", "4", "4", "4", "3", "2"]
+    assert adapter._load_checkpoint("cht_a") == "5"
+
+
+async def test_resumed_scan_restarts_when_the_socket_gap_added_a_message(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
+) -> None:
+    module = _load(monkeypatch, tmp_path)
+    adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
+    assert adapter._checkpoint("", "cht_a")
+    newest = "5"
+    failed = False
+
+    class FailedPage(_Resp):
+        async def __aenter__(self) -> _Resp:
+            raise ClientConnectionError("history page failed")
+
+    class History:
+        def get(self, url: str, **_kw: Any) -> _Resp:
+            nonlocal failed
+            if "limit=1" in url:
+                return _Resp({"data": [{"uid": newest}], "has_more": True})
+            after = url.partition("starting_after=")[2]
+            if after == "5" and not failed:
+                failed = True
+                return FailedPage({})
+            uid = {"": newest, "6": "5", "5": "4", "4": "3", "3": "2", "2": "1"}[after]
+            return _Resp({"data": [{"uid": uid, "direction": "outbound"}],
+                          "has_more": uid != "1"})
+
+    http = History()
+    with pytest.raises(ClientConnectionError):
+        await adapter._backfill(http, "cht_a")
+    newest = "6"
+    await adapter._backfill(http, "cht_a")
+    assert adapter._load_checkpoint("cht_a") == "6"
 
 
 class _ChatResourceHTTP:

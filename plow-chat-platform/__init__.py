@@ -1531,6 +1531,7 @@ class PlowChatAdapter(BasePlatformAdapter):
         # pre-existing and never handed to hermes.
         self._anchored_chats = {self.home_chat_uid: CHECKPOINT.exists()}
         self._last_uids = {self.home_chat_uid: self._load_checkpoint(self.home_chat_uid)}
+        self._backfill_scans: dict[str, tuple[str | None, list[dict[str, Any]]]] = {}
         self._typing_last_sent = {}           # chat uid -> when its last `start` went out
         self._goal_wakes = {}                 # chat uid -> the one task pacing its goal
         self._goal_locks = {}                 # chat uid -> its load-modify-save lock
@@ -3254,32 +3255,19 @@ class PlowChatAdapter(BasePlatformAdapter):
         _woken = True
         await self._handoff_message(event)
 
-    async def _history(self, http, chat_uid, limit, *, retry=False, socket_closed=None):
+    async def _history(self, http, chat_uid, limit, *, starting_after=None):
         """A chat's messages newest-first, a page at a time on a uid cursor,
         until the caller stops or they run out."""
-        cursor = None
-        retried = False
+        cursor = starting_after
         while True:
             url = f"{BASE}/v1/chats/{chat_uid}/messages?limit={limit}"
             if cursor:
                 url += f"&starting_after={cursor}"
-            try:
-                async with http.get(url, headers=self.auth) as resp:
-                    # An error page is not an empty page: treating a 401 or a 500
-                    # as "nothing missed" would move the baseline past the gap.
-                    _auth_raise_for_status(resp)
-                    body = await resp.json(content_type=None)
-            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-                if (not retry or retried
-                        or isinstance(exc, aiohttp.ClientResponseError) and exc.status < 500
-                        or socket_closed is not None and socket_closed.is_set()):
-                    raise
-                log.warning("[plow_chat] history page failed for %s: %s; retrying",
-                            chat_uid, type(exc).__name__)
-                retried = True
-                await asyncio.sleep(1)
-                continue
-            retried = False
+            async with http.get(url, headers=self.auth) as resp:
+                # An error page is not an empty page: treating a 401 or a 500
+                # as "nothing missed" would move the baseline past the gap.
+                _auth_raise_for_status(resp)
+                body = await resp.json(content_type=None)
             page = body.get("data") or []
             for m in page:
                 yield m
@@ -3287,16 +3275,17 @@ class PlowChatAdapter(BasePlatformAdapter):
                 return
             cursor = page[-1]["uid"]
 
-    async def _backfill(self, http, chat_uid, socket_closed=None):
+    async def _backfill(self, http, chat_uid):
         """Process what arrived while the socket was down.
 
         Frames are not replayable and a disconnected socket misses events
         outright, so the durable message record is the only recovery. Paged
         newest-first on a uid cursor - there is no `since` - back to the last
-        uid we handled, or to exhaustion when there is no baseline yet, then
-        replayed oldest-first so the conversation returns in order. Runs AFTER the socket is connected, never before: anything
-        arriving during the backfill then comes over the socket, and the uid
-        dedupe absorbs the overlap.
+        checkpointed uid, or to exhaustion when there is no baseline yet, then
+        replayed oldest-first so the conversation returns in order. Fetched
+        pages survive a failed request within this adapter; a reconnect checks
+        the newest uid before resuming in case messages arrived in the gap.
+        Runs after the socket connects so live frames cover the scan overlap.
         """
         # No early return on an unset baseline. That state means the chat was
         # EMPTY when this agent anchored, so everything now in it arrived since —
@@ -3304,19 +3293,36 @@ class PlowChatAdapter(BasePlatformAdapter):
         # chat, if the socket dropped before hermes accepted it. With no
         # checkpoint to stop at the loop simply pages to exhaustion, which for a
         # chat that started empty is the handful of messages actually missed.
-        missed = []
-        baseline = self._last_uids.get(chat_uid)
+        baseline, missed = self._backfill_scans.get(
+            chat_uid, (self._last_uids.get(chat_uid), []))
+        if missed:
+            # A reconnect may have missed newer messages while its socket was
+            # down. If the top changed, scan from there again; otherwise keep
+            # the pages already fetched and resume at their oldest uid.
+            latest = None
+            async for m in self._history(http, chat_uid, limit=1):
+                latest = m["uid"]
+                break
+            if latest != missed[0]["uid"]:
+                missed = []
+        self._backfill_scans[chat_uid] = (baseline, missed)
         page_size = 50
         # The checkpoint bounds this, not a page count: stopping early
-        # would drop the OLDEST missed messages while still advancing the
-        # baseline past them, which is the loss it exists to prevent.
-        async for m in self._history(http, chat_uid, limit=page_size, retry=True,
-                                     socket_closed=socket_closed):
+        # would drop the oldest missed messages while advancing past them.
+        async for m in self._history(http, chat_uid, limit=page_size,
+                                     starting_after=missed[-1]["uid"] if missed else None):
             if m["uid"] == baseline:
                 break
             missed.append(m)
+        self._backfill_scans.pop(chat_uid, None)
         for m in reversed(missed):           # oldest-first
-            await self._on_message(m, chat_uid)
+            if await self._on_message(m, chat_uid) is False:
+                # An ignored message is still part of the recovered history.
+                # Earlier queued turns must be handed off before its uid can
+                # become the durable resume point.
+                if chat_uid in self._inbound:
+                    await self._inbound[chat_uid][0].join()
+                self._checkpoint(m["uid"], chat_uid)
         if missed:
             log.info("[plow_chat] backfilled %d missed message(s)", len(missed))
 
@@ -3369,20 +3375,18 @@ class PlowChatAdapter(BasePlatformAdapter):
                 connected()
                 log.info("[plow_chat] websocket connected")
                 frames = asyncio.Queue()
-                socket_closed = asyncio.Event()
 
                 async def read_frames():
                     try:
                         async for frame in ws:
                             frames.put_nowait(frame)
                     finally:
-                        socket_closed.set()
                         frames.put_nowait(None)
 
                 reader = asyncio.create_task(read_frames())
                 try:
                     for chat_uid in self.chat_uids:
-                        await self._backfill(http, chat_uid, socket_closed)
+                        await self._backfill(http, chat_uid)
                     # Armed only now: each wake waits out its own chat's
                     # backlog, so it cannot run ahead of an offline `/goal
                     # clear` still sitting in the queue.
@@ -3438,21 +3442,21 @@ class PlowChatAdapter(BasePlatformAdapter):
 
     async def _on_message(self, msg, chat_uid):
         """One inbound message, from the socket or from the backfill, queued
-        for the chat's server."""
+        for the chat's server. False means it needed no hand-off."""
         if msg["direction"] != "inbound":
-            return                           # the echo of our own send
+            return False                     # the echo of our own send
         sender = msg["sender"]
         if sender["type"] not in ("member", "agent", "system") or (
                 sender["type"] == "agent" and sender.get("relationship") != "peer"):
             # This sender-type gate must run before anything reads uid:
             # an outbound agent sender carries a `line` object and NO uid key.
             log.info("[plow_chat] ignored sender.type=%r", sender["type"])
-            return
+            return False
         uid = msg["uid"]
         if (chat_uid, uid) in self._seen:
             return                           # socket/backfill overlap - never re-fetch
         if not msg["body"].strip() and not msg["attachments"]:
-            return
+            return False
         if chat_uid not in self._inbound:
             queue = asyncio.Queue()
             server = asyncio.create_task(self._serve_chat(chat_uid, queue))
@@ -3476,6 +3480,7 @@ class PlowChatAdapter(BasePlatformAdapter):
         # backfill replays whatever this one still held.
         self._seen.append((chat_uid, uid))
         del self._seen[:-512]
+        return True
 
     async def _serve_chat(self, chat_uid, queue):
         """The one owner of a chat's inbound, for the life of the adapter:
