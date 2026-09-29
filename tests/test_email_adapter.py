@@ -542,6 +542,24 @@ def test_a_new_thread_returns_its_chat_and_opens_its_session_with_what_was_sent(
                             else "Are you free Friday?")
 
 
+def test_a_sent_new_thread_keeps_its_chat_uid_when_its_origin_cannot_be_recorded(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
+) -> None:
+    """The mail is out and Plow named its chat: local bookkeeping failing after
+    that must not turn the receipt into an unknown delivery."""
+    module, _entry = _load_email(monkeypatch, tmp_path)
+    http = _MailHTTP([_mail_chat("cht_new", group=True)],
+                     new_mail={"status": "sent", "chat_uid": "cht_new", "chat_unrecorded_reason": None})
+    _email_tool(module, monkeypatch, http)
+    _stub_mirror(monkeypatch)
+    module.EMAIL_ORIGINS.mkdir()                 # an origin file that cannot be read
+    module._ACTIVE_TURN.set(_OWNER_DM_TURN)
+
+    out = json.loads(module._plow_send_email({"to": ["dana@example.com"], "subject": "Hi", "body": "Hello"}))
+
+    assert out == {"sent": True, "chat_uid": "cht_new"}
+
+
 @pytest.mark.parametrize(
     ("new_mail", "sent"),
     [

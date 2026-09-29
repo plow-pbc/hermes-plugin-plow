@@ -51,16 +51,13 @@ from gateway.session import build_session_key
 from hermes_constants import get_hermes_home
 
 from ._transport import (
-    BACKGROUND_REVIEW_PREFIX,
     BASE,
     NO_REPLY_SENTINEL,
     _ACTIVE_TURN,
     _DIAGNOSTIC_PREFIXES,
     _NEVER_GUESS,
-    _NO_REPLY_PREFIX,
     _PlowAuthError,
     _UNTRUSTED_MARK,
-    _WORKING_PREFIX,
     _agent_name,
     _auth_raise_for_status,
     _bearer,
@@ -4668,19 +4665,17 @@ async def _email_start(adapter, mail, to, subject, body, turn):
         return {"sent": True if sent["status"] == "sent" else "unknown", "chat_uid": None,
                 "chat_unrecorded_reason": sent.get("chat_unrecorded_reason"),
                 "note": "Plow has no chat id for this thread. Do not resend and do not guess a chat id."}
-    if turn.get("email"):
-        origin = adapter.owner_one_to_one()
-    else:
-        origin = turn["chat_uid"]
-        _record_email_origin(thread_uid, origin)
+    origin = adapter.owner_one_to_one() if turn.get("email") else turn["chat_uid"]
     try:
+        if not turn.get("email"):
+            _record_email_origin(thread_uid, origin)
         if thread_uid not in mail._chats:
             mail._set_reach((await adapter._tool_json("GET", "/v1/chats"))["data"])
         session_id = await mail.thread_session(thread_uid)
         opener = f"(I started this thread from chat {origin}.)\n\n{body}" if origin else body
         await asyncio.to_thread(_mirror_sent, thread_uid, opener, session_id, platform=plow_email.PLATFORM_NAME)
-    except Exception as exc:  # noqa: BLE001 - the mail is out; only its context is missing
-        log.warning("[plow_email] opener not recorded for %s: %s", thread_uid, exc)
+    except Exception as exc:  # noqa: BLE001 - the mail is out; only its bookkeeping is missing
+        log.warning("[plow_email] origin or opener not recorded for %s: %s", thread_uid, exc)
     return {"sent": True, "chat_uid": thread_uid}
 
 
