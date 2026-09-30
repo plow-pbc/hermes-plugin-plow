@@ -4736,7 +4736,7 @@ def _plow_send_email(args, **_kwargs):
     if not body:
         return json.dumps({"success": False, "error": "body is required; nothing was sent"})
     signer = (adapter._identity.get("mailbox") or {}).get("display_name")
-    if signer and signer not in body.splitlines()[-1]:
+    if signer and not re.search(rf"(?<!\w){re.escape(signer)}(?!\w)", body.splitlines()[-1], re.IGNORECASE):
         return json.dumps({"success": False, "error": (
             f"This sends from {signer}'s mailbox, even when your owner says 'from me' or approves a draft. "
             f"Write as {signer} on their behalf and end body with a sign-off line containing {signer}. "

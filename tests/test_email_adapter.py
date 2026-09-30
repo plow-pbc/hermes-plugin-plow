@@ -642,23 +642,33 @@ def test_register_declares_both_platforms_on_one_transport(
 
 @pytest.mark.parametrize("turn", [_OWNER_DM_TURN, _TRUSTED_GROUP_TURN, _OWNER_EMAIL_TURN])
 @pytest.mark.parametrize("to", ["cht_m", ["dana@example.com"]])
+@pytest.mark.parametrize(("persona", "wrong_signer", "signoff"), [
+    ("Elm", "Alex", "— Elm (on behalf of Alex)"),
+    ("Al", "Alex", "— al (on behalf of Alex)"),
+    ("Al", "Sal", "AL"),
+    ("A.l", "Axl", "— a.L"),
+])
 def test_email_requires_the_mailbox_persona_signature_before_sending(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, turn: dict[str, Any], to: str | list[str],
+    persona: str, wrong_signer: str, signoff: str,
 ) -> None:
     module, _entry = _load_email(monkeypatch, tmp_path)
     http = _MailHTTP([_mail_chat("cht_m")], new_mail={"status": "sent", "chat_uid": None})
     _email_tool(module, monkeypatch, http)
+    phone = module._live[0]
+    phone._identity = {**phone._identity, "mailbox": {**phone._identity["mailbox"], "display_name": persona}}
     _stub_mirror(monkeypatch)
     module._ACTIVE_TURN.set(turn)
 
-    refused = json.loads(module._plow_send_email({"to": to, "subject": "Budget", "body": "Approved.\n\nAlex"}))
+    refused = json.loads(module._plow_send_email({"to": to, "subject": "Budget", "body": f"Approved.\n\n{wrong_signer}"}))
     assert refused["success"] is False
-    assert "Elm" in refused["error"] and "nothing was sent" in refused["error"]
+    assert persona in refused["error"] and "nothing was sent" in refused["error"]
     assert http.posts == []
 
-    sent = json.loads(module._plow_send_email({"to": to, "subject": "Budget", "body": "Alex approved.\n\n— Elm (on behalf of Alex)\n \n"}))
+    body = f"Alex approved.\n\n{signoff}"
+    sent = json.loads(module._plow_send_email({"to": to, "subject": "Budget", "body": f"{body}\n \n"}))
     assert sent["sent"] is True
-    assert http.posts[0][1]["body"] == "Alex approved.\n\n— Elm (on behalf of Alex)"
+    assert http.posts[0][1]["body"] == body
 
 
 async def test_an_owner_copy_resolves_its_fallback_from_fresh_rosters(
