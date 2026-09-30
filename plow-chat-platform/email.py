@@ -272,12 +272,13 @@ class PlowEmailAdapter(BasePlatformAdapter):
             return SendResult(success=True)
         subject = _one_line(self._chats[chat_id].get("display_name")) or "(no subject)"
         sender = _one_line((turn or {}).get("speaker_handle"))   # this turn's own sender, not the latest mail's
-        label = _untrusted("email header", f"Email {json.dumps(subject, ensure_ascii=False)}" + (
-            f" from {json.dumps(sender, ensure_ascii=False)}" if sender else "") + ":")
+        label = f"Email {json.dumps(subject, ensure_ascii=False)}" + (
+            f" from {json.dumps(sender, ensure_ascii=False)}" if sender else "") + ":"
         # Imported here: the package imports this module before it defines
         # the phone line, and every send comes long after both are loaded.
         from . import _deliver_email_text
-        return await _deliver_email_text(chat_id, f"{label}\n{body}")
+        return await _deliver_email_text(chat_id, f"{label}\n{body}",
+                                         session_text=f"{_untrusted('email header', label)}\n{body}")
 
     async def on_processing_start(self, event):
         # An email turn has no room to trust, so its authority is the owner's

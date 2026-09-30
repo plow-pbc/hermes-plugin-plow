@@ -2442,7 +2442,7 @@ class PlowChatAdapter(BasePlatformAdapter):
                 return uid
         return None
 
-    async def deliver_for_email(self, thread_uid, text):
+    async def deliver_for_email(self, thread_uid, text, *, session_text):
         """Post what an email turn produced for the owner, never to the thread:
         in the chat the thread was started from while that chat is still the
         owner's own or a trusted group they sit in, else the owner's 1:1.
@@ -2480,7 +2480,7 @@ class PlowChatAdapter(BasePlatformAdapter):
                 origin = None
                 continue
             if result.success:
-                await _record_sent(self, target, f"{text}\n(email thread {thread_uid})", PLATFORM_NAME)
+                await _record_sent(self, target, f"{session_text}\n(email thread {thread_uid})", PLATFORM_NAME)
             return result
 
     async def _verbose_enabled(self, http):
@@ -3942,12 +3942,12 @@ def _record_email_origin(thread_uid, origin):
         os.replace(staged, EMAIL_ORIGINS)
 
 
-async def _deliver_email_text(thread_uid, text):
+async def _deliver_email_text(thread_uid, text, *, session_text):
     """The email line's one way out: what a turn there produced for the owner,
     handed to the phone line (see PlowChatAdapter.deliver_for_email)."""
     if _live is None:
         return SendResult(success=False, retryable=True, error="Plow Chat is not connected; the owner's copy waits")
-    return await _live[0].deliver_for_email(thread_uid, text)
+    return await _live[0].deliver_for_email(thread_uid, text, session_text=session_text)
 
 
 class _PlowSendError(Exception):

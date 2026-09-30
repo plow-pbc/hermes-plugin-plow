@@ -258,8 +258,9 @@ authority. What an email turn ends with, a cron delivery and the runtime's
 error notice go privately to the owner instead: to the phone chat the thread
 was started from while it is the owner's own or a trusted group they sit in
 (recorded in `$HERMES_HOME/plow_email_origins.json`), else the owner's 1:1,
-opening with an untrusted-data label containing the subject and the turn's sender
-address, and recorded in that chat's session with the thread's uid. A bare `NO_REPLY`, mid-turn prose and the runtime's
+opening with a plain header containing the subject and the turn's sender
+address. The copy recorded in that chat's session wraps the header as untrusted data
+and includes the thread's uid. A bare `NO_REPLY`, mid-turn prose and the runtime's
 diagnostics go nowhere. A closing `NO_REPLY` after text is stripped, and the
 preceding text still reaches the owner. No cron home
 (`PLOW_HOME_CHANNEL` stays the phone line's), no roster policy on
