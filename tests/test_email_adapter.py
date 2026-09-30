@@ -480,7 +480,7 @@ def test_plow_send_email_reaches_only_what_the_turn_may(
 
     if allowed:
         assert out == {"sent": True, "chat_uid": args["to"]}
-        assert http.posts == [(f"{module.BASE}/v1/chats/{args['to']}/messages", {"body": f"{args['body']}\n\nElm"})]
+        assert http.posts == [(f"{module.BASE}/v1/chats/{args['to']}/messages", {"body": args["body"]})]
     else:
         assert out["success"] is False and "nothing was sent" in out["error"]
         assert http.posts == [] and http.gets == []
@@ -497,11 +497,11 @@ def test_a_reply_from_another_chat_is_recorded_in_the_threads_session(
     mirrored = _stub_mirror(monkeypatch)
     module._ACTIVE_TURN.set(_OWNER_DM_TURN)
 
-    out = json.loads(module._plow_send_email({"to": "cht_m", "body": "Friday works."}))
+    out = json.loads(module._plow_send_email({"to": "cht_m", "body": " Friday works.\n\nElm\n"}))
 
     assert out == {"sent": True, "chat_uid": "cht_m"}
     assert [(c["platform"], c["chat_id"], c["text"]) for c in mirrored] == [
-        ("plow_email", "cht_m", "Friday works.\n\nElm")]
+        ("plow_email", "cht_m", " Friday works.\n\nElm\n")]
 
 
 @pytest.mark.parametrize(
@@ -539,15 +539,15 @@ def test_a_new_thread_returns_its_chat_and_opens_its_session_with_what_was_sent(
 
     assert out == {"sent": True, "chat_uid": "cht_new"}
     assert http.posts == [(f"{module.BASE}/v1/chats", {"line_uid": "ln_em", "members": ["dana@example.com"],
-                                                        "subject": "Friday", "body": "Are you free Friday?\n\nElm"})]
+                                                        "subject": "Friday", "body": "Are you free Friday?"})]
     assert module._email_origins().get("cht_new") == origin
     [source] = mail.sessions
     assert (source.platform, source.chat_id, source.chat_type) == ("plow_email", "cht_new", "group")
     [seed] = mirrored
     assert (seed["platform"], seed["chat_id"], seed["session_id"]) == ("plow_email", "cht_new", "sess_new")
     where = origin or one_to_one
-    assert seed["text"] == (f"(I started this thread from chat {where}.)\n\nAre you free Friday?\n\nElm" if where
-                            else "Are you free Friday?\n\nElm")
+    assert seed["text"] == (f"(I started this thread from chat {where}.)\n\nAre you free Friday?" if where
+                            else "Are you free Friday?")
 
 
 def test_a_sent_new_thread_keeps_its_chat_uid_when_its_origin_cannot_be_recorded(
@@ -730,36 +730,6 @@ async def test_an_owner_copy_refresh_failure_is_retryable_without_losing_the_fin
     assert retried.success
     target = origin or "cht_a"
     assert http.posts == [(f"{module.BASE}/v1/chats/{target}/messages", {"body": "Private question."})]
-
-
-@pytest.mark.parametrize(("persona", "body", "expected"), [
-    ("Elm", "Approved.\n ", "Approved.\n\nElm"),
-    (None, "Approved.\n ", "Approved."),
-    ("", "Approved.\n ", "Approved."),
-    ("Elm", "Approved.\n\nBest,\nElm\n ", "Approved.\n\nBest,\nElm"),
-    ("Elm", "Approved.\n\n— eLM (on behalf of Alex)", "Approved.\n\n— eLM (on behalf of Alex)"),
-    ("Al", "Approved.\n\nAlex", "Approved.\n\nAlex\n\nAl"),
-    ("Al", "Approved.\n\nSal", "Approved.\n\nSal\n\nAl"),
-    ("Elm", "Elm approved.\nReady.", "Elm approved.\nReady.\n\nElm"),
-    ("A.l", "Approved.\n\nAxl", "Approved.\n\nAxl\n\nA.l"),
-    ("A.l", "Approved.\n\nA.l", "Approved.\n\nA.l"),
-])
-def test_email_appends_the_mailbox_persona_only_when_missing_from_the_closing_line(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
-    persona: str | None, body: str, expected: str,
-) -> None:
-    module, _entry = _load_email(monkeypatch, tmp_path)
-    http = _MailHTTP([_mail_chat("cht_m")])
-    _email_tool(module, monkeypatch, http)
-    phone = module._live[0]
-    phone._identity = {**phone._identity, "mailbox": {**phone._identity["mailbox"], "display_name": persona}}
-    _stub_mirror(monkeypatch)
-    module._ACTIVE_TURN.set(_OWNER_DM_TURN)
-
-    result = json.loads(module._plow_send_email({"to": "cht_m", "body": body}))
-
-    assert result["sent"] is True
-    assert http.posts == [(f"{module.BASE}/v1/chats/cht_m/messages", {"body": expected})]
 
 
 @pytest.mark.parametrize("status", [403, 404, 503])

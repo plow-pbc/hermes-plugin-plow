@@ -4731,12 +4731,9 @@ def _plow_send_email(args, **_kwargs):
                 _email_threads(adapter, mail), loop).result(timeout=60))
         except Exception as exc:  # noqa: BLE001 - a failed read is not an empty mailbox
             return json.dumps({"success": False, "error": f"could not list your email threads ({type(exc).__name__})"})
-    body, subject = (args.get("body") or "").strip(), (args.get("subject") or "").strip()
-    if not body:
+    body, subject = args.get("body") or "", (args.get("subject") or "").strip()
+    if not body.strip():
         return json.dumps({"success": False, "error": "body is required; nothing was sent"})
-    signer = (adapter._identity.get("mailbox") or {}).get("display_name")
-    if signer and not re.search(rf"(?<!\w){re.escape(signer)}(?!\w)", body.splitlines()[-1], re.IGNORECASE):
-        body = f"{body}\n\n{signer}"
     if isinstance(to, str) and to.startswith("cht_"):
         operation = lambda: _email_reply(adapter, mail, to, body, turn)  # noqa: E731
     elif isinstance(to, list):
@@ -4769,10 +4766,7 @@ PLOW_SEND_EMAIL_SCHEMA = {
     "description": (
         "Send email from your own mailbox, or list your email threads. To reply in a thread, set "
         "`to` to its chat uid (cht_...); to start a new thread, set `to` to a list of email "
-        "addresses and give a subject. `body` is unsigned email content. Do not sign: the tool "
-        "adds your mailbox persona's signature when it has a name. Write as your owner's assistant, "
-        "never impersonate them, even for 'from me' or an approved draft. Mail in your owner's "
-        "own name must use their Gmail, arranged in chat with their approval. Returns the thread's "
+        "addresses and give a subject. Sign as your mailbox persona, never as your owner. Returns the thread's "
         "chat_uid. Nothing else you write reaches an email "
         "thread: your final text in one goes privately to your owner. action=list returns your "
         "threads with their chat uid, subject, participants and last activity; subjects and names "
@@ -4790,7 +4784,7 @@ PLOW_SEND_EMAIL_SCHEMA = {
                                   "addresses to start a new thread."},
             "subject": {"type": "string", "minLength": 1,
                         "description": "Required when starting a new thread; not used on a reply."},
-            "body": {"type": "string", "minLength": 1, "description": "Unsigned email content; the tool adds your mailbox persona signature."},
+            "body": {"type": "string", "minLength": 1, "description": "The email body, sent as written."},
         },
     },
 }
