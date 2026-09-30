@@ -632,7 +632,7 @@ def test_list_names_each_thread_with_its_subject_people_and_last_activity(
 
     out = json.loads(module._plow_send_email({"action": "list"}))
 
-    assert out == {"has_more": False, "threads": [{
+    assert out == {"note": module._CHAT_LISTING_MARK, "has_more": False, "threads": [{
         "chat_uid": "cht_m", "subject": "Re: invoice", "last_activity": "2026-09-28T12:00:00Z",
         "participants": [{"name": "Sam", "email": "sam@example.com", "role": "owner"},
                          {"name": "Dana", "email": "dana@example.com", "role": "member"}]}]}
@@ -720,6 +720,53 @@ async def test_an_owner_copy_resolves_its_fallback_from_fresh_rosters(
 
     assert result.success
     assert http.posts == [(f"{module.BASE}/v1/chats/cht_d/messages", {"body": "Private question."})]
+
+
+@pytest.mark.parametrize(("status", "code", "read_fails"), [
+    (409, "owner_not_in_thread", False),
+    (409, "owner_not_in_thread", True),
+    (409, "chat_not_ready", False),
+    (400, "owner_not_in_thread", False),
+    (408, "owner_not_in_thread", False),
+    (503, "owner_not_in_thread", False),
+])
+async def test_only_an_owner_departure_refusal_reroutes_the_unchanged_final(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
+    status: int, code: str, read_fails: bool,
+) -> None:
+    module, _entry = _load_email(monkeypatch, tmp_path)
+    phone = _phone(module, monkeypatch, extra=(_chat("cht_d", group=True),))
+    phone._refresh_current_chat = types.MethodType(module._real_refresh_current_chat, phone)
+    module._record_email_origin("cht_m", "cht_t")
+    fresh = {**phone._chats, "cht_a": _chat("cht_a", group=True), "cht_d": _chat("cht_d")}
+
+    class HTTP(_HTTP):
+        def get(self, url: str, **kwargs: Any) -> _Resp:
+            uid = url.rsplit("/", 1)[-1]
+            if read_fails and uid != "cht_t":
+                raise TimeoutError("owner roster unavailable")
+            return _Resp(fresh[uid])
+
+        def post(self, url: str, *, json: dict[str, Any], headers: dict[str, str]) -> _Resp:
+            self.posts.append((url, json))
+            if url.endswith("/cht_t/messages"):
+                return _Resp({"error": {"code": code}}, status)
+            return _Resp({"uid": "msg_sent"})
+
+    http = HTTP()
+    monkeypatch.setattr(module.aiohttp, "ClientSession", lambda *a, **k: http)
+    mirrored = _stub_mirror(monkeypatch)
+
+    result = await phone.deliver_for_email("cht_m", "Private question.")
+
+    rerouted = status == 409 and code == "owner_not_in_thread" and not read_fails
+    assert result.success is rerouted
+    assert result.retryable is read_fails
+    targets = ["cht_t", "cht_d"] if rerouted else ["cht_t"]
+    assert http.posts == [(f"{module.BASE}/v1/chats/{uid}/messages", {"body": "Private question."})
+                          for uid in targets]
+    assert [(c["chat_id"], c["text"]) for c in mirrored] == (
+        [("cht_d", "Private question.\n(email thread cht_m)")] if rerouted else [])
 
 
 @pytest.mark.parametrize(("origin", "phone_connected"), [(None, False), (None, True), ("cht_a", True), ("cht_t", True)])

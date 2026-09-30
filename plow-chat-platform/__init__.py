@@ -2451,30 +2451,37 @@ class PlowChatAdapter(BasePlatformAdapter):
         session with the thread's chat uid, so the owner's "send it" there
         knows what and where."""
         origin = _email_origins().get(thread_uid)
-        try:
-            if origin in self.chat_uids:
-                try:
-                    await self._refresh_current_chat(origin)
-                except aiohttp.ClientResponseError as exc:
-                    if exc.status not in (403, 404):
-                        raise
-                    origin = None
-            chat = self._chats.get(origin) or {}
-            if origin in self.chat_uids and (_owner_dm(chat) or chat.get("trusted") and _owner_participant(chat)):
-                target = origin
-            else:
-                target = await self.owner_one_to_one()
-        except (aiohttp.ClientError, TimeoutError) as exc:
-            return SendResult(success=False, retryable=True,
-                              error=f"Could not verify the email's owner destination ({type(exc).__name__})")
-        if target is None:
-            log.warning("[plow_email] no 1:1 for what %s produced; dropped", thread_uid)
-            return SendResult(success=True)
-        async with aiohttp.ClientSession() as http:
-            result = await self._post_message(http, target, {"body": text})
-        if result.success:
-            await asyncio.to_thread(_mirror_sent, target, f"{text}\n(email thread {thread_uid})")
-        return result
+        while True:
+            try:
+                if origin in self.chat_uids:
+                    try:
+                        await self._refresh_current_chat(origin)
+                    except aiohttp.ClientResponseError as exc:
+                        if exc.status not in (403, 404):
+                            raise
+                        origin = None
+                chat = self._chats.get(origin) or {}
+                if origin in self.chat_uids and (_owner_dm(chat) or chat.get("trusted") and _owner_participant(chat)):
+                    target = origin
+                else:
+                    target = await self.owner_one_to_one()
+            except (aiohttp.ClientError, TimeoutError) as exc:
+                return SendResult(success=False, retryable=True,
+                                  error=f"Could not verify the email's owner destination ({type(exc).__name__})")
+            if target is None:
+                log.warning("[plow_email] no 1:1 for what %s produced; dropped", thread_uid)
+                return SendResult(success=True)
+            async with aiohttp.ClientSession() as http:
+                result = await self._post_message(http, target, {"body": text})
+            refused = result.raw_response or {}
+            if (target == origin and refused.get("status") == 409
+                    and (refused["body"].get("error") or {}).get("code") == "owner_not_in_thread"):
+                # The live provider roster refused before dispatch; try the owner's 1:1 once.
+                origin = None
+                continue
+            if result.success:
+                await asyncio.to_thread(_mirror_sent, target, f"{text}\n(email thread {thread_uid})")
+            return result
 
     async def _verbose_enabled(self, http):
         """Whether this agent's owner asked for diagnostic output in chat.
@@ -2742,7 +2749,8 @@ class PlowChatAdapter(BasePlatformAdapter):
                     raw_response={"delivery_unknown": True})
             data = await resp.json(content_type=None)
             if resp.status >= 400:
-                return SendResult(success=False, error=f"Plow Chat {resp.status}: {data}")
+                return SendResult(success=False, error=f"Plow Chat {resp.status}: {data}",
+                                  raw_response={"status": resp.status, "body": data})
         # A failed post cleared nothing, so only a delivered one re-raises.
         self._retrigger_typing(chat_id, metadata)
         return SendResult(success=True, message_id=data.get("uid"))
@@ -4641,7 +4649,7 @@ async def _email_threads(adapter, mail):
                               "role": p.get("role")}
                              for p in chat["participants"] if p.get("type") == "member"],
         })
-    return {"threads": threads, "has_more": False}
+    return {"note": _CHAT_LISTING_MARK, "threads": threads, "has_more": False}
 
 
 async def _email_reply(adapter, mail, thread_uid, body, turn):

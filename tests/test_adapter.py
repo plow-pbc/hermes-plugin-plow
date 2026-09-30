@@ -3177,7 +3177,7 @@ async def test_send_voice_failure_never_sends_caption(monkeypatch, tmp_path, sta
         assert result.raw_response == {"delivery_unknown": True}
         assert "timed out" in result.error
     else:
-        assert result.raw_response is None
+        assert result.raw_response == {"status": status, "body": {"detail": "rejected"}}
     assert len(http.calls) == 3
     assert http.calls[-1][1].endswith("/voicememo")
 
@@ -3205,7 +3205,7 @@ async def test_voice_delivery_unknown_suppresses_failure_notice_once(monkeypatch
 
     http.response = _Resp({"detail": "rejected"}, 409)
     result = await adapter.send_voice("cht_a", str(audio))
-    assert result.success is False and result.raw_response is None
+    assert result.success is False and result.raw_response == {"status": 409, "body": {"detail": "rejected"}}
     await adapter._notify_media_delivery_failure("cht_a", str(audio), is_voice=True)
     assert [url.rsplit("/", 1)[-1] for _, url, _ in http.calls] == [
         "attachments", "voice", "voicememo", "messages",
