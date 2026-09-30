@@ -2459,9 +2459,14 @@ class PlowChatAdapter(BasePlatformAdapter):
 
     async def owner_one_to_one(self):
         """Find the owner's 1:1 from fresh rosters, home first. A failed read
-        must propagate: it is not evidence that no owner chat exists."""
+        must propagate unless the candidate is gone or no longer accessible."""
         for uid in dict.fromkeys((self.home_chat_uid, *self.chat_uids)):
-            await self._refresh_current_chat(uid)
+            try:
+                await self._refresh_current_chat(uid)
+            except aiohttp.ClientResponseError as exc:
+                if exc.status not in (403, 404):
+                    raise
+                continue
             if _owner_dm(self._chats[uid]):
                 return uid
         return None
@@ -2477,7 +2482,12 @@ class PlowChatAdapter(BasePlatformAdapter):
         origin = _email_origins().get(thread_uid)
         try:
             if origin in self.chat_uids:
-                await self._refresh_current_chat(origin)
+                try:
+                    await self._refresh_current_chat(origin)
+                except aiohttp.ClientResponseError as exc:
+                    if exc.status not in (403, 404):
+                        raise
+                    origin = None
             chat = self._chats.get(origin) or {}
             if origin in self.chat_uids and (_owner_dm(chat) or chat.get("trusted") and _owner_participant(chat)):
                 target = origin
@@ -4726,12 +4736,10 @@ def _plow_send_email(args, **_kwargs):
     if not body:
         return json.dumps({"success": False, "error": "body is required; nothing was sent"})
     signer = (adapter._identity.get("mailbox") or {}).get("display_name")
-    if not signer:
-        return json.dumps({"success": False, "error": "your mailbox has no persona name; nothing was sent"})
-    if body.splitlines()[-1] != signer:
+    if signer and signer not in body.splitlines()[-1]:
         return json.dumps({"success": False, "error": (
             f"This sends from {signer}'s mailbox, even when your owner says 'from me' or approves a draft. "
-            f"Write as {signer} on their behalf and end body with a separate line containing exactly {signer}. "
+            f"Write as {signer} on their behalf and end body with a sign-off line containing {signer}. "
             "Never sign as your owner. Correct the body and call again; nothing was sent.")})
     if isinstance(to, str) and to.startswith("cht_"):
         operation = lambda: _email_reply(adapter, mail, to, body, turn)  # noqa: E731
@@ -4767,7 +4775,8 @@ _SEND_EMAIL_DESCRIPTION = (
     "`to` to its chat uid (cht_...); to start a new thread, set `to` to a list of email "
     "addresses and give a subject. `body` is the email itself: sign it as {signer}, never as your owner, "
     "even for 'from me' or an approved draft. Write on their behalf without impersonating them. End body with a "
-    "separate line containing exactly {signer}; any other signature is refused. Mail in your owner's "
+    "sign-off line containing {signer}. When your mailbox has a persona name, a closing line without "
+    "that name is refused. Mail in your owner's "
     "own name must use their Gmail, arranged in chat with their approval. Returns the thread's "
     "chat_uid. Nothing else you write reaches an email "
     "thread: your final text in one goes privately to your owner. action=list returns your "

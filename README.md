@@ -255,8 +255,9 @@ error notice go privately to the owner instead: to the phone chat the thread
 was started from while it is the owner's own or a trusted group they sit in
 (recorded in `$HERMES_HOME/plow_email_origins.json`), else the owner's 1:1,
 opening with a line naming the email, and recorded in that chat's session
-with the thread's uid. A closing `NO_REPLY`, mid-turn prose and the runtime's
-diagnostics go nowhere. No cron home
+with the thread's uid. A bare `NO_REPLY`, mid-turn prose and the runtime's
+diagnostics go nowhere. A closing `NO_REPLY` after text is stripped, and the
+preceding text still reaches the owner. No cron home
 (`PLOW_HOME_CHANNEL` stays the phone line's), no roster policy on
 multi-address threads, no backfill across a socket gap, and no delivered
 attachments in v1 — an attachment-only mail arrives as a placeholder naming

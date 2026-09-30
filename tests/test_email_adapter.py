@@ -295,8 +295,8 @@ def _phone(module: Any, monkeypatch: pytest.MonkeyPatch, *, home_is_owner_dm: bo
                      id="an-untrusted-origin-falls-back-to-the-1:1"),
         pytest.param(("cht_m", True), None, "Looking that up now.", None, None, id="mid-turn-prose"),
         pytest.param(None, {"notify": True}, "⏳ Working — still on it", None, None, id="diagnostic"),
-        pytest.param(("cht_m", False), {"notify": True}, "Not addressed to me.\nNO_REPLY", None, None,
-                     id="closing-silence"),
+        pytest.param(("cht_m", False), {"notify": True}, "NO_REPLY", None, None,
+                     id="bare-silence"),
     ],
 )
 async def test_an_email_turns_text_goes_to_the_owner_and_never_the_thread(
@@ -309,7 +309,7 @@ async def test_an_email_turns_text_goes_to_the_owner_and_never_the_thread(
     started from while it is still the owner's own or a trusted group, else to
     the owner's 1:1, opening with a line naming the email, and are recorded in
     that chat's session with the thread's uid. Working-out, diagnostics and a
-    closing NO_REPLY go nowhere."""
+    bare NO_REPLY go nowhere."""
     module, _entry = _load_email(monkeypatch, tmp_path)
     mail = _adapter(module)
     mail._set_reach([_mail_chat("cht_m")])
@@ -656,9 +656,9 @@ def test_email_requires_the_mailbox_persona_signature_before_sending(
     assert "Elm" in refused["error"] and "nothing was sent" in refused["error"]
     assert http.posts == []
 
-    sent = json.loads(module._plow_send_email({"to": to, "subject": "Budget", "body": "Alex approved.\n\nElm"}))
+    sent = json.loads(module._plow_send_email({"to": to, "subject": "Budget", "body": "Alex approved.\n\n— Elm (on behalf of Alex)\n \n"}))
     assert sent["sent"] is True
-    assert http.posts[0][1]["body"] == "Alex approved.\n\nElm"
+    assert http.posts[0][1]["body"] == "Alex approved.\n\n— Elm (on behalf of Alex)"
 
 
 async def test_an_owner_copy_resolves_its_fallback_from_fresh_rosters(
@@ -715,3 +715,74 @@ async def test_an_owner_copy_refresh_failure_is_retryable_without_losing_the_fin
     assert retried.success
     target = origin or "cht_a"
     assert http.posts == [(f"{module.BASE}/v1/chats/{target}/messages", {"body": "Private question."})]
+
+
+@pytest.mark.parametrize("persona", [None, ""])
+def test_email_without_a_named_persona_does_not_require_a_signature(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, persona: str | None,
+) -> None:
+    module, _entry = _load_email(monkeypatch, tmp_path)
+    http = _MailHTTP([_mail_chat("cht_m")])
+    _email_tool(module, monkeypatch, http)
+    phone = module._live[0]
+    phone._identity = {**phone._identity, "mailbox": {**phone._identity["mailbox"], "display_name": persona}}
+    _stub_mirror(monkeypatch)
+    module._ACTIVE_TURN.set(_OWNER_DM_TURN)
+
+    result = json.loads(module._plow_send_email({"to": "cht_m", "body": "Approved."}))
+
+    assert result["sent"] is True
+    assert http.posts == [(f"{module.BASE}/v1/chats/cht_m/messages", {"body": "Approved."})]
+
+
+@pytest.mark.parametrize("status", [403, 404, 503])
+@pytest.mark.parametrize("origin", ["cht_a", "cht_t"])
+async def test_an_unavailable_origin_falls_back_but_a_transient_error_waits(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, status: int, origin: str,
+) -> None:
+    module, _entry = _load_email(monkeypatch, tmp_path)
+    phone = _phone(module, monkeypatch, extra=(_chat("cht_d"),))
+    phone._refresh_current_chat = types.MethodType(module._real_refresh_current_chat, phone)
+    module._record_email_origin("cht_m", origin)
+
+    class HTTP(_HTTP):
+        def get(self, url: str, **kwargs: Any) -> _Resp:
+            uid = url.rsplit("/", 1)[-1]
+            if uid == origin:
+                raise module.aiohttp.ClientResponseError(None, (), status=status)
+            return _Resp(phone._chats[uid])
+
+    http = HTTP()
+    monkeypatch.setattr(module.aiohttp, "ClientSession", lambda *a, **k: http)
+    _stub_mirror(monkeypatch)
+
+    result = await phone.deliver_for_email("cht_m", "Private question.")
+
+    assert result.success is (status != 503)
+    target = "cht_d" if origin == "cht_a" else "cht_a"
+    assert http.posts == ([] if status == 503 else [
+        (f"{module.BASE}/v1/chats/{target}/messages", {"body": "Private question."})])
+
+
+@pytest.mark.parametrize(("body", "expected"), [
+    ("Ask Alex.\nNO_REPLY", "Ask Alex."),
+    ("First paragraph.\n\nSecond paragraph.\n\n*NO_REPLY*\n ", "First paragraph.\n\nSecond paragraph."),
+    ("\n *NO_REPLY*\n ", None),
+])
+async def test_email_final_strips_the_silence_marker_but_delivers_any_preceding_text(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, body: str, expected: str | None,
+) -> None:
+    module, _entry = _load_email(monkeypatch, tmp_path)
+    mail = _adapter(module)
+    mail._set_reach([_mail_chat("cht_m")])
+    _phone(module, monkeypatch)
+    http = _HTTP()
+    monkeypatch.setattr(module.aiohttp, "ClientSession", lambda *a, **k: http)
+    mirrored = _stub_mirror(monkeypatch)
+
+    result = await mail.send("cht_m", body, metadata={"notify": True})
+
+    assert result.success
+    copy = f'Email "Re: invoice":\n{expected}'
+    assert http.posts == ([(f"{module.BASE}/v1/chats/cht_a/messages", {"body": copy})] if expected else [])
+    assert [c["text"] for c in mirrored] == ([f"{copy}\n(email thread cht_m)"] if expected else [])

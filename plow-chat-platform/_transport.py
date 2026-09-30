@@ -438,9 +438,9 @@ NO_REPLY_SENTINEL = "NO_REPLY"
 
 
 def _ends_silent(body):
-    """Does this text close on the sentinel? Whatever the model wrote above it
-    is its working-out, and ".NO_REPLY" or "*NO_REPLY*" is the same answer
-    decorated, which gateway/response_filters.py already tolerates upstream."""
+    """Does this text close on the sentinel? ".NO_REPLY" or "*NO_REPLY*" is
+    the same marker decorated, which gateway/response_filters.py already
+    tolerates upstream. Each platform decides what to do with preceding text."""
     lines = [line for line in body.splitlines() if line.strip()]
     return bool(lines) and lines[-1].strip().strip(".*_ `") == NO_REPLY_SENTINEL
 
