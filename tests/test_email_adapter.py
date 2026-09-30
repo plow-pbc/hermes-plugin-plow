@@ -281,28 +281,34 @@ def _phone(module: Any, monkeypatch: pytest.MonkeyPatch, *, home_is_owner_dm: bo
 
 
 @pytest.mark.parametrize(
-    ("turn", "metadata", "body", "origin", "delivered_to"),
+    ("turn", "metadata", "body", "expected", "origin", "delivered_to"),
     [
-        pytest.param(("cht_m", True), {"notify": True}, "Here it is.", None, "cht_a", id="owner-answer"),
-        pytest.param(("cht_m", False), {"notify": True}, "Not mine to act on; I'll let it close.", None,
-                     "cht_a", id="non-owner-final"),
+        pytest.param(("cht_m", True), {"notify": True}, "Here it is.", "Here it is.", None, "cht_a",
+                     id="owner-answer"),
+        pytest.param(("cht_m", False), {"notify": True}, "Not mine to act on; I'll let it close.",
+                     "Not mine to act on; I'll let it close.", None, "cht_a", id="non-owner-final"),
         # The runtime's error notice arrives after the turn has closed.
-        pytest.param(None, None, "Sorry, I encountered an error (Boom).", None, "cht_a", id="error-notice"),
-        pytest.param(None, {"job_id": "j1"}, "Weekly digest", None, "cht_a", id="cron"),
-        pytest.param(("cht_m", True), {"notify": True}, "Here it is.", "cht_t", "cht_t",
+        pytest.param(None, None, "Sorry, I encountered an error (Boom).",
+                     "Sorry, I encountered an error (Boom).", None, "cht_a", id="error-notice"),
+        pytest.param(None, {"job_id": "j1"}, "Weekly digest", "Weekly digest", None, "cht_a", id="cron"),
+        pytest.param(("cht_m", True), {"notify": True}, "Here it is.", "Here it is.", "cht_t", "cht_t",
                      id="started-from-a-trusted-group"),
-        pytest.param(("cht_m", True), {"notify": True}, "Here it is.", "cht_g", "cht_a",
+        pytest.param(("cht_m", True), {"notify": True}, "Here it is.", "Here it is.", "cht_g", "cht_a",
                      id="an-untrusted-origin-falls-back-to-the-1:1"),
-        pytest.param(("cht_m", True), None, "Looking that up now.", None, None, id="mid-turn-prose"),
-        pytest.param(None, {"notify": True}, "⏳ Working — still on it", None, None, id="diagnostic"),
-        pytest.param(("cht_m", False), {"notify": True}, "NO_REPLY", None, None,
-                     id="bare-silence"),
+        pytest.param(("cht_m", True), None, "Looking that up now.", None, None, None, id="mid-turn-prose"),
+        pytest.param(None, {"notify": True}, "⏳ Working — still on it", None, None, None, id="diagnostic"),
+        pytest.param(("cht_m", False), {"notify": True}, "NO_REPLY", None, None, None, id="bare-silence"),
+        pytest.param(None, {"notify": True}, "Ask Alex.\nNO_REPLY", "Ask Alex.", None, "cht_a",
+                     id="silent-after-text"),
+        pytest.param(None, {"notify": True}, "First paragraph.\n\nSecond paragraph.\n\n*NO_REPLY*\n ",
+                     "First paragraph.\n\nSecond paragraph.", None, "cht_a", id="decorated-sentinel-after-paragraphs"),
+        pytest.param(None, {"notify": True}, "\n *NO_REPLY*\n ", None, None, None, id="decorated-bare-silence"),
     ],
 )
 async def test_an_email_turns_text_goes_to_the_owner_and_never_the_thread(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
     turn: tuple[str, bool] | None, metadata: dict[str, Any] | None,
-    body: str, origin: str | None, delivered_to: str | None,
+    body: str, expected: str | None, origin: str | None, delivered_to: str | None,
 ) -> None:
     """Nothing the adapter sends reaches a thread. What a turn ends with, a
     cron delivery and the runtime's error notice go to the chat the thread was
@@ -326,7 +332,7 @@ async def test_an_email_turns_text_goes_to_the_owner_and_never_the_thread(
     result = await mail.send("cht_m", body, metadata=metadata)
 
     assert result.success
-    copy = f'Email "Re: invoice"{" from \"Dana\"" if turn else ""}:\n{body}'
+    copy = f'Email "Re: invoice"{" from \"Dana\"" if turn else ""}:\n{expected}'
     assert http.posts == ([(f"{module.BASE}/v1/chats/{delivered_to}/messages", {"body": copy})]
                           if delivered_to else [])
     assert [(c["platform"], c["chat_id"], c["text"]) for c in mirrored] == (
@@ -716,6 +722,7 @@ async def test_an_owner_copy_refresh_failure_is_retryable_without_losing_the_fin
 
     failed = await phone.deliver_for_email("cht_m", "Private question.")
     assert not failed.success and failed.error
+    assert failed.retryable
     assert http.posts == []
 
     http.unavailable = False
@@ -770,27 +777,3 @@ async def test_an_unavailable_origin_falls_back_but_a_transient_error_waits(
     target = "cht_d" if origin == "cht_a" else "cht_a"
     assert http.posts == ([] if status == 503 else [
         (f"{module.BASE}/v1/chats/{target}/messages", {"body": "Private question."})])
-
-
-@pytest.mark.parametrize(("body", "expected"), [
-    ("Ask Alex.\nNO_REPLY", "Ask Alex."),
-    ("First paragraph.\n\nSecond paragraph.\n\n*NO_REPLY*\n ", "First paragraph.\n\nSecond paragraph."),
-    ("\n *NO_REPLY*\n ", None),
-])
-async def test_email_final_strips_the_silence_marker_but_delivers_any_preceding_text(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, body: str, expected: str | None,
-) -> None:
-    module, _entry = _load_email(monkeypatch, tmp_path)
-    mail = _adapter(module)
-    mail._set_reach([_mail_chat("cht_m")])
-    _phone(module, monkeypatch)
-    http = _HTTP()
-    monkeypatch.setattr(module.aiohttp, "ClientSession", lambda *a, **k: http)
-    mirrored = _stub_mirror(monkeypatch)
-
-    result = await mail.send("cht_m", body, metadata={"notify": True})
-
-    assert result.success
-    copy = f'Email "Re: invoice":\n{expected}'
-    assert http.posts == ([(f"{module.BASE}/v1/chats/cht_a/messages", {"body": copy})] if expected else [])
-    assert [c["text"] for c in mirrored] == ([f"{copy}\n(email thread cht_m)"] if expected else [])

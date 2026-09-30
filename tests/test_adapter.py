@@ -88,6 +88,7 @@ class _SendResult:
     message_id: str | None = None
     error: str | None = None
     raw_response: Any = None
+    retryable: bool = False
 
 
 def _rendered(module: Any, prompt: str, name: Any, identity: Any) -> str:

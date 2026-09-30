@@ -2490,7 +2490,8 @@ class PlowChatAdapter(BasePlatformAdapter):
             else:
                 target = await self.owner_one_to_one()
         except (aiohttp.ClientError, TimeoutError) as exc:
-            return SendResult(success=False, error=f"Could not verify the email's owner destination ({type(exc).__name__})")
+            return SendResult(success=False, retryable=True,
+                              error=f"Could not verify the email's owner destination ({type(exc).__name__})")
         if target is None:
             log.warning("[plow_email] no 1:1 for what %s produced; dropped", thread_uid)
             return SendResult(success=True)
