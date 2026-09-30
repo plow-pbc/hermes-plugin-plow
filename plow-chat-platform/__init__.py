@@ -3946,7 +3946,7 @@ async def _deliver_email_text(thread_uid, text):
     """The email line's one way out: what a turn there produced for the owner,
     handed to the phone line (see PlowChatAdapter.deliver_for_email)."""
     if _live is None:
-        return SendResult(success=False, error="Plow Chat is not connected; the owner's copy waits")
+        return SendResult(success=False, retryable=True, error="Plow Chat is not connected; the owner's copy waits")
     return await _live[0].deliver_for_email(thread_uid, text)
 
 

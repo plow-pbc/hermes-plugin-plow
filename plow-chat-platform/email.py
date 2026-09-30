@@ -271,10 +271,9 @@ class PlowEmailAdapter(BasePlatformAdapter):
                      else "silence" if not body else "mid-turn prose", chat_id)
             return SendResult(success=True)
         subject = _one_line(self._chats[chat_id].get("display_name")) or "(no subject)"
-        sender = _one_line((turn or {}).get("sender"))   # this turn's own sender, not the latest mail's
-        # Sender-chosen text, so each stays one quoted value in the owner's chat and session.
-        label = f"Email {json.dumps(subject, ensure_ascii=False)}" + (
-            f" from {json.dumps(sender, ensure_ascii=False)}" if sender else "") + ":"
+        sender = _one_line((turn or {}).get("speaker_handle"))   # this turn's own sender, not the latest mail's
+        label = _untrusted("email header", f"Email {json.dumps(subject, ensure_ascii=False)}" + (
+            f" from {json.dumps(sender, ensure_ascii=False)}" if sender else "") + ":")
         # Imported here: the package imports this module before it defines
         # the phone line, and every send comes long after both are loaded.
         from . import _deliver_email_text
@@ -299,7 +298,7 @@ class PlowEmailAdapter(BasePlatformAdapter):
         # whose turn it is, and the owner's own.
         chat = self._chats.get(event.source.chat_id, {})
         speaker = _speaker_participant(chat, event.source.user_id)
-        _ACTIVE_TURN.set({"chat_uid": event.source.chat_id, "owner": owner, "sender": event.source.user_name,
+        _ACTIVE_TURN.set({"chat_uid": event.source.chat_id, "owner": owner,
                           "dm": False, "authority": owner, "email": True,
                           "speaker_handle": speaker.get("provider_key") if speaker else None,
                           "owner_handle": _owner_handle(chat)})
