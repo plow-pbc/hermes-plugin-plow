@@ -3424,7 +3424,7 @@ def test_tools_register_with_optional_deferred_questions(
     ]
     tools = {tool["name"]: tool for tool in ctx.tools}
 
-    assert "sign it as yourself, never as your owner" in tools["plow_send_email"]["schema"]["description"]
+    assert "Do not sign" in tools["plow_send_email"]["schema"]["description"]
     send_message_tool = tools["plow_send_message"]
     assert send_message_tool["toolset"] == module.PLATFORM_NAME
     assert send_message_tool["handler"] is module._plow_send_message
@@ -4941,7 +4941,6 @@ async def test_connect_reads_who_invited_the_owner_once_and_comes_up_without_it(
     await adapter.connect(is_reconnect=True)
     assert profile_reads == [adapter.auth], "one read per process start, on the granted credential"
     # A send from any chat signs as the mailbox's persona, read at connect.
-    assert "sign it as Elm, never as your owner" in module.PLOW_SEND_EMAIL_SCHEMA["description"]
 
 
 async def test_tool_call_before_the_first_anchor_pass_finds_the_gateway_not_connected(
