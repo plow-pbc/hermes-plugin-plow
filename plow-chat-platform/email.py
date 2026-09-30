@@ -279,15 +279,6 @@ class PlowEmailAdapter(BasePlatformAdapter):
         from . import _deliver_email_text
         return await _deliver_email_text(chat_id, f"{label}\n{body}")
 
-    async def thread_session(self, chat_uid):
-        """The Hermes session of one of this line's threads, made if it is
-        new, keyed the way an inbound turn on it will be."""
-        info = await self.get_chat_info(chat_uid)
-        source = self.build_source(chat_id=chat_uid, chat_name=info["name"], chat_type=info["type"])
-        session = await asyncio.to_thread(
-            self._session_store.get_or_create_session, source, touch_activity=False)
-        return session.session_id
-
     async def on_processing_start(self, event):
         # An email turn has no room to trust, so its authority is the owner's
         # alone; `email` keeps the Latch mail gate shut -- a reply here goes out

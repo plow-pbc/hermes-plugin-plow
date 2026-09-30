@@ -7166,12 +7166,12 @@ def test_latch_section_renders_only_when_a_mac_is_connected(
     for must in ("Latch", "plow_list_skills", "plow_", "not connected",
                  # One messaging tool now: it sends to a person and lists chats.
                  "plow_send_message", "action=list",
-                 # Outbound goes out from the agent's own line, never the Mac:
-                 # driving Messages/Mail there sends AS the owner, from their
-                 # number and address, into a thread they are not seated in —
-                 # which is how a failed send got reported to an owner as
-                 # delivered, with no record on any surface they can see.
+                 # The agent's lines are the default; owner-account email is
+                 # an explicit exception governed by the installed skill.
                  "AS your owner",
+                 "defaults to your own lines", "only when explicitly requested",
+                 "in a chat with their authority", "Google Workspace skill",
+                 "An email turn cannot use that route",
                  # A group the owner asks the agent to open begins trusted.
                  "trusted=true",
                  # 'Email John' leaves from the agent's own mailbox, through its
