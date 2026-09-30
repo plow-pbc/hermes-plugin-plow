@@ -355,7 +355,8 @@ async def test_the_owners_copy_names_its_own_turns_sender_and_rechecks_the_origi
     await mail._on_frame(_envelope("evt_2", "cht_m", "msg_2", role="member"), None)  # a later mail
 
     async def trust_revoked(chat_uid: str) -> None:
-        phone._chats[chat_uid] = _chat(chat_uid, group=True, trusted=False)
+        if chat_uid == "cht_t":
+            phone._chats[chat_uid] = _chat(chat_uid, group=True, trusted=False)
 
     monkeypatch.setattr(phone, "_refresh_current_chat", trust_revoked)
     await mail.send("cht_m", "Declined.", metadata={"notify": True})
@@ -658,3 +659,59 @@ def test_email_requires_the_mailbox_persona_signature_before_sending(
     sent = json.loads(module._plow_send_email({"to": to, "subject": "Budget", "body": "Alex approved.\n\nElm"}))
     assert sent["sent"] is True
     assert http.posts[0][1]["body"] == "Alex approved.\n\nElm"
+
+
+async def test_an_owner_copy_resolves_its_fallback_from_fresh_rosters(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
+) -> None:
+    module, _entry = _load_email(monkeypatch, tmp_path)
+    phone = _phone(module, monkeypatch, extra=(_chat("cht_d", group=True),))
+    phone._refresh_current_chat = types.MethodType(module._real_refresh_current_chat, phone)
+    fresh = {**phone._chats, "cht_a": _chat("cht_a", group=True), "cht_d": _chat("cht_d")}
+
+    class HTTP(_HTTP):
+        def get(self, url: str, **kwargs: Any) -> _Resp:
+            return _Resp(fresh[url.rsplit("/", 1)[-1]])
+
+    http = HTTP()
+    monkeypatch.setattr(module.aiohttp, "ClientSession", lambda *a, **k: http)
+    _stub_mirror(monkeypatch)
+
+    result = await phone.deliver_for_email("cht_m", "Private question.")
+
+    assert result.success
+    assert http.posts == [(f"{module.BASE}/v1/chats/cht_d/messages", {"body": "Private question."})]
+
+
+@pytest.mark.parametrize("origin", [None, "cht_a", "cht_t"])
+async def test_an_owner_copy_refresh_failure_is_retryable_without_losing_the_final(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, origin: str | None,
+) -> None:
+    module, _entry = _load_email(monkeypatch, tmp_path)
+    phone = _phone(module, monkeypatch)
+    phone._refresh_current_chat = types.MethodType(module._real_refresh_current_chat, phone)
+    if origin:
+        module._record_email_origin("cht_m", origin)
+    fresh = dict(phone._chats)
+
+    class HTTP(_HTTP):
+        unavailable = True
+
+        def get(self, url: str, **kwargs: Any) -> _Resp:
+            if self.unavailable:
+                raise TimeoutError("chat read timed out")
+            return _Resp(fresh[url.rsplit("/", 1)[-1]])
+
+    http = HTTP()
+    monkeypatch.setattr(module.aiohttp, "ClientSession", lambda *a, **k: http)
+    _stub_mirror(monkeypatch)
+
+    failed = await phone.deliver_for_email("cht_m", "Private question.")
+    assert not failed.success and failed.error
+    assert http.posts == []
+
+    http.unavailable = False
+    retried = await phone.deliver_for_email("cht_m", "Private question.")
+    assert retried.success
+    target = origin or "cht_a"
+    assert http.posts == [(f"{module.BASE}/v1/chats/{target}/messages", {"body": "Private question."})]

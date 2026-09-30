@@ -2457,11 +2457,14 @@ class PlowChatAdapter(BasePlatformAdapter):
             return
         await asyncio.to_thread(_mirror_sent, chat_uid, body, session.session_id)
 
-    def owner_one_to_one(self):
-        """The owner's 1:1 with this agent: the home chat when it is one, else
-        any granted chat that is, since a home can be set to a group."""
-        return next((uid for uid in (self.home_chat_uid, *self.chat_uids)
-                     if _owner_dm(self._chats.get(uid) or {})), None)
+    async def owner_one_to_one(self):
+        """Find the owner's 1:1 from fresh rosters, home first. A failed read
+        must propagate: it is not evidence that no owner chat exists."""
+        for uid in dict.fromkeys((self.home_chat_uid, *self.chat_uids)):
+            await self._refresh_current_chat(uid)
+            if _owner_dm(self._chats[uid]):
+                return uid
+        return None
 
     async def deliver_for_email(self, thread_uid, text):
         """Post what an email turn produced for the owner, never to the thread:
@@ -2472,13 +2475,16 @@ class PlowChatAdapter(BasePlatformAdapter):
         session with the thread's chat uid, so the owner's "send it" there
         knows what and where."""
         origin = _email_origins().get(thread_uid)
-        if origin in self.chat_uids:
-            await self._fresh_cross_chat(origin)  # trust or the owner's seat may have changed since
-        chat = self._chats.get(origin) or {}
-        if origin in self.chat_uids and (_owner_dm(chat) or chat.get("trusted") and _owner_participant(chat)):
-            target = origin
-        else:
-            target = self.owner_one_to_one()
+        try:
+            if origin in self.chat_uids:
+                await self._refresh_current_chat(origin)
+            chat = self._chats.get(origin) or {}
+            if origin in self.chat_uids and (_owner_dm(chat) or chat.get("trusted") and _owner_participant(chat)):
+                target = origin
+            else:
+                target = await self.owner_one_to_one()
+        except (aiohttp.ClientError, TimeoutError) as exc:
+            return SendResult(success=False, error=f"Could not verify the email's owner destination ({type(exc).__name__})")
         if target is None:
             log.warning("[plow_email] no 1:1 for what %s produced; dropped", thread_uid)
             return SendResult(success=True)
@@ -4669,8 +4675,8 @@ async def _email_start(adapter, mail, to, subject, body, turn):
         return {"sent": True if sent["status"] == "sent" else "unknown", "chat_uid": None,
                 "chat_unrecorded_reason": sent.get("chat_unrecorded_reason"),
                 "note": "Plow has no chat id for this thread. Do not resend and do not guess a chat id."}
-    origin = adapter.owner_one_to_one() if turn.get("email") else turn["chat_uid"]
     try:
+        origin = await adapter.owner_one_to_one() if turn.get("email") else turn["chat_uid"]
         if not turn.get("email"):
             _record_email_origin(thread_uid, origin)
         if thread_uid not in mail._chats:
