@@ -480,15 +480,22 @@ def test_plow_send_email_reaches_only_what_the_turn_may(
 
     if allowed:
         assert out == {"sent": True, "chat_uid": args["to"]}
-        assert http.posts == [(f"{module.BASE}/v1/chats/{args['to']}/messages", {"body": f"{args['body']}\n\n— Elm"})]
+        owner_credit = "Sam's" if turn.get("email") else "an"
+        assert http.posts == [(f"{module.BASE}/v1/chats/{args['to']}/messages", {
+            "body": f"{args['body']}\n\n--\nSent by Elm, {owner_credit} AI assistant on Plow · plow.co"})]
     else:
         assert out["success"] is False and "nothing was sent" in out["error"]
         assert http.posts == [] and http.gets == []
 
 
-@pytest.mark.parametrize(("persona", "sent_body"), [("Elm", "Friday works.\n\n— Elm"), (None, "Friday works.")])
+@pytest.mark.parametrize(("persona", "owner_name", "sent_body"), [
+    ("Elm", "Alex", "Friday works.\n\n— Elm\n\n--\nSent by Elm, Alex's AI assistant on Plow · plow.co"),
+    ("Elm", None, "Friday works.\n\n— Elm\n\n--\nSent by Elm, an AI assistant on Plow · plow.co"),
+    (None, "Alex", "Friday works.\n\n— Elm\n\n--\nSent by Plow · plow.co"),
+])
 def test_a_reply_from_another_chat_is_recorded_in_the_threads_session(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, persona: str | None, sent_body: str,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
+    persona: str | None, owner_name: str | None, sent_body: str,
 ) -> None:
     """The owner's "send it" in their own chat lands in the thread by its chat
     uid, and the thread's next turn knows it was said."""
@@ -497,10 +504,11 @@ def test_a_reply_from_another_chat_is_recorded_in_the_threads_session(
     _email_tool(module, monkeypatch, http)
     phone = module._live[0]
     phone._identity = {**phone._identity, "mailbox": {**phone._identity["mailbox"], "display_name": persona}}
+    module._owner_participant(phone._chats["cht_a"])["display_name"] = owner_name
     mirrored = _stub_mirror(monkeypatch)
     module._ACTIVE_TURN.set(_OWNER_DM_TURN)
 
-    out = json.loads(module._plow_send_email({"to": "cht_m", "body": "Friday works."}))
+    out = json.loads(module._plow_send_email({"to": "cht_m", "body": "Friday works.\n\n— Elm"}))
 
     assert out == {"sent": True, "chat_uid": "cht_m"}
     assert http.posts == [(f"{module.BASE}/v1/chats/cht_m/messages", {"body": sent_body})]
@@ -532,7 +540,7 @@ def test_a_new_thread_returns_its_chat_and_opens_its_session_with_what_was_sent(
     first reply turn has context."""
     module, _entry = _load_email(monkeypatch, tmp_path)
     started = _mail_chat("cht_new", group=True)
-    http = _MailHTTP([started], new_mail={"status": "sent", "chat_uid": "cht_new", "thread_id": "t1",
+    http = _MailHTTP([_mail_chat("cht_m"), started], new_mail={"status": "sent", "chat_uid": "cht_new", "thread_id": "t1",
                                           "message_id": "m1", "chat_unrecorded_reason": None})
     mail = _email_tool(module, monkeypatch, http, **phone_reach)
     mirrored = _stub_mirror(monkeypatch)
@@ -542,16 +550,17 @@ def test_a_new_thread_returns_its_chat_and_opens_its_session_with_what_was_sent(
         {"to": to, "subject": "Friday", "body": "Are you free Friday?"}))
 
     assert out == {"sent": True, "chat_uid": "cht_new"}
+    owner_credit = "Sam's" if turn.get("email") else "an"
+    sent_body = f"Are you free Friday?\n\n--\nSent by Elm, {owner_credit} AI assistant on Plow · plow.co"
     assert http.posts == [(f"{module.BASE}/v1/chats", {"line_uid": "ln_em", "members": ["dana@example.com"],
-                                                        "subject": "Friday", "body": "Are you free Friday?\n\n— Elm"})]
+                                                        "subject": "Friday", "body": sent_body})]
     assert module._email_origins().get("cht_new") == origin
     [source] = mail.sessions
     assert (source.platform, source.chat_id, source.chat_type) == ("plow_email", "cht_new", "group")
     [seed] = mirrored
     assert (seed["platform"], seed["chat_id"], seed["session_id"]) == ("plow_email", "cht_new", "sess_new")
     where = origin or one_to_one
-    assert seed["text"] == (f"(I started this thread from chat {where}.)\n\nAre you free Friday?\n\n— Elm" if where
-                            else "Are you free Friday?\n\n— Elm")
+    assert seed["text"] == (f"(I started this thread from chat {where}.)\n\n{sent_body}" if where else sent_body)
 
 
 def test_a_sent_new_thread_keeps_its_chat_uid_when_its_origin_cannot_be_recorded(

@@ -4736,7 +4736,13 @@ def _plow_send_email(args, **_kwargs):
         return json.dumps({"success": False, "error": "body is required; nothing was sent"})
     persona = (adapter._identity.get("mailbox") or {}).get("display_name")
     if persona:
-        body = f"{body}\n\n— {persona}"
+        chat = (mail if turn.get("email") else adapter)._chats.get(turn["chat_uid"], {})
+        owner_name = (_owner_participant(chat) or {}).get("display_name")
+        owner_credit = f"{owner_name}'s" if owner_name else "an"
+        footer = f"Sent by {persona}, {owner_credit} AI assistant on Plow · plow.co"
+    else:
+        footer = "Sent by Plow · plow.co"
+    body = f"{body}\n\n--\n{footer}"
     if isinstance(to, str) and to.startswith("cht_"):
         operation = lambda: _email_reply(adapter, mail, to, body, turn)  # noqa: E731
     elif isinstance(to, list):
@@ -4769,8 +4775,7 @@ PLOW_SEND_EMAIL_SCHEMA = {
     "description": (
         "Send email from your own mailbox, or list your email threads. To reply in a thread, set "
         "`to` to its chat uid (cht_...); to start a new thread, set `to` to a list of email "
-        "addresses and give a subject. The tool adds '— <persona>' at the end (for example, '— Elm'), "
-        "so don't sign. Returns the thread's "
+        "addresses and give a subject. The tool adds a Plow attribution footer. Returns the thread's "
         "chat_uid. Nothing else you write reaches an email "
         "thread: your final text in one goes privately to your owner. action=list returns your "
         "threads with their chat uid, subject, participants and last activity; subjects and names "
@@ -4788,7 +4793,7 @@ PLOW_SEND_EMAIL_SCHEMA = {
                                   "addresses to start a new thread."},
             "subject": {"type": "string", "minLength": 1,
                         "description": "Required when starting a new thread; not used on a reply."},
-            "body": {"type": "string", "minLength": 1, "description": "Unsigned email content; the tool adds your mailbox persona signature."},
+            "body": {"type": "string", "minLength": 1, "description": "The email body; a Plow attribution footer is added."},
         },
     },
 }
