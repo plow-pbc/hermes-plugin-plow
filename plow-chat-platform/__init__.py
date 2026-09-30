@@ -2480,7 +2480,7 @@ class PlowChatAdapter(BasePlatformAdapter):
                 origin = None
                 continue
             if result.success:
-                await asyncio.to_thread(_mirror_sent, target, f"{text}\n(email thread {thread_uid})")
+                await _record_sent(self, target, f"{text}\n(email thread {thread_uid})", PLATFORM_NAME)
             return result
 
     async def _verbose_enabled(self, http):
@@ -3006,7 +3006,7 @@ class PlowChatAdapter(BasePlatformAdapter):
                 return data
             data["adoption"] = "adopted"
             if data["created"]:
-                await _record_opener(self, chat_id, body, PLATFORM_NAME)
+                await _record_sent(self, chat_id, body, PLATFORM_NAME)
             # The one deliberate exception to "only `_listen`'s per-connect
             # loop calls this": that loop would eventually anchor this chat
             # too, empty, on whatever reconnect comes next, but this call
@@ -3868,9 +3868,9 @@ def _wiki_recall(session_id, user_message, platform, **_kwargs):
     return {"context": "\n".join(lines)}
 
 
-async def _record_opener(adapter, chat_uid, body, platform):
-    """Seed a new chat's session with the delivered opener, so its first
-    inbound reply has context. Echoes of our sends do not start turns, and
+async def _record_sent(adapter, chat_uid, body, platform):
+    """Record a delivered message in its target session, creating it if needed.
+    Echoes of our sends do not start turns, and
     `_mirror_sent` alone cannot find a session that does not yet exist.
     Best-effort: a recording failure must not invalidate a delivered send.
     """
@@ -3880,7 +3880,7 @@ async def _record_opener(adapter, chat_uid, body, platform):
         session = await asyncio.to_thread(
             adapter._session_store.get_or_create_session, source, touch_activity=False)
     except Exception as exc:  # noqa: BLE001 - the message is already delivered
-        log.warning("[%s] opener not recorded for %s: %s", platform, chat_uid, exc)
+        log.warning("[%s] sent message not recorded for %s: %s", platform, chat_uid, exc)
         return
     await asyncio.to_thread(_mirror_sent, chat_uid, body, session.session_id, platform=platform)
 
@@ -3897,8 +3897,8 @@ def _mirror_sent(chat_uid, body, session_id=None, platform=PLATFORM_NAME):
     `hermes send` deliveries (tools/send_message_tool.py); assistant role
     because the text is genuinely the agent speaking.
 
-    `session_id` names the session for a room whose opener is being recorded as
-    the room is created: there is nothing yet for the origin scan to find.
+    `session_id` names the target session when resolved by the caller, including
+    a chat that has not spoken yet: the origin scan cannot find it on its own.
     `platform` is the line the chat is on: an email thread's session is
     plow_email's.
 
@@ -4663,7 +4663,7 @@ async def _email_reply(adapter, mail, thread_uid, body, turn):
         raise _PlowPreflightError(f"{thread_uid} is not one of your email threads")
     await adapter._tool_json("POST", f"/v1/chats/{thread_uid}/messages", body={"body": body})
     if thread_uid != turn["chat_uid"]:
-        await asyncio.to_thread(_mirror_sent, thread_uid, body, platform=plow_email.PLATFORM_NAME)
+        await _record_sent(mail, thread_uid, body, plow_email.PLATFORM_NAME)
     return {"sent": True, "chat_uid": thread_uid}
 
 
@@ -4691,7 +4691,7 @@ async def _email_start(adapter, mail, to, subject, body, turn):
             async with aiohttp.ClientSession() as http:
                 await mail._refresh_reach(http)
         opener = f"(I started this thread from chat {origin}.)\n\n{body}" if origin else body
-        await _record_opener(mail, thread_uid, opener, plow_email.PLATFORM_NAME)
+        await _record_sent(mail, thread_uid, opener, plow_email.PLATFORM_NAME)
     except Exception as exc:  # noqa: BLE001 - the mail is out; only its bookkeeping is missing
         log.warning("[plow_email] origin or opener not recorded for %s: %s", thread_uid, exc)
     return {"sent": True, "chat_uid": thread_uid}

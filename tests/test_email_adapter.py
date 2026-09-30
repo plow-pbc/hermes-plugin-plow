@@ -277,6 +277,8 @@ def _phone(module: Any, monkeypatch: pytest.MonkeyPatch, *, home_is_owner_dm: bo
     phone = _live_tool(module, monkeypatch, None)
     phone._set_reach([_chat("cht_a", group=not home_is_owner_dm), _chat("cht_t", group=True, trusted=True),
                       _chat("cht_g", group=True), *extra])
+    phone._session_store = SimpleNamespace(get_or_create_session=lambda source, **kw: SimpleNamespace(
+        session_id=f"session-{source.chat_id}"))
     return phone
 
 
@@ -337,8 +339,9 @@ async def test_an_email_turns_text_goes_to_the_owner_and_never_the_thread(
     copy = f"{label}\n{expected}"
     assert http.posts == ([(f"{module.BASE}/v1/chats/{delivered_to}/messages", {"body": copy})]
                           if delivered_to else [])
-    assert [(c["platform"], c["chat_id"], c["text"]) for c in mirrored] == (
-        [("plow_chat", delivered_to, f"{copy}\n(email thread cht_m)")] if delivered_to else [])
+    assert [(c["platform"], c["chat_id"], c["text"], c.get("session_id")) for c in mirrored] == (
+        [("plow_chat", delivered_to, f"{copy}\n(email thread cht_m)", f"session-{delivered_to}")]
+        if delivered_to else [])
 
 
 async def test_the_owners_copy_names_its_own_turns_sender_and_rechecks_the_origin(
@@ -524,8 +527,8 @@ def test_a_reply_from_another_chat_is_recorded_in_the_threads_session(
 
     assert out == {"sent": True, "chat_uid": "cht_m"}
     assert http.posts == [(f"{module.BASE}/v1/chats/cht_m/messages", {"body": sent_body})]
-    assert [(c["platform"], c["chat_id"], c["text"]) for c in mirrored] == [
-        ("plow_email", "cht_m", sent_body)]
+    assert [(c["platform"], c["chat_id"], c["text"], c.get("session_id")) for c in mirrored] == [
+        ("plow_email", "cht_m", sent_body, "sess_new")]
 
 
 @pytest.mark.parametrize(
