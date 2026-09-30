@@ -397,16 +397,17 @@ class _MailHTTP(_HTTP):
     newest message, the chat send and the new-mail send."""
 
     def __init__(self, listing: list[dict[str, Any]], *, new_mail: dict[str, Any] | None = None,
-                 status: int = 200) -> None:
+                 status: int = 200, has_more: bool = False) -> None:
         super().__init__(status)
         self.listing, self.new_mail, self.gets = listing, new_mail, []
+        self.has_more = has_more
 
     def get(self, url: str, *, headers: dict[str, str]) -> _Resp:
         self.gets.append(url)
         if url.endswith("/messages?limit=1"):
             return _Resp({"object": "list", "data": [{"uid": "msg_9", "created_at": "2026-09-28T12:00:00Z"}],
                           "has_more": False})
-        return _Resp({"object": "list", "data": self.listing, "has_more": False})
+        return _Resp({"object": "list", "data": self.listing, "has_more": self.has_more})
 
     def post(self, url: str, *, json: dict[str, Any], headers: dict[str, str]) -> _Resp:
         self.posts.append((url, json))
@@ -605,6 +606,34 @@ def test_list_names_each_thread_with_its_subject_people_and_last_activity(
         "participants": [{"name": "Sam", "email": "sam@example.com", "role": "owner"},
                          {"name": "Dana", "email": "dana@example.com", "role": "member"}]}]}
     assert http.posts == []
+
+
+@pytest.mark.parametrize("args", [
+    pytest.param({"action": "list"}, id="list"),
+    pytest.param({"to": "cht_new", "body": "Hello"}, id="reply"),
+    pytest.param({"to": ["dana@example.com"], "subject": "Hi", "body": "Hello"}, id="start"),
+])
+def test_a_truncated_tool_refresh_preserves_the_known_mailbox(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, args: dict[str, Any],
+) -> None:
+    module, _entry = _load_email(monkeypatch, tmp_path)
+    known = _mail_chat("cht_known")
+    http = _MailHTTP([known], new_mail={"status": "sent", "chat_uid": "cht_new"}, has_more=True)
+    mail = _email_tool(module, monkeypatch, http)
+    http.listing = [_mail_chat("cht_new")]
+    mirrored = _stub_mirror(monkeypatch)
+    module._ACTIVE_TURN.set(_OWNER_DM_TURN)
+
+    result = json.loads(module._plow_send_email(args))
+
+    assert mail._chats == {"cht_known": known}
+    assert mirrored == []
+    if isinstance(args.get("to"), list):
+        assert result == {"sent": True, "chat_uid": "cht_new"}
+        assert len(http.posts) == 1
+    else:
+        assert result["success"] is False
+        assert http.posts == []
 
 
 async def test_the_email_line_names_its_own_terminal_stop(

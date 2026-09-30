@@ -4634,8 +4634,8 @@ _NON_OWNER_EMAIL_TURN = ("This email is not from your owner, so this turn sends 
 
 async def _email_threads(adapter, mail):
     """This mailbox's threads, re-read, each with its newest message's time."""
-    listing = await adapter._tool_json("GET", "/v1/chats")
-    mail._set_reach(listing["data"])
+    async with aiohttp.ClientSession() as http:
+        await mail._refresh_reach(http)
     threads = []
     for uid, chat in mail._chats.items():
         if chat["status"] != "active":
@@ -4648,7 +4648,7 @@ async def _email_threads(adapter, mail):
                               "role": p.get("role")}
                              for p in chat["participants"] if p.get("type") == "member"],
         })
-    return {"threads": threads, "has_more": listing["has_more"]}
+    return {"threads": threads, "has_more": False}
 
 
 async def _email_reply(adapter, mail, thread_uid, body, turn):
@@ -4656,7 +4656,8 @@ async def _email_reply(adapter, mail, thread_uid, body, turn):
     answers reply-all in the same Gmail thread, the owner kept in view. Sent
     from another chat's turn, it is recorded in the thread's own session."""
     if thread_uid not in mail._chats:
-        mail._set_reach((await adapter._tool_json("GET", "/v1/chats"))["data"])  # born since the last read
+        async with aiohttp.ClientSession() as http:
+            await mail._refresh_reach(http)  # born since the last read
     if thread_uid not in mail._chats:
         raise _PlowPreflightError(f"{thread_uid} is not one of your email threads")
     await adapter._tool_json("POST", f"/v1/chats/{thread_uid}/messages", body={"body": body})
@@ -4686,7 +4687,8 @@ async def _email_start(adapter, mail, to, subject, body, turn):
         if not turn.get("email"):
             _record_email_origin(thread_uid, origin)
         if thread_uid not in mail._chats:
-            mail._set_reach((await adapter._tool_json("GET", "/v1/chats"))["data"])
+            async with aiohttp.ClientSession() as http:
+                await mail._refresh_reach(http)
         session_id = await mail.thread_session(thread_uid)
         opener = f"(I started this thread from chat {origin}.)\n\n{body}" if origin else body
         await asyncio.to_thread(_mirror_sent, thread_uid, opener, session_id, platform=plow_email.PLATFORM_NAME)
