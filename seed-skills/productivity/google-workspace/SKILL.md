@@ -1,7 +1,7 @@
 ---
 name: google-workspace
 description: "Gmail and Google Calendar through the owner's Mac."
-version: 2.5.0
+version: 2.6.0
 ---
 
 # Google Workspace — through the owner's Mac
@@ -21,14 +21,18 @@ Mac-managed instances):
    only source for the command and its arguments — do not carry a
    spelling from memory or from this file. The Mac mints its own
    short-lived Google token; you never see or need one.
-2. A new email you send as yourself is not `gmail send` at all: use
-   `plow_send_message` with the address in `to` and a `subject`, and it
-   leaves from your own mailbox with your owner copied, under the same
-   authority a text needs and with no approval card. `gmail send` below
-   is only for mail your owner wants out of their own account.
-3. Sending an email from your owner's account needs a turn with the
-   owner's authority — the owner anywhere, or a human in a group the
-   owner trusts. On such a turn the
+2. Email you send as yourself is not `gmail send` at all: use
+   `plow_send_email` (a thread's chat id to reply, or a list of addresses
+   and a `subject` to start one), and it leaves from your own mailbox with your
+   owner copied and no approval card. A reply in the thread of the email
+   you are answering is always yours to send; anything else needs the same
+   authority a text does. `gmail send` below is only for mail your owner
+   wants out of their own account.
+3. Sending an email from your owner's account needs a chat turn with
+   the owner's authority — the owner in any chat, or a human in a group
+   the owner trusts. An email turn can do neither this nor the conflict
+   override below: put the ask in your final text, which reaches your
+   owner privately. On such a chat turn the
    gateway posts the command into that same room and waits for
    `/approve`, which anyone there may answer. Compose the whole message
    — recipients, subject, body — in the one `gmail send` command; that
