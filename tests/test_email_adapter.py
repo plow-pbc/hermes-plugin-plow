@@ -732,9 +732,21 @@ async def test_an_owner_copy_refresh_failure_is_retryable_without_losing_the_fin
     assert http.posts == [(f"{module.BASE}/v1/chats/{target}/messages", {"body": "Private question."})]
 
 
-@pytest.mark.parametrize("persona", ["Elm", None, ""])
-def test_email_appends_the_mailbox_persona_when_named(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, persona: str | None,
+@pytest.mark.parametrize(("persona", "body", "expected"), [
+    ("Elm", "Approved.\n ", "Approved.\n\nElm"),
+    (None, "Approved.\n ", "Approved."),
+    ("", "Approved.\n ", "Approved."),
+    ("Elm", "Approved.\n\nBest,\nElm\n ", "Approved.\n\nBest,\nElm"),
+    ("Elm", "Approved.\n\n— eLM (on behalf of Alex)", "Approved.\n\n— eLM (on behalf of Alex)"),
+    ("Al", "Approved.\n\nAlex", "Approved.\n\nAlex\n\nAl"),
+    ("Al", "Approved.\n\nSal", "Approved.\n\nSal\n\nAl"),
+    ("Elm", "Elm approved.\nReady.", "Elm approved.\nReady.\n\nElm"),
+    ("A.l", "Approved.\n\nAxl", "Approved.\n\nAxl\n\nA.l"),
+    ("A.l", "Approved.\n\nA.l", "Approved.\n\nA.l"),
+])
+def test_email_appends_the_mailbox_persona_only_when_missing_from_the_closing_line(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
+    persona: str | None, body: str, expected: str,
 ) -> None:
     module, _entry = _load_email(monkeypatch, tmp_path)
     http = _MailHTTP([_mail_chat("cht_m")])
@@ -744,10 +756,10 @@ def test_email_appends_the_mailbox_persona_when_named(
     _stub_mirror(monkeypatch)
     module._ACTIVE_TURN.set(_OWNER_DM_TURN)
 
-    result = json.loads(module._plow_send_email({"to": "cht_m", "body": "Approved.\n "}))
+    result = json.loads(module._plow_send_email({"to": "cht_m", "body": body}))
 
     assert result["sent"] is True
-    assert http.posts == [(f"{module.BASE}/v1/chats/cht_m/messages", {"body": "Approved.\n\nElm" if persona else "Approved."})]
+    assert http.posts == [(f"{module.BASE}/v1/chats/cht_m/messages", {"body": expected})]
 
 
 @pytest.mark.parametrize("status", [403, 404, 503])

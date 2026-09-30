@@ -249,7 +249,8 @@ Nothing the adapter sends reaches a thread. Mail leaves only through
 send endpoint (plow dispatches on the provider, reply-all in the same Gmail
 thread), `to` a list of addresses with a `subject` starts a new thread, and
 `action=list` names the threads. Give the tool unsigned body content; it appends
-a blank line and the mailbox persona name, or nothing when no name is set.
+a blank line and the mailbox persona name unless the last non-empty line already
+names that persona as a whole word (case-insensitive), or no name is set.
 A non-owner's email turn may only reply in
 its own thread and sends no text at all; every other use needs the owner's
 authority. What an email turn ends with, a cron delivery and the runtime's

@@ -4735,7 +4735,7 @@ def _plow_send_email(args, **_kwargs):
     if not body:
         return json.dumps({"success": False, "error": "body is required; nothing was sent"})
     signer = (adapter._identity.get("mailbox") or {}).get("display_name")
-    if signer:
+    if signer and not re.search(rf"(?<!\w){re.escape(signer)}(?!\w)", body.splitlines()[-1], re.IGNORECASE):
         body = f"{body}\n\n{signer}"
     if isinstance(to, str) and to.startswith("cht_"):
         operation = lambda: _email_reply(adapter, mail, to, body, turn)  # noqa: E731
