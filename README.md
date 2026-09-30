@@ -248,7 +248,8 @@ Nothing the adapter sends reaches a thread. Mail leaves only through
 `plow_send_email`: `to` a thread's chat uid replies in it through the chat
 send endpoint (plow dispatches on the provider, reply-all in the same Gmail
 thread), `to` a list of addresses with a `subject` starts a new thread, and
-`action=list` names the threads. The tool sends the body as written.
+`action=list` names the threads. Give the tool unsigned body content; it appends
+a blank line and `— <persona>` when the mailbox has a persona name.
 A non-owner's email turn may only reply in
 its own thread and sends no text at all; every other use needs the owner's
 authority. What an email turn ends with, a cron delivery and the runtime's
