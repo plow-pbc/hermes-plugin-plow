@@ -868,6 +868,36 @@ def test_non_owner_email_model_tools_are_reply_only(monkeypatch, tmp_path, wire_
         module._ACTIVE_TURN.reset(token)
 
 
+@pytest.mark.parametrize("wire_format", ["chat", "anthropic", "responses"])
+@pytest.mark.parametrize("has_reply_tool", [True, False])
+def test_non_owner_email_logs_only_model_visible_tool_names(
+    monkeypatch, tmp_path, caplog, wire_format, has_reply_tool,
+):
+    module, _ = _load_email(monkeypatch, tmp_path)
+    ctx = mock.Mock()
+    module.register(ctx)
+    middleware = dict(call.args for call in ctx.register_middleware.call_args_list)
+    private = "PRIVATE_REQUEST_CONTENT"
+    names = ["terminal", "read_file"] + (["plow_send_email"] if has_reply_tool else [])
+    tools = [{"type": "function", "function": {"name": name, "description": private}}
+             if wire_format == "chat" else {"type": "function", "name": name, "description": private}
+             for name in names]
+    request = {"tools": tools, "messages": [{"role": "user", "content": private}]}
+    token = module._ACTIVE_TURN.set(_NON_OWNER_EMAIL_TURN)
+    try:
+        with caplog.at_level(logging.INFO, logger=module.log.name):
+            result = middleware["llm_request"](request=request)
+    finally:
+        module._ACTIVE_TURN.reset(token)
+
+    records = [record for record in caplog.records if record.name == module.log.name]
+    assert len(records) == 1 and records[0].levelno == logging.INFO
+    message = records[0].getMessage()
+    visible_names = {tool.get("function", tool)["name"] for tool in result["request"]["tools"]}
+    assert {name for name in names if name in message} == visible_names
+    assert private not in message
+
+
 @pytest.mark.parametrize("name", ["terminal", "mcp__latch__plow_run_command", "write_file",
                                  "memory", "cronjob_manage", "future_tool", "plow_send_email"])
 def test_non_owner_email_cannot_execute_an_unadvertised_tool(monkeypatch, tmp_path, name):

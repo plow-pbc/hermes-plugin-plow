@@ -4157,10 +4157,12 @@ def _email_tool_request(request, **_kwargs):
     """Keep non-owner email inference reply-only, on every model request."""
     if not _is_non_owner_email_turn(_ACTIVE_TURN.get()):
         return None
-    return {"request": {**request, "tools": [
+    tools = [
         tool for tool in request.get("tools", [])
         if tool.get("function", tool).get("name") == "plow_send_email"
-    ]}}
+    ]
+    log.info("[plow_email] non-owner model tools: %s", [tool.get("function", tool)["name"] for tool in tools])
+    return {"request": {**request, "tools": tools}}
 
 
 def _pre_tool_call(tool_name, args, **_kwargs):
