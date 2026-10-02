@@ -3931,7 +3931,7 @@ def _invite_turn(**overrides: Any) -> dict[str, Any]:
 
 INVITE_SEND_CALL = ("POST", "/v1/auth/agent-invites/opportunities/agi_1/send", None)
 INVITE_BODY = ("Alex said I can invite you. Text 7NYJA to +1 650-555-0100 and you'll "
-               "get your own Plow agent, with $100 in credits to start.")
+               "get your own Plow agent, with $25 in credits to start.")
 INVITE_SENT = {"status": "sent", "sent": [{"message_id": "msg_invite", "body": INVITE_BODY}]}
 
 
@@ -4236,7 +4236,7 @@ async def test_offer_checks_consent_and_eligibility_before_fixed_question(
         "question": (
             "Hey! I noticed Taylor loves Plow and isn't a user yet. "
             "Can I send them a Plow invite, and do that in situations like this on your behalf? "
-            "You'll both get $100 in free API credits. 🙂"
+            "They'll get $25 in free API credits. 🙂"
         ),
         "handler_name": "invite-consent",
         "context": {
