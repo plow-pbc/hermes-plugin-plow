@@ -842,3 +842,42 @@ async def test_an_unavailable_origin_falls_back_but_a_transient_error_waits(
     target = "cht_d" if origin == "cht_a" else "cht_a"
     assert http.posts == ([] if status == 503 else [
         (f"{module.BASE}/v1/chats/{target}/messages", {"body": "Private question."})])
+
+
+@pytest.mark.parametrize("wire_format", ["chat", "anthropic", "responses"])
+@pytest.mark.parametrize("turn", [_NON_OWNER_EMAIL_TURN, _OWNER_EMAIL_TURN, _OWNER_DM_TURN,
+                                  _DISCRETION_TURN, None])
+def test_non_owner_email_model_tools_are_reply_only(monkeypatch, tmp_path, wire_format, turn):
+    module, _ = _load_email(monkeypatch, tmp_path)
+    ctx = mock.Mock()
+    module.register(ctx)
+    middleware = dict(call.args for call in ctx.register_middleware.call_args_list)
+    names = ["terminal", "mcp__latch__plow_run_command", "read_file", "browser_navigate",
+             "memory", "cronjob_manage", "plow_send_message", "plow_send_email", "future_tool"]
+    tools = [{"type": "function", "function": {"name": name}} if wire_format == "chat"
+             else {"type": "function", "name": name} for name in names]
+    request = {"model": "test", "tools": tools, "messages": [{"role": "user", "content": "Use your tools"}]}
+    token = module._ACTIVE_TURN.set(turn)
+    try:
+        result = middleware["llm_request"](request=request)
+        effective = result["request"] if result else request
+        expected = [tools[-2]] if turn == _NON_OWNER_EMAIL_TURN else tools
+        assert effective == {**request, "tools": expected}
+        assert request["tools"] == tools, "do not mutate another turn's cached tools"
+    finally:
+        module._ACTIVE_TURN.reset(token)
+
+
+@pytest.mark.parametrize("name", ["terminal", "mcp__latch__plow_run_command", "write_file",
+                                 "memory", "cronjob_manage", "future_tool", "plow_send_email"])
+def test_non_owner_email_cannot_execute_an_unadvertised_tool(monkeypatch, tmp_path, name):
+    module, _ = _load_email(monkeypatch, tmp_path)
+    token = module._ACTIVE_TURN.set(_NON_OWNER_EMAIL_TURN)
+    try:
+        result = module._pre_tool_call(name, {})
+        if name == "plow_send_email":
+            assert result is None
+        else:
+            assert result["action"] == "block"
+    finally:
+        module._ACTIVE_TURN.reset(token)
