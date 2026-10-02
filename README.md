@@ -694,3 +694,10 @@ it open: no later sequence in that lifecycle can re-arm suppression, because
 Hermes may answer the queued event from the turn the sequence belongs to. Suppression runs in the one guard every outbound message passes, so it covers
 text, `MEDIA:` delivery and verbose status frames alike. Other chats and later turns retain their ordinary
 behavior. The tool does not interpret in-band markers.
+
+Non-owner email turns expose only `plow_send_email` to the model, restricted
+by its existing authorization check to replies in the same thread. The
+`llm_request` middleware filters every inference request, including tool-loop
+follow-ups; the dispatch hook also refuses tools remembered from an earlier
+owner turn. Owner email turns and phone turns retain their normal tool lists.
+This requires Hermes' plugin `register_middleware` API.

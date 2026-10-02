@@ -4149,6 +4149,20 @@ def _write_file_args(args):
     return fixed
 
 
+def _is_non_owner_email_turn(turn):
+    return turn is not None and turn.get("email") and not turn["owner"]
+
+
+def _email_tool_request(request, **_kwargs):
+    """Keep non-owner email inference reply-only, on every model request."""
+    if not _is_non_owner_email_turn(_ACTIVE_TURN.get()):
+        return None
+    return {"request": {**request, "tools": [
+        tool for tool in request.get("tools", [])
+        if tool.get("function", tool).get("name") == "plow_send_email"
+    ]}}
+
+
 def _pre_tool_call(tool_name, args, **_kwargs):
     """Repair a misshapen `write_file` call, hold an outbound email for the
     owner, and hold a conflict override to a turn with the owner's authority,
@@ -4164,6 +4178,10 @@ def _pre_tool_call(tool_name, args, **_kwargs):
     authority cannot have fixed the owner's time, so an override from it is
     refused outright. The `write_file` repair earns no gate at all: see
     `_write_file_args`. Returns None for every other call."""
+    # A model can emit a tool remembered from an earlier owner turn even
+    # when it is absent from this request's schemas. Refuse it at dispatch too.
+    if _is_non_owner_email_turn(_ACTIVE_TURN.get()) and tool_name != "plow_send_email":
+        return {"action": "block", "message": _NON_OWNER_EMAIL_TURN}
     if tool_name == "write_file":
         fixed = _write_file_args(args) if isinstance(args, dict) else {}
         return {"action": "modify", "args": fixed} if fixed else None
@@ -4508,7 +4526,7 @@ def _plow_send_message(args, **_kwargs):
     turn without the owner's authority -- applies here, no second gate needed.
     """
     turn = _ACTIVE_TURN.get()
-    if turn is not None and turn.get("email") and not turn["owner"]:
+    if _is_non_owner_email_turn(turn):
         return json.dumps({"success": False, "error": _NON_OWNER_EMAIL_TURN})
     action = str(args.get("action") or "send").strip().lower()
     if action == "list":
@@ -4714,7 +4732,7 @@ def _plow_send_email(args, **_kwargs):
     to = args.get("to")
     if action not in ("send", "list"):
         return json.dumps({"success": False, "error": f"unknown action {action!r}; use send or list"})
-    if turn is not None and turn.get("email") and not turn["owner"]:
+    if _is_non_owner_email_turn(turn):
         if action != "send" or to != turn["chat_uid"]:
             return json.dumps({"success": False, "error": _NON_OWNER_EMAIL_TURN})
     elif turn is None or not turn["authority"]:
@@ -5615,6 +5633,7 @@ def register(ctx):
         schema=PLOW_SEND_SEQUENCE_SCHEMA, handler=_plow_send_sequence,
         check_fn=check_requirements, requires_env=["PLOW_AGENT_TOKEN", "PLOW_HOME_CHANNEL"],
     )
+    ctx.register_middleware("llm_request", _email_tool_request)
     ctx.register_hook("pre_tool_call", _pre_tool_call)
     ctx.register_hook("transform_tool_result", _route_tool_result)
     ctx.register_hook("pre_llm_call", _recall)

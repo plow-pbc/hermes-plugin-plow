@@ -31,6 +31,7 @@ def _registered_tools(module: Any) -> set[str]:
         register_platform=lambda **kw: None,
         register_tool=lambda **kw: names.add(kw["name"]),
         register_hook=lambda *a, **kw: None,
+        register_middleware=lambda *a, **kw: None,
     )
     module.register(ctx)
     return names
