@@ -9023,3 +9023,26 @@ def test_the_tool_says_to_search_before_reporting_what_a_chat_said(monkeypatch, 
     # without this agent, so the honest answer names what could not be found.
     assert "is not proof nobody replied" in description
     assert "never 'no reply yet'" in description
+
+
+# The silence-marker grammar is the authority Plow copies: its server-side guard and the
+# OpenClaw plugin (plow-pbc/plow-openclaw-agent, tests/transport.test.ts) use `_ends_silent`
+# verbatim and carry this exact case list. Keep the three lists identical, so a copy that
+# drifts fails a test instead of a review.
+SILENCE_MARKER_CASES = [
+    ("No active subagents, nothing pending.\n\nNO_REPLY", True),
+    ("NO_REPLY", True),
+    ("*NO_REPLY*", True),
+    (".NO_REPLY", True),
+    ("`NO_REPLY`", True),
+    ("Done here.\n\n_NO_REPLY_\n", True),
+    ("NO_REPLY!", False),
+    ("I'll reply with a bare NO_REPLY when there's nothing new.", False),
+    ("1. You: hi\n2. Me: NO_REPLY\n3. You: test", False),
+    ("", False),
+]
+
+
+@pytest.mark.parametrize(("text", "silent"), SILENCE_MARKER_CASES)
+def test_silence_marker_grammar_shared_with_plow(monkeypatch, tmp_path, text, silent):
+    assert _load(monkeypatch, tmp_path)._ends_silent(text) is silent
