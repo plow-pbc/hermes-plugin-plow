@@ -6064,8 +6064,9 @@ def _install_mcp_tools(monkeypatch, servers, signal):
     (True, True, None, ["plow"]),      # parked after a Plow deploy: reconnect now
     (True, False, None, ["plow"]),     # mid-reconnect with no session yet: nudge it
     (True, False, object(), []),       # healthy: leave it alone
+    (True, True, object(), []),        # revived, keepalive not yet passed: a reconnect would re-park it
     (False, True, None, []),           # no Mac on this account: nothing to wake
-], ids=["parked", "dead-session", "healthy", "no-mac"])
+], ids=["parked", "dead-session", "healthy", "revived-unproven", "no-mac"])
 async def test_a_turn_schedules_a_background_latch_reconnect(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
     mac: bool, parked: bool, session: Any, expected: list[str],
