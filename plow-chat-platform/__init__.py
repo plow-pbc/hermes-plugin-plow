@@ -951,6 +951,9 @@ def _latch_section(_session_info: Mapping[str, Any]) -> str:
 # the Mac link best-effort in the background so a later turn can regain its
 # tools, without delaying the current turn. Private Hermes names are pinned
 # by the base image; a failed reconnect is logged and does not block the turn.
+# Only a server with no session needs waking: `_was_parked` stays set for a
+# keepalive interval after a successful revival, and a reconnect forced in
+# that window counts as an unproven drop, which re-parks the live link.
 def _wake_mac_link() -> None:
     url = os.environ.get("PLOW_MCP_URL")
     if not url or "tools.mcp_tool" not in sys.modules:
@@ -960,7 +963,7 @@ def _wake_mac_link() -> None:
         from tools.mcp_tool_loop import _signal_reconnect_and_wait
         with core._lock:
             parked = [srv for srv in core._servers.values()
-                      if srv._config.get("url") == url and (srv._was_parked or srv.session is None)]
+                      if srv._config.get("url") == url and srv.session is None]
         for srv in parked:
             _signal_reconnect_and_wait(srv.name, srv, op_description="plow_chat turn start", timeout=15.0)
     except Exception:  # noqa: BLE001 - a Hermes without these names still gets its turn
