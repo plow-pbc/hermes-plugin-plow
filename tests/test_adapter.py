@@ -95,12 +95,13 @@ class _SendResult:
 def _rendered(module: Any, prompt: str, name: Any, identity: Any) -> str:
     """A channel prompt as `_channel_prompt` renders it.
 
-    Identity opens it and the answer-ordering rule closes it; the tests below
-    model both so a change to either has one place to land. The silence half of
-    that rule follows the same opt-in production uses -- a prompt that never
-    offered the sentinel must not end by reserving it.
+    Identity opens it, the file rule for an iMessage chat follows, and the
+    answer-ordering rule closes it; the tests below model all three so a change
+    to any has one place to land. The silence half of that rule follows the same
+    opt-in production uses -- a prompt that never offered the sentinel must not
+    end by reserving it.
     """
-    composed = module._with_identity(prompt, name, identity)
+    composed = f"{module._with_identity(prompt, name, identity)} {module._MEDIA_RULE}"
     tail = (f"{module._ANSWER_LAST}{module._ANSWER_LAST_SILENCE}"
             if module.NO_REPLY_SENTINEL in composed else module._ANSWER_LAST)
     return f"{composed} {tail}"
@@ -3373,9 +3374,6 @@ def test_platform_declaration_carries_the_facts_hermes_reads_off_it(
     [kwargs] = [call.kwargs for call in ctx.register_platform.call_args_list if call.kwargs["name"] == "plow_chat"]
     assert kwargs["cron_deliver_env_var"] == "PLOW_HOME_CHANNEL"
     assert "your own line" in kwargs["platform_hint"]
-    # How a file reaches this chat (#156): Hermes intercepts MEDIA: tags, but a
-    # plugin platform's hint is the only place the model learns that.
-    assert "MEDIA:/absolute/path/to/file" in kwargs["platform_hint"]
     # The owner's world is on the Mac (#129): the hint is in force from the
     # first turn, before any section or skill is read -- and only when there
     # is a Mac, which plow-init signals with PLOW_MCP_URL.
@@ -6269,6 +6267,22 @@ def test_every_silence_instruction_names_the_sentinel(
                                    _collaboration_chat(), module._NO_IDENTITY, True)
     assert module._ANSWER_LAST_SILENCE in group, "a group turn ends on the sentinel"
     assert module.NO_REPLY_SENTINEL not in module.OWNER_CHANNEL_PROMPT
+
+
+def test_a_file_is_offered_on_imessage_and_text_only_on_whatsapp(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> None:
+    """Hermes intercepts MEDIA: tags, and the turn's channel prompt is where the
+    model learns of them (#156) -- but a WhatsApp chat carries text only
+    (plow#2350), where the same tag would end in a refused attachment."""
+    module = _load(monkeypatch, tmp_path)
+    whatsapp = _dm_chat()
+    whatsapp["participants"][1]["provider_type"] = "whatsapp"
+
+    def prompt(roster: dict[str, Any]) -> str:
+        return module._channel_prompt({**roster, "type": "dm"}, "owner", roster, module._NO_IDENTITY, True)
+
+    assert "MEDIA:/absolute/path/to/file" in prompt(_dm_chat())
+    assert "MEDIA:" not in prompt(whatsapp)
+    assert "text only" in prompt(whatsapp)
 
 
 # --------------------------------------------------------------- thread goals

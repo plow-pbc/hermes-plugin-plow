@@ -576,9 +576,10 @@ Voice memos require [`plow-pbc/plow#2012`](https://github.com/plow-pbc/plow/pull
 to be deployed before the plugin pin advances. There is no fallback to the
 generic attachment route when the voice-memo route is unavailable.
 
-The `plow_chat` platform hint is what tells the model this path exists
+Each turn's channel prompt is what tells the model this path exists
 (`MEDIA:/absolute/path/to/file`); without it an agent sees only `plow_send_sequence`
-and concludes files cannot be sent (#156).
+and concludes files cannot be sent (#156). It is per chat because a WhatsApp chat
+carries text only (plow#2350): there the prompt says so instead.
 
 Both halves need the attachments API — `plow-pbc/plow#1435`. Against an older
 API the inbound path sees no `attachments` field (a `KeyError`, loud, per
