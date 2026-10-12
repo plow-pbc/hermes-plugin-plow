@@ -8646,8 +8646,11 @@ def test_sequence_handler_registers_and_runs_on_the_adapter_loop(monkeypatch, tm
     ctx = _ToolContext(); module.register(ctx)
     tool = next(t for t in ctx.tools if t['name'] == 'plow_send_sequence')
     assert tool['schema'] is module.PLOW_SEND_SEQUENCE_SCHEMA
-    # An agent read "No file paths" here as "files cannot be sent" (#156).
+    # An agent read "No file paths" here as "files cannot be sent" (#156) -- and the
+    # schema is every chat's, so it defers to the channel prompt, which says WhatsApp
+    # carries text only (plow#2350).
     assert 'MEDIA:/absolute/path/to/file' in tool['schema']['description']
+    assert 'where this chat carries files' in tool['schema']['description']
     assert tool['schema']['parameters']['additionalProperties'] is False
     loop = asyncio.new_event_loop()
     worker = threading.Thread(target=loop.run_forever)

@@ -4335,8 +4335,8 @@ def _sequence_plan(args):
             if not isinstance(body, str) or not body.strip() or len(body) > 4000:
                 raise ValueError("text body must contain 1 to 4000 characters")
             if "MEDIA:" in body:
-                raise ValueError("file attachments belong in your final reply as MEDIA:/absolute/path, "
-                                 "not in a text sequence; nothing was sent")
+                raise ValueError("where this chat carries files, they belong in your final reply as "
+                                 "MEDIA:/absolute/path, not in a text sequence; nothing was sent")
             text_size += len(body)
             plan.append({"type": kind, "body": body})
         elif kind == "photos" and set(item) == {"type", "asset_ids"}:
@@ -4427,7 +4427,8 @@ PLOW_SEND_SEQUENCE_SCHEMA = {
     "name": "plow_send_sequence",
     "description": (
         "Deliver an ordered sequence in THIS active solo owner DM. No target or file paths — "
-        "a file you have is sent with MEDIA:/absolute/path/to/file in your reply instead. "
+        "where this chat carries files (its channel prompt says), a file you have is sent with "
+        "MEDIA:/absolute/path/to/file in your reply instead. "
         "All items and root-owned /srv/plow-assets/manifest.json assets are validated before sending. "
         "Text/photos have a 1-second gap; explicit pauses replace that gap. Up to 24 items, "
         "24,000 text characters, 16 photos and 60 total delay seconds. Receipt completed entries "
