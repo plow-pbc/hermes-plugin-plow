@@ -693,8 +693,8 @@ def _attachment(**overrides: Any) -> dict[str, Any]:
         ("", "audio/x-m4a", URL, 200, "(attachment)", "voice"),
         ("", "video/mp4", URL, 200, "(attachment)", "video"),
         ("", "application/pdf", URL, 200, "(attachment)", "document"),
-        # status "failed" carries url: null by contract — surfaced, not dropped.
-        ("", "image/png", None, 200, "[attachment: image/png delivery failed]", "text"),
+        # url: null — failed media, or a file sent on WhatsApp — surfaced, not dropped.
+        ("", "image/png", None, 200, "[attachment: image/png unavailable]", "text"),
         # provider bytes gone (404 from the content route) — surfaced, not dropped.
         ("", "image/png", URL, 404, "[attachment: image/png unavailable]", "text"),
         # null content_type falls to application/octet-stream, becomes document.
@@ -702,7 +702,7 @@ def _attachment(**overrides: Any) -> dict[str, Any]:
         # a content-type parameter (charset, boundary, ...) must be stripped.
         ("", "image/jpeg; charset=binary", URL, 200, "(attachment)", "photo"),
     ],
-    ids=["media-only", "captioned", "audio", "video", "document", "failed-part", "fetch-failed", "null-type",
+    ids=["media-only", "captioned", "audio", "video", "document", "no-url", "fetch-failed", "null-type",
          "parameterized-type"],
 )
 async def test_inbound_media_reaches_hermes_as_local_files(
@@ -817,10 +817,10 @@ async def test_reply_delivers_parent_media_only_without_own_media(
 
 
 async def test_inbound_multi_attachment_keeps_good_parts_and_notes_failed(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
 ) -> None:
-    """A Plow-failed part (status "failed", url null) is named in the text and
-    logged, without dropping the good part that arrived alongside it."""
+    """A Plow-failed part (status "failed", url null) is named in the text,
+    without dropping the good part that arrived alongside it."""
     module = _load(monkeypatch, tmp_path)
     adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
     _mark_anchored(adapter, "cht_a")
@@ -828,25 +828,21 @@ async def test_inbound_multi_attachment_keeps_good_parts_and_notes_failed(
     monkeypatch.setattr(module.aiohttp, "ClientSession", lambda *a, **k: http)
     handled = _capture_events(monkeypatch, adapter)
 
-    with caplog.at_level(logging.WARNING):
-        await adapter._on_frame(_envelope(
-            "evt_multi", "cht_a", "msg_multi", body="",
-            attachments=[
-                _attachment(uid="att_ok"),
-                _attachment(uid="att_bad", filename="doc.pdf", content_type="application/pdf",
-                            url=None, status="failed", url_expires_at=None),
-            ],
-        ))
+    await adapter._on_frame(_envelope(
+        "evt_multi", "cht_a", "msg_multi", body="",
+        attachments=[
+            _attachment(uid="att_ok"),
+            _attachment(uid="att_bad", filename="doc.pdf", content_type="application/pdf",
+                        url=None, status="failed", url_expires_at=None),
+        ],
+    ))
 
     await _settle(adapter)
     event = handled[0]
     assert len(event["media_urls"]) == 1
     assert event["media_types"] == ["image/png"]
     assert event["message_type"].value == "photo"
-    assert event["text"] == "[attachment: application/pdf delivery failed]"
-    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-    assert any("att_bad" in r.getMessage() for r in warnings)
-    assert not any("sig=" in r.getMessage() or "http" in r.getMessage() for r in warnings)
+    assert event["text"] == "[attachment: application/pdf unavailable]"
 
 
 async def test_duplicate_delivery_does_not_refetch(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> None:

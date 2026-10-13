@@ -815,10 +815,11 @@ def _quoted_reply_context(reply, chat):
 async def _resolve_parts(msg):
     """One message as its turn will carry it: media paths, their kinds, and
     the text -- the body plus a note per part that could not be fetched. A
-    failed part (status "failed", url null) is a documented state, not
-    schema drift; a part whose bytes cannot be fetched now is the same to
-    the model: named in the turn, never dropped with it. Parts fetch
-    concurrently, so a stalled one costs one timeout, not one per part."""
+    part with no url (failed media, or a file sent on WhatsApp, which the
+    provider never serves back) and a part whose bytes cannot be fetched now
+    are the same to the model: named in the turn as unavailable, never
+    dropped with it. Parts fetch concurrently, so a stalled one costs one
+    timeout, not one per part."""
     attachments = msg["attachments"]
     if not attachments and msg.get("reply_to"):
         attachments, _label = _reply_parts(msg["reply_to"])
@@ -832,9 +833,7 @@ async def _resolve_parts(msg):
             media_urls.append(path)
             media_types.append(kind)
         else:
-            if not item["url"]:
-                log.warning("[plow_chat] attachment %s: provider delivery failed", item["uid"])
-            notes.append(f"[attachment: {kind} {'unavailable' if item['url'] else 'delivery failed'}]")
+            notes.append(f"[attachment: {kind} unavailable]")
     return media_urls, media_types, "\n".join(p for p in (msg["body"].strip(), *notes) if p)
 
 
