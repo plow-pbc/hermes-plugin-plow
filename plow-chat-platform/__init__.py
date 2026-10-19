@@ -1447,6 +1447,15 @@ TYPING_COOLDOWN_SECONDS = 60
 HAND_OFF_RETRY_SECONDS = 5.0
 
 
+# plow-agents#54: Plow says when a message this agent sent never reached anyone
+# (`message_status_updated`, status `failed`, with the provider's reason). The
+# agent hears it as one note in that chat, so it can tell its owner or try
+# another way rather than wait on a reply that will never come. One note per
+# chat per window: a recipient that can't be reached fails the agent's answer to
+# the note too, and that must not become a loop.
+DELIVERY_FAILED_WINDOW_S = 3600.0
+
+
 def _server_died(task):
     # A chat's server is held for the adapter's life, so a bug that kills it
     # would otherwise stall that chat with no signal at all.
@@ -1518,6 +1527,7 @@ class PlowChatAdapter(BasePlatformAdapter):
         self._last_uids = {self.home_chat_uid: self._load_checkpoint(self.home_chat_uid)}
         self._typing_last_sent = {}           # chat uid -> when its last `start` went out
         self._goal_wakes = {}                 # chat uid -> the one task pacing its goal
+        self._delivery_failed = {}            # chat uid -> (when its last failure note fired, that task)
         self._goal_locks = {}                 # chat uid -> its load-modify-save lock
         self._goal_paced = False              # pacing runs only inside a live socket session
         self._active_turn = _ACTIVE_TURN
@@ -3375,6 +3385,9 @@ class PlowChatAdapter(BasePlatformAdapter):
         if chat_uid not in self.chat_uids:
             log.warning("[plow_chat] dropped frame outside the grant: %s", chat_uid)
             return
+        if frame["event_type"] == "message_status_updated":
+            self._on_status(chat_uid, frame["data"]["message"])
+            return
         if frame["event_type"] != "message_received":
             return
         event_id = frame["event_id"]
@@ -3383,6 +3396,47 @@ class PlowChatAdapter(BasePlatformAdapter):
         await self._on_message(frame["data"]["message"], chat_uid)
         self._seen_events.append(event_id)
         del self._seen_events[:-512]
+
+    def _on_status(self, chat_uid, message):
+        """A message this agent sent did not reach anyone: one note, at most one
+        per chat per `DELIVERY_FAILED_WINDOW_S`. Scheduled, not awaited, so the
+        socket keeps reading while the note's turn runs."""
+        if message["status"] != "failed":
+            return
+        now = time.monotonic()
+        last = self._delivery_failed.get(chat_uid)
+        if last is not None and now - last[0] < DELIVERY_FAILED_WINDOW_S:
+            log.info("[plow_chat] delivery failure in %s inside the note window; not repeated", chat_uid)
+            return
+        task = asyncio.create_task(self._delivery_failed_fire(chat_uid, message.get("failure")))
+        task.add_done_callback(_server_died)
+        self._delivery_failed[chat_uid] = (now, task)
+
+    async def _delivery_failed_fire(self, chat_uid, failure):
+        """Hand the agent the failure as a turn of its own, the shape a goal
+        wake takes: nobody spoke, so trust grants it nothing."""
+        await self._refresh_current_chat(chat_uid)
+        chat = await self.get_chat_info(chat_uid)
+        owner_dm = _owner_dm(self._chats[chat_uid])
+        authority, recall_everywhere = _authority(chat, owner_dm, human=False)
+        why = (failure or {}).get("reason") or "the provider gave no reason"
+        code = (failure or {}).get("code")
+        event = MessageEvent(
+            text=(f"[Delivery failed] A message you sent in this chat did not reach its recipient: {why}"
+                  f"{f' (code {code})' if code is not None else ''}. Don't wait for a reply to it. If it "
+                  "mattered, tell your owner or try another way. "
+                  f"If there is nothing to do, reply with exactly {NO_REPLY_SENTINEL}."),
+            source=self.build_source(chat_id=chat_uid, chat_name=chat["name"], chat_type=chat["type"],
+                                     user_id="plow_delivery", user_name="Delivery report",
+                                     role_authorized=owner_dm),
+            message_id=f"delivery-failed-{uuid.uuid4().hex}",
+            message_type=_message_type([]),
+            channel_prompt=_channel_prompt(chat, "owner" if owner_dm else "member",
+                                           self._chats[chat_uid], self._identity, authority, speak_rule=False) + _SILENCE_OPTION,
+        )
+        event.recall_text = why
+        event.authority, event.recall_everywhere = authority, recall_everywhere
+        await self._handoff_message(event)
 
     async def _on_message(self, msg, chat_uid):
         """One inbound message, from the socket or from the backfill, queued

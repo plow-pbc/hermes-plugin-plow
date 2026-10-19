@@ -576,6 +576,15 @@ Voice memos require [`plow-pbc/plow#2012`](https://github.com/plow-pbc/plow/pull
 to be deployed before the plugin pin advances. There is no fallback to the
 generic attachment route when the voice-memo route is unavailable.
 
+A send that never arrives — the recipient has no iMessage, or the provider
+refused a file — comes back from Plow as `message_status_updated` with status
+`failed` and the provider's `failure` code and reason (plow-agents#54). The
+adapter hands the agent one note in that chat, shaped like a goal wake: "[Delivery
+failed] … Don't wait for a reply to it." Then it can tell its owner or try
+another way. It sends at most one note per chat per hour
+(`DELIVERY_FAILED_WINDOW_S`), because an unreachable recipient fails the agent's
+answer to the note as well. Every other status is ignored.
+
 The `plow_chat` platform hint is what tells the model this path exists
 (`MEDIA:/absolute/path/to/file`); without it an agent sees only `plow_send_sequence`
 and concludes files cannot be sent (#156).
