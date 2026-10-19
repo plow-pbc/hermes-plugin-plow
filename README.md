@@ -600,7 +600,8 @@ onto the owner's Mac with `plow_push_file(local_path, mac_path)`. The plugin
 reads the file and calls Latch's `plow_write_file` through the relay with
 `content_base64` ([`plow-pbc/latch#572`](https://github.com/plow-pbc/latch/pull/572)),
 so the bytes never pass through the model and nothing is chunked or put on a
-file host (latch#539). The cap is Latch's single-call 8 MiB. A path inside
+file host (latch#539). The cap is about 6 MB (`PUSH_FILE_MAX_BYTES`): the file
+as base64 must fit one request under the relay's 8 MiB body cap. A path inside
 `~/Plow` is written without asking; anywhere else the owner approves first, and
 the tool returns the pending handle to wait on with `plow_get_result`.
 Registered only when the account has a Mac (`PLOW_MCP_URL`). It needs a Latch

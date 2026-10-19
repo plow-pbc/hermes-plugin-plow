@@ -5527,7 +5527,10 @@ def _env_enablement():
 # made -- reaches the owner's Mac as its bytes, in one call. The model passes
 # two paths; reading, encoding and the relay call happen here, so the bytes
 # never go through the model, and nothing is chunked or put on a file host.
-PUSH_FILE_MAX_BYTES = 8 * 1024 * 1024  # Latch's MAX_FILE_BYTES: one plow_write_file call
+# Latch's MAX_BINARY_WRITE_BYTES: the file's base64 is 4/3 its size and goes in
+# one relay request, which plow's relay refuses over 8 MiB; 64 KiB is left for
+# the path, goal and envelope. Refused here before reading, never a 413 there.
+PUSH_FILE_MAX_BYTES = ((8 * 1024 * 1024 - 64 * 1024) // 4) * 3
 PUSH_FILE_TIMEOUT_S = 60.0  # an 8 MiB body through the relay, not the 20 s a wiki page needs
 
 PLOW_PUSH_FILE_SCHEMA = {
@@ -5535,7 +5538,7 @@ PLOW_PUSH_FILE_SCHEMA = {
     "description": (
         "Copy a file you hold -- an attachment your owner sent, an image or PDF you made -- onto your "
         "owner's Mac, byte for byte, in one call. Pass where it is here and where it goes on the Mac; "
-        "the bytes are read and sent for you, never typed. Up to 8 MiB. A path inside ~/Plow on the "
+        "the bytes are read and sent for you, never typed. Up to 6 MB. A path inside ~/Plow on the "
         "Mac is saved without asking; anywhere else your owner approves first, and you get a handle to "
         "wait on with plow_get_result."
     ),

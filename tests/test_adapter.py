@@ -7429,23 +7429,27 @@ def test_push_file_sends_the_files_own_bytes(monkeypatch: pytest.MonkeyPatch, tm
     assert "content" not in arguments
 
 
-def test_push_file_outside_the_plow_folder_hands_back_the_approval_handle(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+@pytest.mark.parametrize(("cause", "expected"), [
+    ("pending", {"success": True, "status": "pending", "handle": "h1"}),   # outside ~/Plow: the owner is asked
+    ("denied", {"success": False, "error": "the Mac did not save it: denied"}),
+])
+def test_push_file_reports_what_the_mac_said(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, cause: str, expected: dict[str, Any]
 ) -> None:
     doc = tmp_path / "a.pdf"
     doc.write_bytes(b"%PDF-1.7")
     module, _ = _push(monkeypatch, tmp_path, None)
     monkeypatch.setattr(module, "_relay_call",
-                        lambda *_a: (_ for _ in ()).throw(module._RelayToolError("pending", {"status": "pending", "handle": "h1"})))
+                        lambda *_a: (_ for _ in ()).throw(module._RelayToolError(cause, {"status": cause, "handle": "h1"})))
 
     out = json.loads(module._plow_push_file({"local_path": str(doc), "mac_path": "~/Desktop/a.pdf"}))
 
-    assert out["status"] == "pending" and out["handle"] == "h1"
+    assert expected.items() <= out.items()
 
 
 @pytest.mark.parametrize(("make", "error"), [
     (lambda p: None, "could not read"),
-    (lambda p: p.write_bytes(b"x" * (8 * 1024 * 1024 + 1)), "over the 8388608-byte limit"),
+    (lambda p: p.write_bytes(b"x" * (6_242_304 + 1)), "over the 6242304-byte limit"),
 ], ids=["missing", "too-big"])
 def test_push_file_refuses_without_calling_the_mac(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, make: Any, error: str
@@ -7458,18 +7462,6 @@ def test_push_file_refuses_without_calling_the_mac(
 
     assert out["success"] is False and error in out["error"]
     assert calls == []
-
-
-def test_push_file_says_when_the_mac_refused(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> None:
-    doc = tmp_path / "a.txt"
-    doc.write_bytes(b"hi")
-    module, _ = _push(monkeypatch, tmp_path, None)
-    monkeypatch.setattr(module, "_relay_call",
-                        lambda *_a: (_ for _ in ()).throw(module._RelayToolError("denied", {"status": "denied"})))
-
-    out = json.loads(module._plow_push_file({"local_path": str(doc), "mac_path": "/etc/hosts"}))
-
-    assert out["success"] is False and "denied" in out["error"]
 
 
 def test_fetch_mac_skills_refuses_a_redirect(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> None:
