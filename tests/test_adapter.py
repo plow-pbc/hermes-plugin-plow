@@ -3499,6 +3499,7 @@ def test_tools_register_with_optional_deferred_questions(
         "plow_contacts",
         "plow_set_conversation_trusted",
         "plow_request_payment",
+        "plow_push_file",
         "plow_offer_invite",
         "plow_send_sequence",
     ]
@@ -3543,6 +3544,11 @@ def test_tools_register_with_optional_deferred_questions(
     assert "not the eventual transaction" in payment_tool["schema"]["description"]
     assert "automatically resumes" in payment_tool["schema"]["description"]
     assert payment_tool["requires_env"] == ["PLOW_AGENT_TOKEN"]
+
+    push_tool = tools["plow_push_file"]
+    assert push_tool["handler"] is module._plow_push_file
+    assert push_tool["schema"]["parameters"]["required"] == ["local_path", "mac_path"]
+    assert push_tool["requires_env"] == ["PLOW_AGENT_TOKEN", "PLOW_MCP_URL"]
 
     invite_tool = tools["plow_offer_invite"]
     assert invite_tool["schema"]["parameters"] == {
@@ -7388,6 +7394,82 @@ def test_relay_call_returns_a_completed_payload_and_raises_with_the_cause_otherw
         else:
             assert module._relay_call(url, "t", "plow_read_file", {"path": "~/x"}, 5.0) == expected
     assert seen[0]["params"] == {"name": "plow_read_file", "arguments": {"path": "~/x"}}
+
+
+# latch#539: a file the agent holds reaches the Mac as its bytes, in one call --
+# the model passes two paths and never the content.
+def _push(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, answer: Any) -> tuple[Any, list[tuple[str, dict[str, Any]]]]:
+    module = _load(monkeypatch, tmp_path)
+    monkeypatch.setenv("PLOW_MCP_URL", "https://relay.test/mcp")
+    monkeypatch.setenv("PLOW_AGENT_TOKEN", "t")
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def relay(_url: str, _token: str, name: str, arguments: dict[str, Any], _timeout: float) -> dict[str, Any]:
+        calls.append((name, arguments))
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(module, "_relay_call", relay)
+    return module, calls
+
+
+def test_push_file_sends_the_files_own_bytes(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> None:
+    pdf = tmp_path / "statement.pdf"
+    pdf.write_bytes(bytes(range(256)) * 4)
+    module, calls = _push(monkeypatch, tmp_path, {"status": "completed", "path": "/Users/o/Plow/statement.pdf", "bytes": 1024})
+
+    out = json.loads(module._plow_push_file({"local_path": str(pdf), "mac_path": "~/Plow/statement.pdf", "goal": "file it"}))
+
+    assert out == {"success": True, "path": "/Users/o/Plow/statement.pdf", "bytes": 1024}
+    [(name, arguments)] = calls
+    assert name == "plow_write_file"
+    assert base64.b64decode(arguments["content_base64"]) == pdf.read_bytes()
+    assert arguments["path"] == "~/Plow/statement.pdf" and arguments["goal"] == "file it"
+    assert "content" not in arguments
+
+
+def test_push_file_outside_the_plow_folder_hands_back_the_approval_handle(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    doc = tmp_path / "a.pdf"
+    doc.write_bytes(b"%PDF-1.7")
+    module, _ = _push(monkeypatch, tmp_path, None)
+    monkeypatch.setattr(module, "_relay_call",
+                        lambda *_a: (_ for _ in ()).throw(module._RelayToolError("pending", {"status": "pending", "handle": "h1"})))
+
+    out = json.loads(module._plow_push_file({"local_path": str(doc), "mac_path": "~/Desktop/a.pdf"}))
+
+    assert out["status"] == "pending" and out["handle"] == "h1"
+
+
+@pytest.mark.parametrize(("make", "error"), [
+    (lambda p: None, "could not read"),
+    (lambda p: p.write_bytes(b"x" * (8 * 1024 * 1024 + 1)), "over the 8388608-byte limit"),
+], ids=["missing", "too-big"])
+def test_push_file_refuses_without_calling_the_mac(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, make: Any, error: str
+) -> None:
+    path = tmp_path / "f.bin"
+    make(path)
+    module, calls = _push(monkeypatch, tmp_path, {"status": "completed"})
+
+    out = json.loads(module._plow_push_file({"local_path": str(path), "mac_path": "~/Plow/f.bin"}))
+
+    assert out["success"] is False and error in out["error"]
+    assert calls == []
+
+
+def test_push_file_says_when_the_mac_refused(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> None:
+    doc = tmp_path / "a.txt"
+    doc.write_bytes(b"hi")
+    module, _ = _push(monkeypatch, tmp_path, None)
+    monkeypatch.setattr(module, "_relay_call",
+                        lambda *_a: (_ for _ in ()).throw(module._RelayToolError("denied", {"status": "denied"})))
+
+    out = json.loads(module._plow_push_file({"local_path": str(doc), "mac_path": "/etc/hosts"}))
+
+    assert out["success"] is False and "denied" in out["error"]
 
 
 def test_fetch_mac_skills_refuses_a_redirect(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> None:
