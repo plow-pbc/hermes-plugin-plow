@@ -803,6 +803,26 @@ async def test_a_failure_report_outlives_a_failed_refresh(monkeypatch: pytest.Mo
     assert "the provider gave no reason (code 4001)" in event.text
 
 
+async def test_a_disconnect_cancels_a_pending_failure_report(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> None:
+    """A report still refreshing, or sleeping between retries, must not start a
+    turn on an adapter that has since been retired."""
+    _module, adapter, handled = await _status_adapter(monkeypatch, tmp_path)
+    release = asyncio.Event()
+
+    async def slow_refresh(_chat_uid: str) -> None:
+        await release.wait()
+
+    monkeypatch.setattr(adapter, "_refresh_current_chat", slow_refresh)
+    await adapter._on_frame(_status_envelope("evt_1", "cht_a", "failed", {"code": 4001, "reason": None}))
+    [(_when, report)] = adapter._delivery_failed.values()
+
+    await adapter.disconnect()
+    release.set()
+    await asyncio.gather(report, return_exceptions=True)
+
+    assert report.cancelled() and handled == [] and adapter._delivery_failed == {}
+
+
 @pytest.mark.parametrize("status", ["sent", "delivered"])
 async def test_a_send_that_landed_says_nothing(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, status: str

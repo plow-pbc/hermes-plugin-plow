@@ -1767,6 +1767,9 @@ class PlowChatAdapter(BasePlatformAdapter):
         for _queue, server in self._inbound.values():
             server.cancel()                  # what it held unacked, the next backfill replays
         self._inbound.clear()
+        for _when, report in self._delivery_failed.values():
+            report.cancel()                  # a retired adapter starts no turn, a report's included
+        self._delivery_failed.clear()
         for task in tuple(self._sequences):
             task.cancel()
         self._live_turns.clear()
