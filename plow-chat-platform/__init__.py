@@ -2119,35 +2119,47 @@ class PlowChatAdapter(BasePlatformAdapter):
         other people's words; an owner-authorized turn acting on them unprompted
         is a confused deputy holding owner-only tools.
         """
-        # Refreshed first. Inbound delivery re-reads trust before scoping
-        # recall; a wake that skipped it would keep recalling the owner's
-        # other chats into a group whose owner has since revoked that trust.
-        await self._refresh_current_chat(chat_uid)
-        chat = await self.get_chat_info(chat_uid)
-        owner_dm = _owner_dm(self._chats[chat_uid])
-        # No human speaks on a wake, so trust grants it nothing.
-        authority, recall_everywhere = _authority(chat, owner_dm, human=False)
         # Goal line outermost, then the untrusted blocks, then the turn: the
         # order `_deliver` builds, so the two paths that assemble a turn stay
         # one shape rather than two.
-        referrer = (f"{_referrer_block(self._referred_by)}\n\n"
-                    if owner_dm and self._referred_by else "")
-        event = MessageEvent(
-            text=(f"{_goal_turn_line(goal)}\n\n{referrer}"
-                  "No new messages since your last turn. Continue working toward the goal. "
-                  f"If there is nothing new to do or report, reply with exactly {NO_REPLY_SENTINEL}."),
-            source=self.build_source(chat_id=chat_uid, chat_name=chat["name"], chat_type=chat["type"],
-                                     user_id="plow_goal", user_name="Goal check",
-                                     role_authorized=owner_dm),
-            message_id=f"goal-{goal['generation']}-{uuid.uuid4().hex}",
-            message_type=_message_type([]),
-            channel_prompt=_channel_prompt(chat, "owner" if owner_dm else "member",
-                                           self._chats[chat_uid], self._identity, authority, speak_rule=False) + _SILENCE_OPTION,
-        )
+        def text_for(owner_dm):
+            referrer = f"{_referrer_block(self._referred_by)}\n\n" if owner_dm and self._referred_by else ""
+            return (f"{_goal_turn_line(goal)}\n\n{referrer}"
+                    "No new messages since your last turn. Continue working toward the goal. "
+                    f"If there is nothing new to do or report, reply with exactly {NO_REPLY_SENTINEL}.")
+
+        event = await self._wake_event(chat_uid, text_for, user_id="plow_goal", user_name="Goal check",
+                                       message_id=f"goal-{goal['generation']}-{uuid.uuid4().hex}")
         # A wake has no spoken words; the goal itself is what it is about.
         event.recall_text = goal["text"]
-        event.authority, event.recall_everywhere = authority, recall_everywhere
         await self._handoff_message(event)
+
+    async def _wake_event(self, chat_uid, text_for, *, user_id, user_name, message_id):
+        """A turn nobody spoke -- a goal wake, the setup wake, a delivery report
+        -- whose text is `text_for(owner_dm)`, read off the refreshed roster.
+
+        Refreshed first. Inbound delivery re-reads trust before scoping recall;
+        a wake that skipped it would keep recalling the owner's other chats into
+        a group whose owner has since revoked that trust. No human speaks on a
+        wake, so trust grants it nothing: owner authority only in the owner's
+        DM, and a prompt that lets the turn stay silent.
+        """
+        await self._refresh_current_chat(chat_uid)
+        chat = await self.get_chat_info(chat_uid)
+        roster = self._chats[chat_uid]
+        owner_dm = _owner_dm(roster)
+        authority, recall_everywhere = _authority(chat, owner_dm, human=False)
+        event = MessageEvent(
+            text=text_for(owner_dm),
+            source=self.build_source(chat_id=chat_uid, chat_name=chat["name"], chat_type=chat["type"],
+                                     user_id=user_id, user_name=user_name, role_authorized=owner_dm),
+            message_id=message_id,
+            message_type=_message_type([]),
+            channel_prompt=_channel_prompt(chat, "owner" if owner_dm else "member",
+                                           roster, self._identity, authority, speak_rule=False) + _SILENCE_OPTION,
+        )
+        event.authority, event.recall_everywhere = authority, recall_everywhere
+        return event
 
     async def _handoff_message(self, event):
         # Hermes can recurse into a queued message or wake before the old
@@ -3219,22 +3231,9 @@ class PlowChatAdapter(BasePlatformAdapter):
         """Hand hermes WAKEUP_TURN in the home chat, injected the way `_goal_fire`
         injects a wake: signed by Plow rather than the owner, owner authority
         only in the owner's DM, and a prompt that lets the turn stay silent."""
-        home = self.home_chat_uid
-        await self._refresh_current_chat(home)  # authority from the live roster, as in `_goal_fire`
-        chat = await self.get_chat_info(home)
-        owner_dm = _owner_dm(self._chats[home])
-        authority, recall_everywhere = _authority(chat, owner_dm, human=False)
-        event = MessageEvent(
-            text=WAKEUP_TURN.format(boot="your first boot" if first_boot else "a restart"),
-            source=self.build_source(chat_id=home, chat_name=chat["name"], chat_type=chat["type"],
-                                     user_id="plow_setup", user_name="Plow setup",
-                                     role_authorized=owner_dm),
-            message_id=f"setup-{uuid.uuid4().hex}",
-            message_type=_message_type([]),
-            channel_prompt=_channel_prompt(chat, "owner" if owner_dm else "member",
-                                           self._chats[home], self._identity, authority, speak_rule=False) + _SILENCE_OPTION,
-        )
-        event.authority, event.recall_everywhere = authority, recall_everywhere
+        text = WAKEUP_TURN.format(boot="your first boot" if first_boot else "a restart")
+        event = await self._wake_event(self.home_chat_uid, lambda _owner_dm: text, user_id="plow_setup",
+                                       user_name="Plow setup", message_id=f"setup-{uuid.uuid4().hex}")
         # Spent here, not before the reads above: a failed read leaves the
         # wakeup owed to the next session, while a hand-off that raises every
         # time still cannot tear down every session after it.
@@ -3413,30 +3412,25 @@ class PlowChatAdapter(BasePlatformAdapter):
         self._delivery_failed[chat_uid] = (now, task)
 
     async def _delivery_failed_fire(self, chat_uid, failure):
-        """Hand the agent the failure as a turn of its own, the shape a goal
-        wake takes: nobody spoke, so trust grants it nothing."""
-        await self._refresh_current_chat(chat_uid)
-        chat = await self.get_chat_info(chat_uid)
-        owner_dm = _owner_dm(self._chats[chat_uid])
-        authority, recall_everywhere = _authority(chat, owner_dm, human=False)
+        """Hand the agent the failure as a wake of its own, retried until it is
+        handed off the way `_serve_chat` retries a burst: the frame that carried
+        it is gone, and backfill never replays an outbound message's status."""
         why = (failure or {}).get("reason") or "the provider gave no reason"
         code = (failure or {}).get("code")
-        event = MessageEvent(
-            text=(f"[Delivery failed] A message you sent in this chat did not reach its recipient: {why}"
-                  f"{f' (code {code})' if code is not None else ''}. Don't wait for a reply to it. If it "
-                  "mattered, tell your owner or try another way. "
-                  f"If there is nothing to do, reply with exactly {NO_REPLY_SENTINEL}."),
-            source=self.build_source(chat_id=chat_uid, chat_name=chat["name"], chat_type=chat["type"],
-                                     user_id="plow_delivery", user_name="Delivery report",
-                                     role_authorized=owner_dm),
-            message_id=f"delivery-failed-{uuid.uuid4().hex}",
-            message_type=_message_type([]),
-            channel_prompt=_channel_prompt(chat, "owner" if owner_dm else "member",
-                                           self._chats[chat_uid], self._identity, authority, speak_rule=False) + _SILENCE_OPTION,
-        )
-        event.recall_text = why
-        event.authority, event.recall_everywhere = authority, recall_everywhere
-        await self._handoff_message(event)
+        text = (f"[Delivery failed] A message you sent in this chat did not reach its recipient: {why}"
+                f"{f' (code {code})' if code is not None else ''}. Don't wait for a reply to it. If it "
+                "mattered, tell your owner or try another way. "
+                f"If there is nothing to do, reply with exactly {NO_REPLY_SENTINEL}.")
+        while True:
+            try:
+                event = await self._wake_event(chat_uid, lambda _owner_dm: text, user_id="plow_delivery",
+                                               user_name="Delivery report", message_id=f"delivery-failed-{uuid.uuid4().hex}")
+                event.recall_text = why
+                await self._handoff_message(event)
+                return
+            except Exception:                # noqa: BLE001 - the retry is the recovery; nothing replays the report
+                log.exception("[plow_chat] delivery report for %s not handed off; retrying", chat_uid)
+                await asyncio.sleep(HAND_OFF_RETRY_SECONDS)
 
     async def _on_message(self, msg, chat_uid):
         """One inbound message, from the socket or from the backfill, queued

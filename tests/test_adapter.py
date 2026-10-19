@@ -789,6 +789,20 @@ async def test_a_failed_send_reaches_the_agent_once_with_its_reason(
     assert event.source.role_authorized, "the owner's own DM: the agent may tell them"
 
 
+async def test_a_failure_report_outlives_a_failed_refresh(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> None:
+    """The frame is consumed and backfill never replays a status, so a refresh
+    that times out must delay the report, not drop it under the cooldown."""
+    module, adapter, handled = await _status_adapter(monkeypatch, tmp_path)
+    monkeypatch.setattr(module, "HAND_OFF_RETRY_SECONDS", 0)
+    monkeypatch.setattr(adapter, "_refresh_current_chat", mock.AsyncMock(side_effect=[TimeoutError(), None]))
+
+    await adapter._on_frame(_status_envelope("evt_1", "cht_a", "failed", {"code": 4001, "reason": None}))
+    await _status_settled(adapter)
+
+    [event] = handled
+    assert "the provider gave no reason (code 4001)" in event.text
+
+
 @pytest.mark.parametrize("status", ["sent", "delivered"])
 async def test_a_send_that_landed_says_nothing(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, status: str
