@@ -117,6 +117,7 @@ GOALS_DIR = _STATE_ROOT / "plow_chat_goals"
 # ask from the room.
 WAKES_DIR = _STATE_ROOT / "plow_chat_wakes"
 WAKE_POLL_SECONDS = 5
+WAKE_BACKLOG_SECONDS = 1
 # Email thread uid -> the phone chat plow_send_email started it from, where
 # its turns' finals go. Only the runtime knows the origin, and it has to
 # survive a restart; a thread with none here reports to the owner's 1:1.
@@ -2127,8 +2128,12 @@ class PlowChatAdapter(BasePlatformAdapter):
         """Hand each WAKES_DIR file's turn to its chat, oldest name first.
 
         A file naming a chat outside the grant, or not parseable, is renamed
-        `.rejected` and logged: retrying it cannot succeed. A hand-off that
-        raises leaves the file for the next pass.
+        `.rejected` and logged: retrying it cannot succeed. A wake waits behind
+        its chat's inbound backlog, as a goal wake does, so an owner message
+        already received reaches the session first. Briefly, because a
+        hand-off that keeps failing never drains that backlog and this runs in
+        the socket's loop: past the wait, or on a hand-off that raises, the
+        file stays for the next pass.
         """
         for path in sorted(WAKES_DIR.glob("*.json")):
             try:
@@ -2140,7 +2145,10 @@ class PlowChatAdapter(BasePlatformAdapter):
                 log.error("[plow_chat] wake %s rejected: %s", path.name, exc)
                 path.rename(path.with_suffix(".rejected"))
                 continue
+            entry = self._inbound.get(chat_uid)
             try:
+                if entry is not None:
+                    await asyncio.wait_for(entry[0].join(), WAKE_BACKLOG_SECONDS)
                 # A person in the room could have asked this, so it carries
                 # what their ask would: the owner's authority in the owner's
                 # DM or a trusted group, discretion anywhere else.

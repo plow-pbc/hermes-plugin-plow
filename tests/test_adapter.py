@@ -7212,6 +7212,29 @@ async def test_a_wake_file_becomes_one_turn_with_the_rooms_authority(
     assert not wake.exists()
 
 
+async def test_a_wake_waits_behind_an_owner_message_still_being_delivered(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
+) -> None:
+    """The owner's revision, already received, reaches the session before the
+    job's turn that should honour it (#111)."""
+    module = _load(monkeypatch, tmp_path)
+    monkeypatch.setattr(module, "WAKE_BACKLOG_SECONDS", 0.01)
+    adapter, handled = _wake_adapter(module, monkeypatch, _chat("cht_a"))
+    backlog: asyncio.Queue[Any] = asyncio.Queue()
+    backlog.put_nowait("owner: recommend Pass Life too")
+    adapter._inbound["cht_a"] = (backlog, None)
+    wake = module.WAKES_DIR / "0001.json"
+    wake.write_text(json.dumps({"chat": "cht_a", "from": "Hostex", "text": "Julie asked about wifi."}))
+
+    await adapter._drain_wakes()
+    assert handled == [] and wake.exists()
+
+    backlog.get_nowait()
+    backlog.task_done()
+    await adapter._drain_wakes()
+    assert [e.text for e in handled] == ["Julie asked about wifi."]
+
+
 @pytest.mark.parametrize(
     "content",
     ['{"chat": "cht_elsewhere", "from": "Hostex", "text": "hi"}', "not json", '{"chat": "cht_a"}'],
