@@ -606,6 +606,20 @@ commit — and `agent-mgr`'s `images.hermes_local` base tag can't move past it
 — until `plow-pbc/plow#1435` is deployed to every API the fleet's agents talk
 to.
 
+### Files onto the owner's Mac (`plow_push_file`)
+
+A file the agent holds — an attachment the owner texted, a PDF it made — goes
+onto the owner's Mac with `plow_push_file(local_path, mac_path)`. The plugin
+reads the file and calls Latch's `plow_write_file` through the relay with
+`content_base64` ([`plow-pbc/latch#572`](https://github.com/plow-pbc/latch/pull/572)),
+so the bytes never pass through the model and nothing is chunked or put on a
+file host (latch#539). The cap is about 6 MB (`PUSH_FILE_MAX_BYTES`): the file
+as base64 must fit one request under the relay's 8 MiB body cap. A path inside
+`~/Plow` is written without asking; anywhere else the owner approves first, and
+the tool returns the pending handle to wait on with `plow_get_result`.
+Registered only when the account has a Mac (`PLOW_MCP_URL`). It needs a Latch
+that takes `content_base64`; an older one refuses the call by schema.
+
 ## One implementation, two delivery paths
 
 This adapter is the only plow_chat implementation; see Who consumes this

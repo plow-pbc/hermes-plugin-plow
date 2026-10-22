@@ -1056,7 +1056,8 @@ _NO_REDIRECT_OPENER = urllib.request.build_opener(_NoRedirect)
 
 
 class _RelayToolError(Exception):
-    """A relay tool that did not complete: args[0] is its diagnosis's cause (`not_found`), or its status (`pending`)."""
+    """A relay tool that did not complete: args[0] is its diagnosis's cause (`not_found`), or its status
+    (`pending`), and args[1] the payload that said so -- a pending one carries the handle to wait on."""
 
 
 def _relay_call(url: str, token: str, name: str, arguments: dict[str, Any], timeout: float) -> dict[str, Any]:
@@ -1080,9 +1081,9 @@ def _relay_call(url: str, token: str, name: str, arguments: dict[str, Any], time
     if payload is None:
         payload = json.loads(next(c["text"] for c in result["content"] if c.get("type") == "text"))
     if result.get("isError"):
-        raise _RelayToolError(str((payload.get("diagnosis") or {}).get("cause") or "error"))
+        raise _RelayToolError(str((payload.get("diagnosis") or {}).get("cause") or "error"), payload)
     if payload.get("status", "completed") != "completed":
-        raise _RelayToolError(str(payload["status"]))
+        raise _RelayToolError(str(payload["status"]), payload)
     return payload
 
 
@@ -5571,6 +5572,69 @@ def _env_enablement():
     return {"home_channel": {"chat_id": home, "name": HOME_CHAT_NAME}} if home else None
 
 
+# latch#539: a file the agent holds -- an attachment the owner sent, a PDF it
+# made -- reaches the owner's Mac as its bytes, in one call. The model passes
+# two paths; reading, encoding and the relay call happen here, so the bytes
+# never go through the model, and nothing is chunked or put on a file host.
+# Latch's MAX_BINARY_WRITE_BYTES: the file's base64 is 4/3 its size and goes in
+# one relay request, which plow's relay refuses over 8 MiB; 64 KiB is left for
+# the path, goal and envelope. Refused here before reading, never a 413 there.
+PUSH_FILE_MAX_BYTES = ((8 * 1024 * 1024 - 64 * 1024) // 4) * 3
+PUSH_FILE_TIMEOUT_S = 60.0  # an 8 MiB body through the relay, not the 20 s a wiki page needs
+
+PLOW_PUSH_FILE_SCHEMA = {
+    "name": "plow_push_file",
+    "description": (
+        "Copy a file you hold -- an attachment your owner sent, an image or PDF you made -- onto your "
+        "owner's Mac, byte for byte, in one call. Pass where it is here and where it goes on the Mac; "
+        "the bytes are read and sent for you, never typed. Up to 6 MB. A path inside ~/Plow on the "
+        "Mac is saved without asking; anywhere else your owner approves first, and you get a handle to "
+        "wait on with plow_get_result."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "local_path": {"type": "string", "description": "The file in your own workspace."},
+            "mac_path": {"type": "string", "description": "Where it goes on the Mac, e.g. ~/Plow/receipts/june.pdf."},
+            "goal": {"type": "string", "description": "Why, in one line; your owner reads it if asked to approve."},
+        },
+        "required": ["local_path", "mac_path"],
+    },
+}
+
+
+def _plow_push_file(args, **_kwargs):
+    """Read a local file and write it on the owner's Mac through Latch's plow_write_file."""
+    local = os.path.expanduser(str(args.get("local_path") or "").strip())
+    mac = str(args.get("mac_path") or "").strip()
+    if not local or not mac:
+        return json.dumps({"success": False, "error": "local_path and mac_path are both required"})
+    try:
+        size = os.path.getsize(local)
+        if size > PUSH_FILE_MAX_BYTES:
+            return json.dumps({"success": False,
+                               "error": f"{local} is {size} bytes, over the {PUSH_FILE_MAX_BYTES}-byte limit for one file"})
+        with open(local, "rb") as f:
+            data = f.read()
+    except OSError as e:
+        return json.dumps({"success": False, "error": f"could not read {local}: {e.strerror or type(e).__name__}"})
+    arguments = {"path": mac, "content_base64": base64.b64encode(data).decode("ascii")}
+    if args.get("goal"):
+        arguments["goal"] = str(args["goal"])
+    try:
+        written = _relay_call(os.environ["PLOW_MCP_URL"], os.environ["PLOW_AGENT_TOKEN"], "plow_write_file",
+                              arguments, PUSH_FILE_TIMEOUT_S)
+    except _RelayToolError as e:
+        payload = e.args[1] if len(e.args) > 1 else {}
+        if e.args[0] == "pending":
+            return json.dumps({"success": True, "status": "pending", "handle": payload.get("handle"),
+                               "note": "your owner is asked on the Mac; wait on this handle with plow_get_result"})
+        return json.dumps({"success": False, "error": f"the Mac did not save it: {e.args[0]}", "detail": payload})
+    except (OSError, ValueError) as e:  # the relay unreachable, or an answer that is not the protocol
+        return json.dumps({"success": False, "error": f"could not reach the Mac: {type(e).__name__}"})
+    return json.dumps({"success": True, "path": written.get("path", mac), "bytes": written.get("bytes", len(data))})
+
+
 def register(ctx):
     global _deferred_questions, _plugin_llm
     _plugin_llm = getattr(ctx, "llm", None)
@@ -5670,6 +5734,14 @@ def register(ctx):
         handler=_plow_request_payment,
         check_fn=lambda: bool(os.getenv("PLOW_AGENT_TOKEN")),
         requires_env=["PLOW_AGENT_TOKEN"],
+    )
+    ctx.register_tool(
+        name="plow_push_file",
+        toolset=PLATFORM_NAME,
+        schema=PLOW_PUSH_FILE_SCHEMA,
+        handler=_plow_push_file,
+        check_fn=lambda: bool(os.getenv("PLOW_AGENT_TOKEN")) and bool(os.getenv("PLOW_MCP_URL")),
+        requires_env=["PLOW_AGENT_TOKEN", "PLOW_MCP_URL"],
     )
     ctx.register_tool(
         name="plow_offer_invite",
