@@ -111,8 +111,10 @@ _STATE_ROOT = pathlib.Path(os.environ.get("HERMES_HOME") or "/var/lib/hermes")
 CHECKPOINT = _STATE_ROOT / "plow_chat_last_uid"
 GOALS_DIR = _STATE_ROOT / "plow_chat_goals"
 # Turns a job inside this agent's home hands a chat: one JSON file each,
-# {"chat": uid, "from": label, "text": turn}. Writing here takes write access to
-# the home, which already owns the agent, so a file is an ask from the room.
+# {"chat": uid, "from": label, "text": turn}, written under another name and
+# renamed to *.json, so the drain never reads one half-written. Writing here
+# takes write access to the home, which already owns the agent, so a file is an
+# ask from the room.
 WAKES_DIR = _STATE_ROOT / "plow_chat_wakes"
 WAKE_POLL_SECONDS = 5
 # Email thread uid -> the phone chat plow_send_email started it from, where

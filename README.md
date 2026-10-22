@@ -549,6 +549,8 @@ own name.
 
 A job inside the agent's home can hand a chat a turn by writing one JSON file
 to `$HERMES_HOME/plow_chat_wakes/`: `{"chat": "cht_…", "from": "Hostex", "text": "…"}`.
+Write the file under another name and rename it to `*.json`. Only `*.json` is
+read, so a file is never read half-written.
 When the socket has been idle for five seconds, the adapter hands each file's
 text to that chat's own session and then deletes the file. That way, a job's
 draft is written with everything the room has already said. The turn carries
