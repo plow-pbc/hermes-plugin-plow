@@ -744,6 +744,97 @@ async def test_inbound_media_reaches_hermes_as_local_files(
         assert pathlib.Path(path).name.endswith("photo.png"), "cached document keeps its filename"
 
 
+def _status_envelope(event_id: str, chat_id: str, status: str, failure: dict[str, Any] | None = None) -> dict[str, Any]:
+    """A `message_status_updated` frame, as Plow sends one on an outbound message's status change."""
+    return {
+        "event_id": event_id,
+        "event_type": "message_status_updated",
+        "chat_id": chat_id,
+        "data": {"type": "message_status_updated",
+                 "message": {"uid": "msg_out", "status": status, "updated_at": "2026-10-19T12:00:00Z",
+                             "failure": failure}},
+    }
+
+
+async def _status_adapter(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> tuple[Any, Any, list[Any]]:
+    module = _load(monkeypatch, tmp_path)
+    monkeypatch.setattr(module, "MessageEvent", SimpleNamespace)
+    adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
+    adapter._set_reach([_chat("cht_a", agent_name="Elm")])
+    monkeypatch.setattr(adapter, "_refresh_current_chat", mock.AsyncMock())
+    return module, adapter, _capture_events(monkeypatch, adapter)
+
+
+async def _status_settled(adapter: Any) -> None:
+    await asyncio.gather(*(task for _when, task in adapter._delivery_failed.values()))
+
+
+# plow-agents#54: a message the agent sent that never reached anyone is a turn
+# the agent hears, with the provider's reason -- once per chat per window.
+async def test_a_failed_send_reaches_the_agent_once_with_its_reason(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    module, adapter, handled = await _status_adapter(monkeypatch, tmp_path)
+    failure = {"code": 4001, "reason": "Recipient is not registered with iMessage"}
+
+    await adapter._on_frame(_status_envelope("evt_1", "cht_a", "failed", failure))
+    await adapter._on_frame(_status_envelope("evt_2", "cht_a", "failed", failure))   # its answer failed too
+    await _status_settled(adapter)
+
+    [event] = handled
+    assert event.text.startswith("[Delivery failed] A message you sent in this chat did not reach its recipient: "
+                                 "Recipient is not registered with iMessage (code 4001).")
+    assert module.NO_REPLY_SENTINEL in event.text
+    assert (event.source.chat_id, event.source.user_id) == ("cht_a", "plow_delivery")
+    assert event.source.role_authorized, "the owner's own DM: the agent may tell them"
+
+
+async def test_a_failure_report_outlives_a_failed_refresh(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> None:
+    """The frame is consumed and backfill never replays a status, so a refresh
+    that times out must delay the report, not drop it under the cooldown."""
+    module, adapter, handled = await _status_adapter(monkeypatch, tmp_path)
+    monkeypatch.setattr(module, "HAND_OFF_RETRY_SECONDS", 0)
+    monkeypatch.setattr(adapter, "_refresh_current_chat", mock.AsyncMock(side_effect=[TimeoutError(), None]))
+
+    await adapter._on_frame(_status_envelope("evt_1", "cht_a", "failed", {"code": 4001, "reason": None}))
+    await _status_settled(adapter)
+
+    [event] = handled
+    assert "the provider gave no reason (code 4001)" in event.text
+
+
+async def test_a_disconnect_cancels_a_pending_failure_report(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> None:
+    """A report still refreshing, or sleeping between retries, must not start a
+    turn on an adapter that has since been retired."""
+    _module, adapter, handled = await _status_adapter(monkeypatch, tmp_path)
+    release = asyncio.Event()
+
+    async def slow_refresh(_chat_uid: str) -> None:
+        await release.wait()
+
+    monkeypatch.setattr(adapter, "_refresh_current_chat", slow_refresh)
+    await adapter._on_frame(_status_envelope("evt_1", "cht_a", "failed", {"code": 4001, "reason": None}))
+    [(_when, report)] = adapter._delivery_failed.values()
+
+    await adapter.disconnect()
+    release.set()
+    await asyncio.gather(report, return_exceptions=True)
+
+    assert report.cancelled() and handled == [] and adapter._delivery_failed == {}
+
+
+@pytest.mark.parametrize("status", ["sent", "delivered"])
+async def test_a_send_that_landed_says_nothing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, status: str
+) -> None:
+    _module, adapter, handled = await _status_adapter(monkeypatch, tmp_path)
+
+    await adapter._on_frame(_status_envelope("evt_1", "cht_a", status))
+    await _status_settled(adapter)
+
+    assert handled == []
+
+
 @pytest.mark.parametrize("sender", [
     {"type": "member", "uid": "mem_parent", "display_name": "Alex"},
     {"type": "agent", "line": {"display_name": "Spruce"}},
