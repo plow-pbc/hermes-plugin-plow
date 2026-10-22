@@ -110,6 +110,14 @@ PROVIDER = "imessage"                 # the phone line; the email line is plow_e
 _STATE_ROOT = pathlib.Path(os.environ.get("HERMES_HOME") or "/var/lib/hermes")
 CHECKPOINT = _STATE_ROOT / "plow_chat_last_uid"
 GOALS_DIR = _STATE_ROOT / "plow_chat_goals"
+# Turns a job inside this agent's home hands a chat: one JSON file each,
+# {"chat": uid, "from": label, "text": turn}, written under another name and
+# renamed to *.json, so the drain never reads one half-written. Writing here
+# takes write access to the home, which already owns the agent, so a file is an
+# ask from the room.
+WAKES_DIR = _STATE_ROOT / "plow_chat_wakes"
+WAKE_POLL_SECONDS = 5
+WAKE_BACKLOG_SECONDS = 1
 # Email thread uid -> the phone chat plow_send_email started it from, where
 # its turns' finals go. Only the runtime knows the origin, and it has to
 # survive a restart; a thread with none here reports to the owner's 1:1.
@@ -2102,42 +2110,87 @@ class PlowChatAdapter(BasePlatformAdapter):
                 log.warning("[plow_chat] goal wake failed for %s: %s", chat_uid, exc)
 
     async def _goal_fire(self, chat_uid, goal):
-        """Inject the goal turn, the same path `gateway/wake.py` uses.
+        """The goal turn. Goal line outermost, then the untrusted blocks, then
+        the turn: the order `_deliver` builds, so the two paths that assemble a
+        turn stay one shape rather than two."""
+        def text(owner_dm):
+            referrer = (f"{_referrer_block(self._referred_by)}\n\n"
+                        if owner_dm and self._referred_by else "")
+            return (f"{_goal_turn_line(goal)}\n\n{referrer}"
+                    "No new messages since your last turn. Continue working toward the goal. "
+                    f"If there is nothing new to do or report, reply with exactly {NO_REPLY_SENTINEL}.")
+        # A wake has no spoken words; the goal itself is what it is about.
+        await self._handoff_message(await self._wake_event(
+            chat_uid, text, user_id="plow_goal", user_name="Goal check",
+            message_id=f"goal-{goal['generation']}-{uuid.uuid4().hex}", recall_text=goal["text"]))
 
-        A scheduled wake has no human speaker, so outside the owner's DM it gets
-        the discretion prompt and no authority. In a group the thread is full of
-        other people's words; an owner-authorized turn acting on them unprompted
-        is a confused deputy holding owner-only tools.
+    async def _drain_wakes(self):
+        """Hand each WAKES_DIR file's turn to its chat, oldest name first.
+
+        A file naming a chat outside the grant, or not parseable, is renamed
+        `.rejected` and logged: retrying it cannot succeed. A wake waits behind
+        its chat's inbound backlog, as a goal wake does, so an owner message
+        already received reaches the session first. Briefly, because a
+        hand-off that keeps failing never drains that backlog and this runs in
+        the socket's loop: past the wait, or on a hand-off that raises, the
+        file stays for the next pass.
+        """
+        for path in sorted(WAKES_DIR.glob("*.json")):
+            try:
+                wake = json.loads(path.read_text())
+                chat_uid, sender, text = wake["chat"], wake["from"], wake["text"]
+                if chat_uid not in self.chat_uids:
+                    raise ValueError(f"{chat_uid!r} is outside this agent's grant")
+            except (ValueError, KeyError, TypeError) as exc:
+                log.error("[plow_chat] wake %s rejected: %s", path.name, exc)
+                path.rename(path.with_suffix(".rejected"))
+                continue
+            entry = self._inbound.get(chat_uid)
+            try:
+                if entry is not None:
+                    await asyncio.wait_for(entry[0].join(), WAKE_BACKLOG_SECONDS)
+                # A person in the room could have asked this, so it carries
+                # what their ask would: the owner's authority in the owner's
+                # DM or a trusted group, discretion anywhere else.
+                await self._handoff_message(await self._wake_event(
+                    chat_uid, lambda _owner_dm: text, user_id="plow_wake", user_name=sender,
+                    message_id=f"wake-{uuid.uuid4().hex}", human=True))
+            except Exception as exc:              # noqa: BLE001 - the file stays for the next pass
+                log.warning("[plow_chat] wake %s for %s failed: %s", path.name, chat_uid, exc)
+                continue
+            path.unlink()
+
+    async def _wake_event(self, chat_uid, text, *, user_id, user_name, message_id,
+                          human=False, recall_text=None):
+        """A turn no Plow message carried, for `_handoff_message` -- the path
+        `gateway/wake.py` uses.
+
+        `text(owner_dm)` builds the turn. Without a human behind it (`human`
+        false) the turn gets the owner's authority only in the owner's DM: in a
+        group the thread is full of other people's words, and an
+        owner-authorized turn acting on them unprompted is a confused deputy
+        holding owner-only tools.
         """
         # Refreshed first. Inbound delivery re-reads trust before scoping
-        # recall; a wake that skipped it would keep recalling the owner's
+        # recall; a turn that skipped it would keep recalling the owner's
         # other chats into a group whose owner has since revoked that trust.
         await self._refresh_current_chat(chat_uid)
         chat = await self.get_chat_info(chat_uid)
         owner_dm = _owner_dm(self._chats[chat_uid])
-        # No human speaks on a wake, so trust grants it nothing.
-        authority, recall_everywhere = _authority(chat, owner_dm, human=False)
-        # Goal line outermost, then the untrusted blocks, then the turn: the
-        # order `_deliver` builds, so the two paths that assemble a turn stay
-        # one shape rather than two.
-        referrer = (f"{_referrer_block(self._referred_by)}\n\n"
-                    if owner_dm and self._referred_by else "")
+        authority, recall_everywhere = _authority(chat, owner_dm, human=human)
         event = MessageEvent(
-            text=(f"{_goal_turn_line(goal)}\n\n{referrer}"
-                  "No new messages since your last turn. Continue working toward the goal. "
-                  f"If there is nothing new to do or report, reply with exactly {NO_REPLY_SENTINEL}."),
+            text=text(owner_dm),
             source=self.build_source(chat_id=chat_uid, chat_name=chat["name"], chat_type=chat["type"],
-                                     user_id="plow_goal", user_name="Goal check",
-                                     role_authorized=owner_dm),
-            message_id=f"goal-{goal['generation']}-{uuid.uuid4().hex}",
+                                     user_id=user_id, user_name=user_name, role_authorized=owner_dm),
+            message_id=message_id,
             message_type=_message_type([]),
             channel_prompt=_channel_prompt(chat, "owner" if owner_dm else "member",
                                            self._chats[chat_uid], self._identity, authority, speak_rule=False) + _SILENCE_OPTION,
         )
-        # A wake has no spoken words; the goal itself is what it is about.
-        event.recall_text = goal["text"]
+        if recall_text is not None:
+            event.recall_text = recall_text
         event.authority, event.recall_everywhere = authority, recall_everywhere
-        await self._handoff_message(event)
+        return event
 
     async def _handoff_message(self, event):
         # Hermes can recurse into a queued message or wake before the old
@@ -3206,25 +3259,12 @@ class PlowChatAdapter(BasePlatformAdapter):
                 raise OSError(f"could not persist the initial baseline at {self._checkpoint_path(chat_uid)}")
 
     async def _prime(self, first_boot):
-        """Hand hermes WAKEUP_TURN in the home chat, injected the way `_goal_fire`
-        injects a wake: signed by Plow rather than the owner, owner authority
-        only in the owner's DM, and a prompt that lets the turn stay silent."""
-        home = self.home_chat_uid
-        await self._refresh_current_chat(home)  # authority from the live roster, as in `_goal_fire`
-        chat = await self.get_chat_info(home)
-        owner_dm = _owner_dm(self._chats[home])
-        authority, recall_everywhere = _authority(chat, owner_dm, human=False)
-        event = MessageEvent(
-            text=WAKEUP_TURN.format(boot="your first boot" if first_boot else "a restart"),
-            source=self.build_source(chat_id=home, chat_name=chat["name"], chat_type=chat["type"],
-                                     user_id="plow_setup", user_name="Plow setup",
-                                     role_authorized=owner_dm),
-            message_id=f"setup-{uuid.uuid4().hex}",
-            message_type=_message_type([]),
-            channel_prompt=_channel_prompt(chat, "owner" if owner_dm else "member",
-                                           self._chats[home], self._identity, authority, speak_rule=False) + _SILENCE_OPTION,
-        )
-        event.authority, event.recall_everywhere = authority, recall_everywhere
+        """Hand hermes WAKEUP_TURN in the home chat, signed by Plow rather than
+        the owner, built like a goal wake."""
+        event = await self._wake_event(
+            self.home_chat_uid,
+            lambda _owner_dm: WAKEUP_TURN.format(boot="your first boot" if first_boot else "a restart"),
+            user_id="plow_setup", user_name="Plow setup", message_id=f"setup-{uuid.uuid4().hex}")
         # Spent here, not before the reads above: a failed read leaves the
         # wakeup owed to the next session, while a hand-off that raises every
         # time still cannot tear down every session after it.
@@ -3337,7 +3377,16 @@ class PlowChatAdapter(BasePlatformAdapter):
                     self._goal_arm_wakes()
                     if not _woken:
                         await self._prime(_first_boot)
-                    while (frame := await frames.get()) is not None:
+                    while True:
+                        # Wakes are served from the socket's own loop, so they
+                        # stop with the session that can deliver their replies.
+                        try:
+                            frame = await asyncio.wait_for(frames.get(), WAKE_POLL_SECONDS)
+                        except TimeoutError:
+                            await self._drain_wakes()
+                            continue
+                        if frame is None:
+                            break
                         if frame.type == aiohttp.WSMsgType.TEXT:
                             await self._on_frame(frame.json(), http)
                     reader.result()
