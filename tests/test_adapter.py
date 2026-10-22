@@ -7270,6 +7270,81 @@ async def test_scheduled_wake_authority_matches_current_participants(
     assert module.EXTERNAL_CHANNEL_PROMPT in handled[0]["channel_prompt"]
 
 
+def _wake_adapter(module: Any, monkeypatch: pytest.MonkeyPatch, room: dict[str, Any]) -> tuple[Any, list[Any]]:
+    adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
+    adapter._set_reach([room])
+    _mark_anchored(adapter, room["uid"])
+    monkeypatch.setattr(adapter, "_refresh_current_chat", mock.AsyncMock())
+    module.WAKES_DIR.mkdir(parents=True, exist_ok=True)
+    return adapter, _capture_events(monkeypatch, adapter)
+
+
+@pytest.mark.parametrize(
+    ("room", "authority"),
+    [(_chat("cht_a"), True), (_chat("cht_a", group=True, trusted=True), True),
+     (_chat("cht_a", group=True), False)],
+    ids=["owner_dm", "trusted_group", "discretion_group"],
+)
+async def test_a_wake_file_becomes_one_turn_with_the_rooms_authority(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, room: dict[str, Any], authority: bool,
+) -> None:
+    """A job in the agent's home hands a chat a turn: the chat's own session
+    answers it, with what a person in that room asking would carry."""
+    module = _load(monkeypatch, tmp_path)
+    adapter, handled = _wake_adapter(module, monkeypatch, room)
+    wake = module.WAKES_DIR / "0001.json"
+    wake.write_text(json.dumps({"chat": "cht_a", "from": "Hostex", "text": "Julie asked about wifi."}))
+
+    await adapter._drain_wakes()
+
+    assert [e.text for e in handled] == ["Julie asked about wifi."]
+    assert handled[0].source["user_name"] == "Hostex"
+    assert handled[0].authority is authority
+    assert not wake.exists()
+
+
+async def test_a_wake_waits_behind_an_owner_message_still_being_delivered(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
+) -> None:
+    """The owner's revision, already received, reaches the session before the
+    job's turn that should honour it (#111)."""
+    module = _load(monkeypatch, tmp_path)
+    monkeypatch.setattr(module, "WAKE_BACKLOG_SECONDS", 0.01)
+    adapter, handled = _wake_adapter(module, monkeypatch, _chat("cht_a"))
+    backlog: asyncio.Queue[Any] = asyncio.Queue()
+    backlog.put_nowait("owner: recommend Pass Life too")
+    adapter._inbound["cht_a"] = (backlog, None)
+    wake = module.WAKES_DIR / "0001.json"
+    wake.write_text(json.dumps({"chat": "cht_a", "from": "Hostex", "text": "Julie asked about wifi."}))
+
+    await adapter._drain_wakes()
+    assert handled == [] and wake.exists()
+
+    backlog.get_nowait()
+    backlog.task_done()
+    await adapter._drain_wakes()
+    assert [e.text for e in handled] == ["Julie asked about wifi."]
+
+
+@pytest.mark.parametrize(
+    "content",
+    ['{"chat": "cht_elsewhere", "from": "Hostex", "text": "hi"}', "not json", '{"chat": "cht_a"}'],
+    ids=["outside_grant", "unparseable", "missing_fields"],
+)
+async def test_a_wake_file_that_cannot_be_served_is_set_aside_not_retried(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, content: str,
+) -> None:
+    module = _load(monkeypatch, tmp_path)
+    adapter, handled = _wake_adapter(module, monkeypatch, _chat("cht_a"))
+    (module.WAKES_DIR / "0001.json").write_text(content)
+
+    await adapter._drain_wakes()
+    await adapter._drain_wakes()
+
+    assert handled == []
+    assert [f.name for f in module.WAKES_DIR.iterdir()] == ["0001.rejected"]
+
+
 @pytest.mark.parametrize(
     ("command", "authority"),
     [("/goal", True), ("/goal book it", False), ("/goal clear", True)],

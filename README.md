@@ -545,6 +545,19 @@ the inviter has no name of their own. A failed read leaves it unset and the
 agent connects anyway; a member's turn carries neither this nor the owner's
 own name.
 
+### Wakes from a local job
+
+A job inside the agent's home can hand a chat a turn by writing one JSON file
+to `$HERMES_HOME/plow_chat_wakes/`: `{"chat": "cht_…", "from": "Hostex", "text": "…"}`.
+Write the file under another name and rename it to `*.json`. Only `*.json` is
+read, so a file is never read half-written.
+When the socket has been idle for five seconds, the adapter hands each file's
+text to that chat's own session and then deletes the file. That way, a job's
+draft is written with everything the room has already said. The turn carries
+what a person asking in that room would carry: the owner's authority in the
+owner's DM or a trusted group, and discretion anywhere else. A file naming a
+chat outside the grant, or one that can't be parsed, is renamed `.rejected`.
+
 ## Media
 
 Inbound photos, audio, video and documents arrive on `MessageEvent.media_urls`
