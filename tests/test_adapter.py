@@ -530,12 +530,12 @@ def _chat(uid: str, *, name: str | None = None, group: bool = False,
             "trusted": trusted, "status": status}
 
 
-def _voiced(module: Any, prompt: str) -> str:
+def _voiced(module: Any, prompt: str, people: int = 2) -> str:
     """The exact non-solo-DM composition `_collaboration_prompt` applies, so
     the prompt-matrix tests below don't hand-roll it out of sync with the
     real code."""
     return (f"{module._VOICE_RULE}{module._RELATIONSHIP_FACT} {module._NAME_FACT} "
-            f"{module._GROUP_SPEAK_RULE}{prompt}")
+            f"{module._group_speak_rule(people)}{prompt}")
 
 
 def _owned(module: Any, prompt: str, chat: dict[str, Any]) -> str:
@@ -1862,7 +1862,7 @@ async def test_a_shared_thread_names_who_the_agent_speaks_for(
     # this test owns is the voice rule and the roster facts -- present in a
     # shared thread, absent in a solo DM, with the base prompt unchanged
     # either way.
-    speak_rule = module._GROUP_SPEAK_RULE if group else ""
+    speak_rule = module._group_speak_rule(2) if group else ""
     assert event["channel_prompt"] == _rendered(module,
         f"{rule}{roster_facts}{speak_rule}{_owned(module, base, chat)}", "Elm", adapter._identity)
 
@@ -6190,6 +6190,23 @@ async def test_an_unstamped_hermes_event_opens_a_speakerless_wake_turn(
     await adapter.on_processing_complete(event, None)
 
 
+@pytest.mark.parametrize("humans", [3, 100])
+def test_group_speak_rule_names_head_count(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+    humans: int,
+) -> None:
+    """The model weighs "is this mine?" against how many people are talking;
+    agents don't count toward the room."""
+    module = _load(monkeypatch, tmp_path)
+    chat = _collaboration_chat()
+    chat["participants"] = [p for p in chat["participants"] if p["type"] == "agent"] + [
+        {"type": "member", "uid": f"mem_{i}", "role": "member", "provider_key": f"+1555{i:07d}"}
+        for i in range(humans)]
+    prompt = module._collaboration_prompt("", chat, module._NO_IDENTITY)
+    assert f"This thread has {humans} people in it" in prompt
+
+
 def test_every_silence_instruction_names_the_sentinel(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: pathlib.Path,
@@ -6200,6 +6217,7 @@ def test_every_silence_instruction_names_the_sentinel(
     is told to answer with the sentinel send() drops instead."""
     module = _load(monkeypatch, tmp_path)
     collaboration = module._collaboration_prompt("", _collaboration_chat(), module._NO_IDENTITY)
+    rule = module._group_speak_rule(2)
     for prompt in (module.EXTERNAL_CHANNEL_PROMPT, collaboration):
         assert module.NO_REPLY_SENTINEL in prompt
         assert "say nothing" not in prompt and "stay silent" not in prompt
@@ -6212,7 +6230,7 @@ def test_every_silence_instruction_names_the_sentinel(
     group_owner_turn = module._collaboration_prompt(
         module.GROUP_AUTHORITY_CHANNEL_PROMPT, _collaboration_chat(),
         module._NO_IDENTITY)
-    assert group_owner_turn.count(f"reply with exactly {module.NO_REPLY_SENTINEL}") == 1
+    assert group_owner_turn.count(f"start your reply with {module.NO_REPLY_SENTINEL}") == 1
     # Quiet in a group is the MODEL's call, made from this rule and answered
     # with the sentinel: the adapter holds no name match and no addressed-ness
     # check of its own (owner ruling, 2026-09-11). A solo non-owner DM is an
@@ -6221,30 +6239,31 @@ def test_every_silence_instruction_names_the_sentinel(
     # wake names nobody.
     assert not [name for name in dir(module) if "stay_silent" in name], \
         "the decision is the model's, not the code's -- no predicate of any name"
-    for signal in ("it uses your name", "a reply to a message you sent",
-                   "directly continues", "a goal for", "reply with exactly"):
-        assert signal in module._GROUP_SPEAK_RULE
+    for signal in ("it uses your name", "it answers something you said",
+                   "a goal for", "without your name, is not yours",
+                   f"start your reply with {module.NO_REPLY_SENTINEL} on its own line"):
+        assert signal in rule
     # Ownership is decided BEFORE any tool runs: suppression lands in send(),
     # which is after a Mac, mail or calendar side effect would already have
     # happened. A turn that is not this agent's does not act at all.
     for guard in ("before you look anything up or use any tool", "call nothing"):
-        assert guard in module._GROUP_SPEAK_RULE
+        assert guard in rule
     # ...except the invite: praise spoken to somebody else is still an invite
     # opening, or the delight trigger can never fire in a group at all.
     for carve_out in ("call plow_offer_invite", "spoken about you to somebody else",
                       "Call nothing else", "whatever the tool returns"):
-        assert carve_out in module._GROUP_SPEAK_RULE
+        assert carve_out in rule
     # Addressing a PERSON hands the thread over too. The owner asked Spruce a
     # question, then asked Sam one; Spruce answered that too, because the rule
     # only handed the floor to another agent (his group test, 2026-09-14).
     for handover in ("Silence is your default", "is Sam's to answer",
                      "addressed to the room, not to you", "you are not addressed"):
-        assert handover in module._GROUP_SPEAK_RULE
-    assert collaboration.count(module._GROUP_SPEAK_RULE) == 1
+        assert handover in rule
+    assert collaboration.count(rule) == 1
     # A wake or setup turn is exempt: it has no speaker to be addressed by.
     signed = module._collaboration_prompt("", _collaboration_chat(),
                                           module._NO_IDENTITY, False)
-    assert module._GROUP_SPEAK_RULE not in signed
+    assert rule not in signed
     assert module._VOICE_RULE in signed, "it still speaks for its own human"
     # The sentinel gets the last word where silence is on offer -- and only
     # there. The unconditional tail must not name it: `no_reply_ok` is read off
@@ -6255,7 +6274,7 @@ def test_every_silence_instruction_names_the_sentinel(
     for constant in (module.EXTERNAL_CHANNEL_PROMPT,
                      module.GROUP_AUTHORITY_CHANNEL_PROMPT,
                      module.OWNER_CHANNEL_PROMPT):
-        assert module._GROUP_SPEAK_RULE not in constant
+        assert rule not in constant
     assert "on a turn you speak" in module._MEMBER_TURN_PREAMBLE
     # A solo owner DM never warrants unprompted silence, so its prompt does
     # not reserve the token — send()'s gate keys off exactly this absence.

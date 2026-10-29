@@ -300,7 +300,8 @@ def _collaboration_prompt(prompt, chat, identity, speak_rule=True):
         # group-shaped prompts.
         # A wake or setup turn has no speaker to be addressed by, and its own
         # text is the errand.
-        rule = _GROUP_SPEAK_RULE if speak_rule else ""
+        rule = (_group_speak_rule(sum(p.get("type") != "agent" for p in chat["participants"]))
+                if speak_rule else "")
         prompt = (f"{_VOICE_RULE}{_RELATIONSHIP_FACT} {_NAME_FACT} "
                   f"{rule}{prompt}")
     participants = chat.get("participants") or []
@@ -889,8 +890,8 @@ _ANSWER_LAST = (
 # putting it in the unconditional tail marked those turns no_reply_ok and
 # swallowed an owner's answer that happened to end in it.
 _ANSWER_LAST_SILENCE = (
-    "And when this turn is not yours to answer at all, the sentinel is that "
-    f"last word: reply with exactly {NO_REPLY_SENTINEL} and nothing else. "
+    "And when this turn is not yours to answer at all, open with "
+    f"{NO_REPLY_SENTINEL} on its own line; what follows it is never posted. "
 )
 # Hermes 0.21 drops the MCP `instructions` Latch sends on initialize, so the
 # plugin states the routing rule itself. Rendered only when plow-init exported
@@ -1337,35 +1338,40 @@ _MEMBER_TURN_PREAMBLE = (
 # not read a follow-up at all -- "what else can you do for me?", one line after
 # the owner named that agent, went unanswered. Reading a conversation is what
 # the model is for; the code's only part is honouring the answer.
-_GROUP_SPEAK_RULE = (
-    "Other people are in this thread, and almost everything said here is between "
-    "them. Silence is your default: unless this message is clearly yours, reply "
-    f"with exactly {NO_REPLY_SENTINEL} and nothing else -- never your reasoning, and "
-    "never a sentence explaining that you are staying quiet. "
-    "It is yours only if one of these is true: it uses your name; it is a reply to "
-    "a message you sent; it directly continues what you and that person were just "
-    "doing, with nobody else addressed since; or a goal for this thread is active. "
-    "It is NOT yours when it names or greets somebody else. \"Hey Sam, do you know "
-    "what this means?\" is Sam's to answer, even if you could answer it well, and "
-    "even one line after you and the asker were talking. A greeting with no name on "
-    "it -- \"Hello\", \"good morning\" -- is addressed to the room, not to you: stay "
-    "quiet. Something merely interesting, or a question you happen to know the "
-    "answer to, is not an invitation. When you are unsure, you are not addressed. "
-    "Settle that before you look anything up or use any tool: a turn that is not "
-    "yours is not yours to act on either, so call nothing, change nothing, and "
-    "fetch nothing for it -- someone else's request to someone else is not your "
-    "errand. "
-    "One call is the exception: when a person who is not your owner praises you or "
-    "asks how to get an agent like you, call plow_offer_invite. Praise spoken about "
-    "you to somebody else counts the same as praise spoken to you. It only offers "
-    "them an agent of their own and touches nothing of your owner's. Call nothing else "
-    "for that turn, and whatever the tool returns, unless the message was yours "
-    f"anyway your reply is still exactly {NO_REPLY_SENTINEL} -- never a word about "
-    "the invite, thanks, or that you reached out. "
-)
+def _group_speak_rule(people: int) -> str:
+    return (
+        f"This thread has {people} people in it, and almost everything said here is "
+        "between them. Silence is your default: unless this message is clearly yours, "
+        f"start your reply with {NO_REPLY_SENTINEL} on its own line. Anything you write "
+        "after it is private notes that nobody in the thread sees. "
+        "It is yours only if one of these is true: it uses your name; it answers "
+        "something you said (a reply to your message, or a direct continuation of the "
+        "exchange you and that person were just having, with nobody else addressed "
+        "since); or a goal for this thread is active. "
+        "A question in your line of work asked to the room, without your name, is not "
+        "yours. "
+        "It is NOT yours when it names or greets somebody else. \"Hey Sam, do you know "
+        "what this means?\" is Sam's to answer, even if you could answer it well, and "
+        "even one line after you and the asker were talking. A greeting with no name on "
+        "it -- \"Hello\", \"good morning\" -- is addressed to the room, not to you: stay "
+        "quiet. Something merely interesting, or a question you happen to know the "
+        "answer to, is not an invitation. When you are unsure, you are not addressed. "
+        "Settle that before you look anything up or use any tool: a turn that is not "
+        "yours is not yours to act on either, so call nothing, change nothing, and "
+        "fetch nothing for it -- someone else's request to someone else is not your "
+        "errand. "
+        "One call is the exception: when a person who is not your owner praises you or "
+        "asks how to get an agent like you, call plow_offer_invite. Praise spoken about "
+        "you to somebody else counts the same as praise spoken to you. It only offers "
+        "them an agent of their own and touches nothing of your owner's. Call nothing else "
+        "for that turn, and whatever the tool returns, unless the message was yours "
+        f"anyway your reply is still exactly {NO_REPLY_SENTINEL} -- never a word about "
+        "the invite, thanks, or that you reached out. "
+    )
+
 OWNER_CHANNEL_PROMPT = f"You are talking to your owner. {REPLY_TARGET_PROMPT} {_SHARING_RULE}"
 # No _SILENCE_OPTION: this prompt is only ever composed into a shared room,
-# where _GROUP_SPEAK_RULE already names the sentinel. EXTERNAL keeps its copy --
+# where _group_speak_rule already names the sentinel. EXTERNAL keeps its copy --
 # that one also serves a solo non-owner DM, where the rule is not composed at
 # all and dropping it would strip the sentinel from the prompt `no_reply_ok`
 # reads.
