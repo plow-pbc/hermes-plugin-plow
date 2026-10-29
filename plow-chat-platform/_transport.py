@@ -433,7 +433,7 @@ def _split(listing, provider):
 # retry pressure makes the model verbalize its silence instead ("(no reply
 # needed)"), which then delivers as a real message. The sentinel gives the
 # turn non-empty content that send() drops before delivery: the marker alone,
-# or the marker closing a turn whose working-out came first.
+# or the marker opening or closing a turn (notes after it, or working-out before).
 NO_REPLY_SENTINEL = "NO_REPLY"
 
 

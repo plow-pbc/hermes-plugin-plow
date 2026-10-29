@@ -300,7 +300,7 @@ def _collaboration_prompt(prompt, chat, identity, speak_rule=True):
         # group-shaped prompts.
         # A wake or setup turn has no speaker to be addressed by, and its own
         # text is the errand.
-        rule = (_group_speak_rule(sum(p.get("type") != "agent" for p in chat["participants"]))
+        rule = (_group_speak_rule(sum(p.get("type") == "member" for p in chat["participants"]))
                 if speak_rule else "")
         prompt = (f"{_VOICE_RULE}{_RELATIONSHIP_FACT} {_NAME_FACT} "
                   f"{rule}{prompt}")
@@ -1341,7 +1341,7 @@ _MEMBER_TURN_PREAMBLE = (
 def _group_speak_rule(people: int) -> str:
     return (
         f"This thread has {people} {'person' if people == 1 else 'people'} in it, and "
-        "almost everything said here is between them. Silence is your default: unless "
+        "almost everything said here is not meant for you. Silence is your default: unless "
         "this message is clearly yours, "
         f"start your reply with {NO_REPLY_SENTINEL} on its own line. Anything you write "
         "after it is private notes that nobody in the thread sees. "
@@ -1366,8 +1366,8 @@ def _group_speak_rule(people: int) -> str:
         "you to somebody else counts the same as praise spoken to you. It only offers "
         "them an agent of their own and touches nothing of your owner's. Call nothing else "
         "for that turn, and whatever the tool returns, unless the message was yours "
-        f"anyway your reply is still exactly {NO_REPLY_SENTINEL} -- never a word about "
-        "the invite, thanks, or that you reached out. "
+        f"anyway your reply still opens with {NO_REPLY_SENTINEL} on its own line -- "
+        "never a word about the invite, thanks, or that you reached out. "
     )
 
 OWNER_CHANNEL_PROMPT = f"You are talking to your owner. {REPLY_TARGET_PROMPT} {_SHARING_RULE}"
