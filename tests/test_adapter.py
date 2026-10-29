@@ -19,6 +19,7 @@ import os
 import pathlib
 import re
 import struct
+import subprocess
 import sys
 import threading
 import time
@@ -7812,33 +7813,26 @@ _CHUNKS_PATH = "~/Plow/wiki/.wiki/chunks.json"
 
 @pytest.fixture
 def mac_wiki(monkeypatch: pytest.MonkeyPatch, embed_server: Any) -> Iterator[dict[str, str]]:
-    """The owner's ~/Plow/wiki behind a fake Mac relay: plow_read_file / plow_write_file over this dict."""
+    """The owner's ~/Plow/wiki on a machine latch reaches: `latch file get` / `latch file put` over
+    this dict, each run acting for the owner's home chat."""
     files = {_CHUNKS_PATH: json.dumps(_WIKI_CHUNKS)}
 
-    class _Mac(http.server.BaseHTTPRequestHandler):
-        def do_POST(self) -> None:
-            params = json.loads(self.rfile.read(int(self.headers["Content-Length"])))["params"]
-            path = params["arguments"]["path"]
-            if params["name"] == "plow_write_file":
-                files[path] = params["arguments"]["content"]
-            if path in files:
-                payload = {"status": "completed", "path": path, "content": files[path]}
-                result = {"content": [{"type": "text", "text": json.dumps(payload)}]}
-            else:
-                result = {"isError": True, "content": [{"type": "text", "text": json.dumps({"diagnosis": {"cause": "not_found"}})}]}
-            out = json.dumps({"jsonrpc": "2.0", "id": 1, "result": result}).encode()
-            self.send_response(200)
-            self.send_header("Content-Length", str(len(out)))
-            self.end_headers()
-            self.wfile.write(out)
+    def latch(argv: list[str], *, env: dict[str, str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        assert argv[:2] == ["latch", "file"] and env["LATCH_PLOW_CHAT"] == env["PLOW_HOME_CHANNEL"]
+        verb, source, dest = argv[2:]
+        if verb == "put":
+            files[dest] = pathlib.Path(source).read_text()
+        elif source in files:
+            pathlib.Path(dest).write_text(files[source])
+        else:
+            error = {"error": {"code": "not_found", "exit": 1, "message": f"{source} does not exist"}}
+            return subprocess.CompletedProcess(argv, 1, "", json.dumps(error))
+        return subprocess.CompletedProcess(argv, 0, "", "")
 
-        def log_message(self, *_a: Any) -> None: ...
-
-    with _serve(_Mac) as base:
-        monkeypatch.setenv("PLOW_MCP_URL", f"{base}/mcp")
-        monkeypatch.setenv("PLOW_AGENT_TOKEN", "t")
-        monkeypatch.setenv("PLOW_WIKI_EMBED_URL", embed_server.url)
-        yield files
+    monkeypatch.setattr(subprocess, "run", latch)
+    monkeypatch.delenv("LATCH_PLOW_CHAT", raising=False)
+    monkeypatch.setenv("PLOW_WIKI_EMBED_URL", embed_server.url)
+    yield files
 
 
 def test_wiki_refresh_embeds_only_the_chunks_it_has_no_vector_for(
@@ -7873,7 +7867,7 @@ def test_wiki_refresh_embeds_only_the_chunks_it_has_no_vector_for(
     assert [c["text"] for c in module._wiki["corpus"]["chunks"]] == [
         "Prefers 30-minute video calls before noon Eastern.", "Allergic to peanuts."]
 
-    # A torn write (the relay's writeFile is not atomic) is a cache miss, rebuilt, never a stuck agent.
+    # A torn file is a cache miss, rebuilt, never a stuck agent.
     mac_wiki[stored] = mac_wiki[stored][:40]
     embed_server.inputs.clear()
     module._refresh_wiki()
@@ -8012,11 +8006,10 @@ def test_wiki_recall_reaches_for_the_agents_own_last_words_when_the_reply_is_thi
 
 
 @pytest.mark.parametrize(("env", "registered"), [
-    ({"PLOW_WIKI_EMBED_URL": "http://e", "PLOW_MCP_URL": "https://m"}, True),
-    ({"PLOW_WIKI_EMBED_URL": "http://e"}, False),
+    ({"PLOW_WIKI_EMBED_URL": "http://e"}, True),
     ({"PLOW_MCP_URL": "https://m"}, False),
-], ids=["relay", "no-mac", "no-embedder"])
-def test_wiki_recall_is_registered_only_with_an_embedder_and_a_wiki(
+], ids=["embedder", "no-embedder"])
+def test_wiki_recall_is_registered_only_with_an_embedder(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, env: dict[str, str], registered: bool
 ) -> None:
     for name in ("PLOW_WIKI_EMBED_URL", "PLOW_MCP_URL"):

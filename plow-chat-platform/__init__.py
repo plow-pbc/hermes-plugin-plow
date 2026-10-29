@@ -19,7 +19,9 @@ import pathlib
 import re
 import stat
 import struct
+import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -1057,6 +1059,9 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 _NO_REDIRECT_OPENER = urllib.request.build_opener(_NoRedirect)
 
 
+RELAY_TIMEOUT_S = 20.0  # Latch's relay timeout
+
+
 class _RelayToolError(Exception):
     """A relay tool that did not complete: args[0] is its diagnosis's cause (`not_found`), or its status (`pending`)."""
 
@@ -1153,14 +1158,14 @@ def _backfill_bare_handles(adapter, loop, bare):
     """Resolve bare handles on the owner's Mac and fill the empty names."""
     try:
         url, token = os.environ["PLOW_MCP_URL"], os.environ["PLOW_AGENT_TOKEN"]
-        body = _relay_call(url, token, "plow_read_skill", {"name": "contacts"}, WIKI_RELAY_TIMEOUT_S)["body"]
+        body = _relay_call(url, token, "plow_read_skill", {"name": "contacts"}, RELAY_TIMEOUT_S)["body"]
         store_dir = _contacts_store_dir(body)
 
         def run(argv):
             # read_paths and goal are what the owner's approval dialog, the
             # adversarial reviewer and the audit log show -- the skill's contract.
             out = _relay_call(url, token, "plow_run_command",
-                              {"argv": argv, "read_paths": [store_dir], "goal": BACKFILL_GOAL}, WIKI_RELAY_TIMEOUT_S)
+                              {"argv": argv, "read_paths": [store_dir], "goal": BACKFILL_GOAL}, RELAY_TIMEOUT_S)
             return out.get("exit_code", 0), out.get("output") or ""
 
         # The skill's own sweep: the root store plus one per sync source, and
@@ -3789,30 +3794,56 @@ def _recall(session_id, user_message, platform, **_kwargs):
 # `/v1/embeddings`: only the native endpoint honours keep_alive, and without it
 # the first turn after five idle minutes waited 2-5 s for a model load.
 WIKI_EMBED_MODEL = "embeddinggemma"
-WIKI_EMBED_DIMS = 256  # trained to truncate; keeps embeddings.json under the relay's 8 MiB
+WIKI_EMBED_DIMS = 256  # trained to truncate; keeps embeddings.json small
 WIKI_EMBED_BATCH = 64
 WIKI_EMBED_TIMEOUT_S = 20.0  # under Hermes' 30 s bounded-hook timeout
-WIKI_RELAY_ROOT = "~/Plow/wiki"
-WIKI_CHUNKS_PATH = f"{WIKI_RELAY_ROOT}/.wiki/chunks.json"
-WIKI_EMBEDDINGS_PATH = f"{WIKI_RELAY_ROOT}.recall/embeddings.json"  # sibling of the wiki: never snapshotted
-WIKI_RELAY_TIMEOUT_S = 20.0  # Latch's relay timeout
+WIKI_ROOT = "~/Plow/wiki"
+WIKI_CHUNKS_PATH = f"{WIKI_ROOT}/.wiki/chunks.json"
+WIKI_EMBEDDINGS_PATH = f"{WIKI_ROOT}.recall/embeddings.json"  # sibling of the wiki: never snapshotted
+WIKI_LATCH_TIMEOUT_S = 20.0
 _wiki: dict[str, Any] = {"corpus": None, "fetched_at": 0.0, "tried_at": 0.0, "lock": threading.Lock()}
 
 
+class _LatchError(Exception):
+    """A latch command that failed: args[0] is its error code (`not_found`)."""
+
+
+def _latch_file(*args: str) -> None:
+    """One `latch file` call on the owner's machine (latch's default host, or
+    LATCH_HOST), judged there as acting for the owner's home chat."""
+    env = dict(os.environ)
+    if not env.get("LATCH_PLOW_CHAT") and env.get("PLOW_HOME_CHANNEL"):
+        env["LATCH_PLOW_CHAT"] = env["PLOW_HOME_CHANNEL"]
+    done = subprocess.run(["latch", "file", *args], env=env, capture_output=True, text=True,
+                          timeout=WIKI_LATCH_TIMEOUT_S)
+    if done.returncode:
+        try:
+            code = json.loads(done.stderr)["error"]["code"]
+        except (ValueError, KeyError, TypeError):
+            code = f"exit {done.returncode}"
+        raise _LatchError(code)
+
+
 def _wiki_read(path: str) -> str | None:
-    """A relay file's text, or None when it doesn't exist."""
-    try:
-        return _relay_call(os.environ["PLOW_MCP_URL"], os.environ["PLOW_AGENT_TOKEN"], "plow_read_file",
-                           {"path": path}, WIKI_RELAY_TIMEOUT_S)["content"]
-    except _RelayToolError as e:
-        if e.args[0] == "not_found":
-            return None
-        raise
+    """A file's text on the owner's machine, or None when it doesn't exist."""
+    with tempfile.TemporaryDirectory() as work:
+        local = os.path.join(work, "file")
+        try:
+            _latch_file("get", path, local)
+        except _LatchError as e:
+            if e.args[0] == "not_found":
+                return None
+            raise
+        with open(local, encoding="utf-8") as handle:
+            return handle.read()
 
 
 def _wiki_write(path: str, text: str) -> None:
-    _relay_call(os.environ["PLOW_MCP_URL"], os.environ["PLOW_AGENT_TOKEN"], "plow_write_file",
-                {"path": path, "content": text}, WIKI_RELAY_TIMEOUT_S)
+    with tempfile.TemporaryDirectory() as work:
+        local = os.path.join(work, "file")
+        with open(local, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        _latch_file("put", local, path)
 
 
 def _embed(inputs: list[str]) -> list[tuple[float, ...]]:
@@ -3919,7 +3950,7 @@ def _wiki_recall(session_id, user_message, platform, **_kwargs):
     for chunk in hits:
         # One line per hit, whatever the chunk holds: nothing can forge the end marker's line.
         page, title, text = (" ".join(str(chunk[k]).split()) for k in ("page", "title", "text"))
-        lines.append(f"- {WIKI_RELAY_ROOT}/{page}.md ({title}): {text}")
+        lines.append(f"- {WIKI_ROOT}/{page}.md ({title}): {text}")
     lines.append(_WIKI_END)
     return {"context": "\n".join(lines)}
 
@@ -5693,7 +5724,7 @@ def register(ctx):
     ctx.register_hook("transform_tool_result", _route_tool_result)
     ctx.register_hook("pre_llm_call", _recall)
     ctx.register_hook("post_llm_call", _capture_people)
-    # The wiki's facts, when this agent has an embedder and the owner's Mac to read the wiki from.
-    if os.environ.get("PLOW_WIKI_EMBED_URL") and os.environ.get("PLOW_MCP_URL"):
+    # The wiki's facts, when this agent has an embedder; latch reads the wiki on the owner's machine.
+    if os.environ.get("PLOW_WIKI_EMBED_URL"):
         ctx.register_hook("pre_llm_call", _wiki_recall)
         _kick_refresh(_wiki, _refresh_wiki, "plow-wiki-recall")
