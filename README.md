@@ -389,7 +389,7 @@ room). `wiki index` writes the facts to `.wiki/chunks.json`; a background
 refresh reads and writes the wiki on the owner's machine with `latch file`
 (latch's default host, or `LATCH_HOST`; judged there as acting for the home
 chat), embeds any fact it has no vector for and stores the vectors in
-`~/Plow/wiki.recall/embeddings.json`, beside the wiki rather than inside it so
+`~/Plow/wiki.recall.json`, beside the wiki rather than inside it so
 `wiki snapshot` never commits them, so agents sharing a wiki share its vectors —
 every agent embeds every chunk, whether or not it may recall it. A refresh
 that cannot reach the wiki or the embedder keeps the last corpus, and the

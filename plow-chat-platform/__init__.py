@@ -3799,7 +3799,9 @@ WIKI_EMBED_BATCH = 64
 WIKI_EMBED_TIMEOUT_S = 20.0  # under Hermes' 30 s bounded-hook timeout
 WIKI_ROOT = "~/Plow/wiki"
 WIKI_CHUNKS_PATH = f"{WIKI_ROOT}/.wiki/chunks.json"
-WIKI_EMBEDDINGS_PATH = f"{WIKI_ROOT}.recall/embeddings.json"  # sibling of the wiki: never snapshotted
+# A sibling of the wiki, so never snapshotted, in the folder that holds the wiki
+# and so always exists: `latch file put` makes no folders.
+WIKI_EMBEDDINGS_PATH = f"{WIKI_ROOT}.recall.json"
 WIKI_LATCH_TIMEOUT_S = 20.0
 _wiki: dict[str, Any] = {"corpus": None, "fetched_at": 0.0, "tried_at": 0.0, "lock": threading.Lock()}
 

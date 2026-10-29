@@ -7816,16 +7816,18 @@ def mac_wiki(monkeypatch: pytest.MonkeyPatch, embed_server: Any) -> Iterator[dic
     """The owner's ~/Plow/wiki on a machine latch reaches: `latch file get` / `latch file put` over
     this dict, each run acting for the owner's home chat."""
     files = {_CHUNKS_PATH: json.dumps(_WIKI_CHUNKS)}
+    # The folders the owner's machine has; like `latch file put`, a write into any other fails.
+    folders = {"~/Plow", "~/Plow/wiki", "~/Plow/wiki/.wiki"}
 
     def latch(argv: list[str], *, env: dict[str, str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
         assert argv[:2] == ["latch", "file"] and env["LATCH_PLOW_CHAT"] == env["PLOW_HOME_CHANNEL"]
         verb, source, dest = argv[2:]
-        if verb == "put":
+        if verb == "put" and dest.rsplit("/", 1)[0] in folders:
             files[dest] = pathlib.Path(source).read_text()
-        elif source in files:
+        elif verb == "get" and source in files:
             pathlib.Path(dest).write_text(files[source])
         else:
-            error = {"error": {"code": "not_found", "exit": 1, "message": f"{source} does not exist"}}
+            error = {"error": {"code": "not_found", "exit": 1, "message": "no such file or folder"}}
             return subprocess.CompletedProcess(argv, 1, "", json.dumps(error))
         return subprocess.CompletedProcess(argv, 0, "", "")
 
@@ -7839,9 +7841,12 @@ def test_wiki_refresh_embeds_only_the_chunks_it_has_no_vector_for(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, embed_server: Any, mac_wiki: dict[str, str]
 ) -> None:
     module = _load(monkeypatch, tmp_path)
-    stored = "~/Plow/wiki.recall/embeddings.json"  # beside the wiki, not in it: wiki snapshot never carries it
+    # Beside the wiki, not in it, so wiki snapshot never carries it; and in ~/Plow, which a machine
+    # with a wiki always has: no recall folder of its own, which `latch file put` could not make.
+    stored = "~/Plow/wiki.recall.json"
 
     module._refresh_wiki()
+    assert module._wiki["corpus"] is not None, "a wiki with no recall folder still becomes recallable"
     assert embed_server.inputs == ["title: Jane Doe | text: Prefers 30-minute video calls before noon Eastern.",
                                    "title: Bob Li | text: Allergic to shellfish."]
     first = mac_wiki[stored]
