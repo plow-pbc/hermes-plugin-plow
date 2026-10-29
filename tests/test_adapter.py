@@ -6190,11 +6190,12 @@ async def test_an_unstamped_hermes_event_opens_a_speakerless_wake_turn(
     await adapter.on_processing_complete(event, None)
 
 
-@pytest.mark.parametrize("humans", [3, 100])
+@pytest.mark.parametrize("humans, noun", [(1, "person"), (3, "people"), (100, "people")])
 def test_group_speak_rule_names_head_count(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: pathlib.Path,
     humans: int,
+    noun: str,
 ) -> None:
     """The model weighs "is this mine?" against how many people are talking;
     agents don't count toward the room."""
@@ -6204,7 +6205,7 @@ def test_group_speak_rule_names_head_count(
         {"type": "member", "uid": f"mem_{i}", "role": "member", "provider_key": f"+1555{i:07d}"}
         for i in range(humans)]
     prompt = module._collaboration_prompt("", chat, module._NO_IDENTITY)
-    assert f"This thread has {humans} people in it" in prompt
+    assert f"This thread has {humans} {noun} in it" in prompt
 
 
 def test_every_silence_instruction_names_the_sentinel(

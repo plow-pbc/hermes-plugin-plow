@@ -1314,8 +1314,8 @@ _NO_RELAY = (
 )
 _SPEAKER_FACT = "The message below is from a participant in this chat who does not own this agent."
 _SILENCE_OPTION = (
-    f"When you have nothing to say, reply with exactly {NO_REPLY_SENTINEL} "
-    "and it will not be delivered. "
+    f"When you have nothing to say, start your reply with {NO_REPLY_SENTINEL} on its "
+    "own line; nothing from there on is delivered. "
 )
 
 # The turn each process start hands hermes: an event, not a briefing. What the agent
@@ -1340,8 +1340,9 @@ _MEMBER_TURN_PREAMBLE = (
 # the model is for; the code's only part is honouring the answer.
 def _group_speak_rule(people: int) -> str:
     return (
-        f"This thread has {people} people in it, and almost everything said here is "
-        "between them. Silence is your default: unless this message is clearly yours, "
+        f"This thread has {people} {'person' if people == 1 else 'people'} in it, and "
+        "almost everything said here is between them. Silence is your default: unless "
+        "this message is clearly yours, "
         f"start your reply with {NO_REPLY_SENTINEL} on its own line. Anything you write "
         "after it is private notes that nobody in the thread sees. "
         "It is yours only if one of these is true: it uses your name; it answers "
