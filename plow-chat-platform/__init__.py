@@ -62,6 +62,7 @@ from ._transport import (
     _auth_raise_for_status,
     _bearer,
     _ends_silent,
+    _is_silent,
     _chat_type,
     _granted_chats,
     _is_chatter,
@@ -2398,11 +2399,11 @@ class PlowChatAdapter(BasePlatformAdapter):
             # it verbatim is what gets the owner something tappable (plow#2182).
             body = credits.group(1)
         turn = self._active_turn.get()
-        # The sentinel ENDS the answer, and whatever the model wrote above it
-        # is its working-out, not a message: Elm posted "This is Daniel asking
-        # Spruce ... / NO_REPLY" into a live group (2026-09-11) because an
-        # exact whole-body match let the pair through as ordinary text. A
-        # trailing sentinel drops the body it closes. Still gated on the
+        # The sentinel may open or close the answer, and whatever the model
+        # wrote around it is its working-out, not a message: Elm posted "This
+        # is Daniel asking Spruce ... / NO_REPLY" into a live group
+        # (2026-09-11) because an exact whole-body match let the pair through
+        # as ordinary text. A sentinel on either end drops the body. Still gated on the
         # turn's own prompt having advertised it AND on the turn's own chat:
         # on a solo owner DM, a cron delivery, or an explicit send to another
         # granted chat, NO_REPLY is ordinary text and whoever asked for that
@@ -2412,7 +2413,7 @@ class PlowChatAdapter(BasePlatformAdapter):
         # demands the whole body BE the marker, which is exactly the case that
         # shipped Elm's reasoning to a live group, and its successful-turn gate
         # needs an agent_result that send() never sees.
-        if (_ends_silent(body) and turn is not None
+        if (_is_silent(body) and turn is not None
                 and turn.get("no_reply_ok") and chat_id == turn["chat_uid"]):
             log.info("[plow_chat] dropped NO_REPLY sentinel for %s (%d line(s) of working-out with it)",
                      chat_id, len([line for line in body.splitlines() if line.strip()]) - 1)

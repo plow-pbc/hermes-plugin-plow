@@ -5985,12 +5985,15 @@ async def test_only_a_quiet_answer_is_cached(
      # Elm posted exactly this into a live group: the sentinel ends the
      # answer, so the working-out above it is not a message either.
      ("Directed at Spruce, not me — staying quiet.\nNO_REPLY", True, False),
+     ("NO_REPLY\nHe's addressing Abby, not me. Two drafts are pending...", True, False),
+     ("NO_REPLY\nHe's addressing Abby, not me.", False, True),
      ("NO_REPLY is what I would send here", True, True),
      ("(no reply needed)", True, True),
      ("NO_REPLY", False, True),
      ("NO_REPLY", None, True),
      ("NO_REPLY", "cross_chat", True)],
-    ids=["exact", "whitespace", "working_out_then_sentinel", "embedded", "prose_silence",
+    ids=["exact", "whitespace", "working_out_then_sentinel", "sentinel_then_notes",
+         "solo_dm_sentinel_then_notes", "embedded", "prose_silence",
          "solo_dm_turn", "no_turn", "cross_chat_send"],
 )
 async def test_no_reply_sentinel_is_dropped_before_delivery(
@@ -9118,3 +9121,16 @@ SILENCE_MARKER_CASES = [
 @pytest.mark.parametrize(("text", "silent"), SILENCE_MARKER_CASES)
 def test_silence_marker_grammar_shared_with_plow(monkeypatch, tmp_path, text, silent):
     assert _load(monkeypatch, tmp_path)._ends_silent(text) is silent
+
+
+@pytest.mark.parametrize(
+    ("text", "silent"),
+    [("NO_REPLY\nSam is talking to Abby, not me.", True),
+     ("*NO_REPLY*\n\nnotes", True),
+     ("No active subagents, nothing pending.\n\nNO_REPLY", True),
+     ("No reply needed from me, but here's the code: 1234", False),
+     ("NO_REPLY is what I send when quiet.\nanyway: hi", False),
+     ("", False)],
+)
+def test_first_line_silence(monkeypatch, tmp_path, text, silent):
+    assert _load(monkeypatch, tmp_path)._is_silent(text) is silent

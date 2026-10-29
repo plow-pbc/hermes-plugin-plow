@@ -437,12 +437,23 @@ def _split(listing, provider):
 NO_REPLY_SENTINEL = "NO_REPLY"
 
 
+def _is_marker(line):
+    return line.strip().strip(".*_ `") == NO_REPLY_SENTINEL
+
+
 def _ends_silent(body):
     """Does this text close on the sentinel? ".NO_REPLY" or "*NO_REPLY*" is
     the same marker decorated, which gateway/response_filters.py already
     tolerates upstream. Each platform decides what to do with preceding text."""
     lines = [line for line in body.splitlines() if line.strip()]
-    return bool(lines) and lines[-1].strip().strip(".*_ `") == NO_REPLY_SENTINEL
+    return bool(lines) and _is_marker(lines[-1])
+
+
+def _is_silent(body):
+    """The plugin's send guard: the marker may also OPEN the body, with
+    private notes after it. `_ends_silent` stays the grammar shared with Plow."""
+    lines = [line for line in body.splitlines() if line.strip()]
+    return bool(lines) and (_is_marker(lines[0]) or _is_marker(lines[-1]))
 
 
 # Hermes' own diagnostics reach an adapter through plain send() carrying no
