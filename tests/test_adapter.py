@@ -6006,8 +6006,9 @@ async def test_no_reply_sentinel_is_dropped_before_delivery(
     """A turn whose whole answer is the sentinel stays silent: reported as a
     success to the gateway (silence is the intended outcome, not a failure to
     retry) but never posted, and without the verbose-preference read — this is
-    the silence contract, not a diagnostic. Only a trailing sentinel is
-    silence -- bare or decorated as models emit it -- and only on and for the
+    the silence contract, not a diagnostic. Only a leading or trailing
+    sentinel line is silence -- bare or decorated as models emit it -- and
+    only on and for the
     turn whose prompt established it: prose
     that merely mentions it, a solo-DM turn whose prompt never advertised it,
     a turn-less (cron) delivery, and an owner turn's explicit send to a

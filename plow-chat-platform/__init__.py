@@ -2405,10 +2405,11 @@ class PlowChatAdapter(BasePlatformAdapter):
         # (2026-09-11) because an exact whole-body match let the pair through
         # as ordinary text. A sentinel on either end drops the body. Still
         # gated on the turn's own prompt having advertised it AND on the
-        # turn's own chat: on a solo owner DM, a cron delivery, or an explicit send to another
-        # granted chat, NO_REPLY is ordinary text and whoever asked for that
-        # literal string must get it. No verbose-preference read: this is the
-        # silence contract, not a diagnostic, so it never delivers.
+        # turn's own chat: on a solo owner DM, a cron delivery, or an
+        # explicit send to another granted chat, NO_REPLY is ordinary text
+        # and whoever asked for that literal string must get it. No
+        # verbose-preference read: this is the silence contract, not a
+        # diagnostic, so it never delivers.
         # Upstream's own matcher is not reusable here: the interactive one
         # demands the whole body BE the marker, which is exactly the case that
         # shipped Elm's reasoning to a live group, and its successful-turn gate
