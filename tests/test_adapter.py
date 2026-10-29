@@ -1757,7 +1757,7 @@ async def test_every_turn_prompt_opens_with_who_this_agent_is(
 
 # The dashboard cards the prefix names, in the order it names them.
 _CARDS = ("credits and usage", "Plow lines", "full trust for group chats", "delight invites",
-          "the daily payment limit", "verbose output", "the Latch connection")
+          "the daily payment limit", "verbose output")
 
 
 def _assert_in_order(text: str, *fragments: str) -> None:
@@ -1815,8 +1815,8 @@ def test_the_identity_prefix_says_these_things_in_this_order(
     assert prefix.startswith(opening)
     _assert_in_order(prefix, opening, *filter(None, (offer,)), "call plow_offer_invite",
                      *filter(None, (roster, roster and "read from the Mac")),
-                     "Reach for it yourself", "has to be awake with Latch running",
-                     module.LATCH_URL, module.DASHBOARD_URL, *_CARDS, "PROMPT")
+                     "The latch command is how you reach", "Reach for it yourself",
+                     module.LATCH_INSTALL, "start latch there", module.DASHBOARD_URL, *_CARDS, "PROMPT")
     assert (_ROSTER in prefix) == (roster is not None)
     assert "+16505550199" not in prefix, "an unnamed line is not a persona"
 

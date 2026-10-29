@@ -88,7 +88,9 @@ from ._transport import (
 )
 from . import email as plow_email
 
-LATCH_URL = "https://plow.co/latch"
+# The command that installs latch on a machine of the owner's, as its own
+# published installer gives it.
+LATCH_INSTALL = "curl -fsSLO https://releases.plow.co/latch-cli/install.sh && sh install.sh"
 # How long a QUIET answer from /v1/agents/me serves the gate below. Only the
 # quiet answer is cached: withholding while the owner has already turned
 # verbose on costs a re-ask, and delivering while they have already turned it
@@ -1407,14 +1409,16 @@ def _plow_facts(identity):
     roster = _lines_fact(identity)
     if roster:
         facts.append(roster)
-    # Both Latch clauses come from transcript evidence; see the PR for counts.
-    # The install link is a parenthetical because an unreachable Latch is
-    # usually a sleeping Mac, not a missing app.
-    facts.append(f"Plow Latch is how you reach your owner's Mac -- their mail, calendar, files and browser. "
-                 "Reach for it yourself instead of asking which route to take. If it is unreachable, say once "
-                 f"that their Mac has to be awake with Latch running ({LATCH_URL} to install it).")
+    # "Reach for it yourself" comes from transcript evidence: agents asked
+    # which route to take instead of taking it. An offline host is usually a
+    # sleeping machine, not a missing install, so the two answers differ.
+    facts.append("The latch command is how you reach your owner's machines -- their files, programs, "
+                 "Google accounts and browser: `latch status` lists them, and your latch skill says how. "
+                 "Reach for it yourself instead of asking which route to take. If latch answers `no_host`, "
+                 f"tell your owner once to install latch on their Mac with `{LATCH_INSTALL}`. If a host is "
+                 "offline, ask them to start latch there only after it fails on two turns a few minutes apart.")
     facts.append(f"Your owner manages you at {DASHBOARD_URL}: credits and usage, Plow lines, full trust for group chats, "
-                 "delight invites, the daily payment limit, verbose output, and the Latch connection. "
+                 "delight invites, the daily payment limit, and verbose output. "
                  "When something fails for a reason the dashboard fixes, name the card and let them do it; "
                  "never ask them to send you a credential.")
     return " ".join(facts)
@@ -4647,8 +4651,8 @@ PLOW_SEND_MESSAGE_SCHEMA = {
     "name": "plow_send_message",
     "description": (
         "Send a message, or list your chats. `to` chooses the route. To reach a "
-        "PERSON, resolve their name to a handle first (Latch's `contacts` skill "
-        "for your owner's macOS Contacts, or plow_contacts for Plow's own book) "
+        "PERSON, resolve their name to a handle first (`latch contacts` for "
+        "your owner's address book on their Mac, or plow_contacts for Plow's own book) "
         "and pass the handle -- or an array of handles for a group. That opens "
         "an owner-inclusive group: your owner is always seated, so they see "
         "every outbound message; a person is never a bare 1:1. When the owner "
@@ -5186,9 +5190,9 @@ PLOW_CONTACTS_SCHEMA = {
     "description": (
         "Resolve a name to a handle in Plow's own contact book: everyone your "
         "owner has named, keyed by handle, with each person's relationship to "
-        "them -- your owner's own row first. This is NOT your owner's macOS "
-        "Contacts; for those, list your skills and use Latch's `contacts` "
-        "skill rather than answering that you cannot see their contacts. Also "
+        "them -- your owner's own row first. This is NOT your owner's address "
+        "book on their Mac; for that, use `latch contacts` rather than "
+        "answering that you cannot see their contacts. Also "
         "call it when you have no roster to read: a scheduled or cron turn "
         "carries no chat, so this is where your owner's own name comes from. "
         "Refused on a turn without the owner's authority."
