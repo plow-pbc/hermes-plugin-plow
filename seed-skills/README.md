@@ -18,7 +18,7 @@ that describe it together, so a skill can never name a tool the plugin at that
 commit does not register.
 
 `tests/test_seed_skills.py` holds every `plow_*` tool a skill names to the set
-this plugin registers, excepting the Latch relay MCP server's own tools by
-name. `plow-pbc/agent-mgr` (deprecated) still pins these paths by SHA in its
+this plugin registers. The skills reach the owner's machines with the `latch`
+command and defer its grammar to the latch skill. `plow-pbc/agent-mgr` (deprecated) still pins these paths by SHA in its
 `runtime/stack.json`. The former source under `plow-pbc/plow`
 `cloud-agents/hermes/` no longer exists.

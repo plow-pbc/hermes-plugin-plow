@@ -19,6 +19,7 @@ import os
 import pathlib
 import re
 import struct
+import subprocess
 import sys
 import threading
 import time
@@ -1757,7 +1758,7 @@ async def test_every_turn_prompt_opens_with_who_this_agent_is(
 
 # The dashboard cards the prefix names, in the order it names them.
 _CARDS = ("credits and usage", "Plow lines", "full trust for group chats", "delight invites",
-          "the daily payment limit", "verbose output", "the Latch connection")
+          "the daily payment limit", "verbose output")
 
 
 def _assert_in_order(text: str, *fragments: str) -> None:
@@ -1815,8 +1816,8 @@ def test_the_identity_prefix_says_these_things_in_this_order(
     assert prefix.startswith(opening)
     _assert_in_order(prefix, opening, *filter(None, (offer,)), "call plow_offer_invite",
                      *filter(None, (roster, roster and "read from the Mac")),
-                     "Reach for it yourself", "has to be awake with Latch running",
-                     module.LATCH_URL, module.DASHBOARD_URL, *_CARDS, "PROMPT")
+                     "The latch command is how you reach", "Reach for it yourself",
+                     module.LATCH_INSTALL, "start latch there", module.DASHBOARD_URL, *_CARDS, "PROMPT")
     assert (_ROSTER in prefix) == (roster is not None)
     assert "+16505550199" not in prefix, "an unnamed line is not a persona"
 
@@ -7812,42 +7813,40 @@ _CHUNKS_PATH = "~/Plow/wiki/.wiki/chunks.json"
 
 @pytest.fixture
 def mac_wiki(monkeypatch: pytest.MonkeyPatch, embed_server: Any) -> Iterator[dict[str, str]]:
-    """The owner's ~/Plow/wiki behind a fake Mac relay: plow_read_file / plow_write_file over this dict."""
+    """The owner's ~/Plow/wiki on a machine latch reaches: `latch file get` / `latch file put` over
+    this dict, each run acting for the owner's home chat."""
     files = {_CHUNKS_PATH: json.dumps(_WIKI_CHUNKS)}
+    # The folders the owner's machine has; like `latch file put`, a write into any other fails.
+    folders = {"~/Plow", "~/Plow/wiki", "~/Plow/wiki/.wiki"}
 
-    class _Mac(http.server.BaseHTTPRequestHandler):
-        def do_POST(self) -> None:
-            params = json.loads(self.rfile.read(int(self.headers["Content-Length"])))["params"]
-            path = params["arguments"]["path"]
-            if params["name"] == "plow_write_file":
-                files[path] = params["arguments"]["content"]
-            if path in files:
-                payload = {"status": "completed", "path": path, "content": files[path]}
-                result = {"content": [{"type": "text", "text": json.dumps(payload)}]}
-            else:
-                result = {"isError": True, "content": [{"type": "text", "text": json.dumps({"diagnosis": {"cause": "not_found"}})}]}
-            out = json.dumps({"jsonrpc": "2.0", "id": 1, "result": result}).encode()
-            self.send_response(200)
-            self.send_header("Content-Length", str(len(out)))
-            self.end_headers()
-            self.wfile.write(out)
+    def latch(argv: list[str], *, env: dict[str, str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        assert argv[:2] == ["latch", "file"] and env["LATCH_PLOW_CHAT"] == env["PLOW_HOME_CHANNEL"]
+        verb, source, dest = argv[2:]
+        if verb == "put" and dest.rsplit("/", 1)[0] in folders:
+            files[dest] = pathlib.Path(source).read_text()
+        elif verb == "get" and source in files:
+            pathlib.Path(dest).write_text(files[source])
+        else:
+            error = {"error": {"code": "not_found", "exit": 1, "message": "no such file or folder"}}
+            return subprocess.CompletedProcess(argv, 1, "", json.dumps(error))
+        return subprocess.CompletedProcess(argv, 0, "", "")
 
-        def log_message(self, *_a: Any) -> None: ...
-
-    with _serve(_Mac) as base:
-        monkeypatch.setenv("PLOW_MCP_URL", f"{base}/mcp")
-        monkeypatch.setenv("PLOW_AGENT_TOKEN", "t")
-        monkeypatch.setenv("PLOW_WIKI_EMBED_URL", embed_server.url)
-        yield files
+    monkeypatch.setattr(subprocess, "run", latch)
+    monkeypatch.delenv("LATCH_PLOW_CHAT", raising=False)
+    monkeypatch.setenv("PLOW_WIKI_EMBED_URL", embed_server.url)
+    yield files
 
 
 def test_wiki_refresh_embeds_only_the_chunks_it_has_no_vector_for(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, embed_server: Any, mac_wiki: dict[str, str]
 ) -> None:
     module = _load(monkeypatch, tmp_path)
-    stored = "~/Plow/wiki.recall/embeddings.json"  # beside the wiki, not in it: wiki snapshot never carries it
+    # Beside the wiki, not in it, so wiki snapshot never carries it; and in ~/Plow, which a machine
+    # with a wiki always has: no recall folder of its own, which `latch file put` could not make.
+    stored = "~/Plow/wiki.recall.json"
 
     module._refresh_wiki()
+    assert module._wiki["corpus"] is not None, "a wiki with no recall folder still becomes recallable"
     assert embed_server.inputs == ["title: Jane Doe | text: Prefers 30-minute video calls before noon Eastern.",
                                    "title: Bob Li | text: Allergic to shellfish."]
     first = mac_wiki[stored]
@@ -7873,7 +7872,7 @@ def test_wiki_refresh_embeds_only_the_chunks_it_has_no_vector_for(
     assert [c["text"] for c in module._wiki["corpus"]["chunks"]] == [
         "Prefers 30-minute video calls before noon Eastern.", "Allergic to peanuts."]
 
-    # A torn write (the relay's writeFile is not atomic) is a cache miss, rebuilt, never a stuck agent.
+    # A torn file is a cache miss, rebuilt, never a stuck agent.
     mac_wiki[stored] = mac_wiki[stored][:40]
     embed_server.inputs.clear()
     module._refresh_wiki()
@@ -8012,11 +8011,10 @@ def test_wiki_recall_reaches_for_the_agents_own_last_words_when_the_reply_is_thi
 
 
 @pytest.mark.parametrize(("env", "registered"), [
-    ({"PLOW_WIKI_EMBED_URL": "http://e", "PLOW_MCP_URL": "https://m"}, True),
-    ({"PLOW_WIKI_EMBED_URL": "http://e"}, False),
+    ({"PLOW_WIKI_EMBED_URL": "http://e"}, True),
     ({"PLOW_MCP_URL": "https://m"}, False),
-], ids=["relay", "no-mac", "no-embedder"])
-def test_wiki_recall_is_registered_only_with_an_embedder_and_a_wiki(
+], ids=["embedder", "no-embedder"])
+def test_wiki_recall_is_registered_only_with_an_embedder(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, env: dict[str, str], registered: bool
 ) -> None:
     for name in ("PLOW_WIKI_EMBED_URL", "PLOW_MCP_URL"):
