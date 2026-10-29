@@ -442,10 +442,11 @@ spoken about it to someone else, so `plow_offer_invite` may run on a turn the
 agent otherwise stays silent on. It only offers that person an agent of their own
 and moves nothing of the owner's, and the reply is still the sentinel unless the
 turn was the agent's. What the code
-does hold is the sentinel. `send` drops a body whose last non-empty line is the
-marker — bare, or decorated the way models emit it (`.NO_REPLY`, `*NO_REPLY*`) —
-so an answer that arrives as working-out plus `NO_REPLY` posts nothing at all;
-that pair reached a live group once. Prose that merely mentions the token, and
+does hold is the sentinel. `send` drops a body whose first or last non-empty line is
+the marker — bare, or decorated the way models emit it (`.NO_REPLY`, `*NO_REPLY*`) —
+so an answer with the marker on either end (working-out then `NO_REPLY`, or
+`NO_REPLY` then notes) posts nothing at all; the first pair reached a live group
+once. The grammar shared with OpenClaw is still the last-line one. Prose that merely mentions the token, and
 any turn whose prompt never offered it, deliver normally. The read is never
 suppressed either way: an agent blind to the room loses the thread and then
 talks past its own human.

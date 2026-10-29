@@ -433,8 +433,12 @@ def _split(listing, provider):
 # retry pressure makes the model verbalize its silence instead ("(no reply
 # needed)"), which then delivers as a real message. The sentinel gives the
 # turn non-empty content that send() drops before delivery: the marker alone,
-# or the marker closing a turn whose working-out came first.
+# or the marker opening or closing a turn (notes after it, or working-out before).
 NO_REPLY_SENTINEL = "NO_REPLY"
+
+
+def _is_marker(line):
+    return line.strip().strip(".*_ `") == NO_REPLY_SENTINEL
 
 
 def _ends_silent(body):
@@ -442,7 +446,14 @@ def _ends_silent(body):
     the same marker decorated, which gateway/response_filters.py already
     tolerates upstream. Each platform decides what to do with preceding text."""
     lines = [line for line in body.splitlines() if line.strip()]
-    return bool(lines) and lines[-1].strip().strip(".*_ `") == NO_REPLY_SENTINEL
+    return bool(lines) and _is_marker(lines[-1])
+
+
+def _is_silent(body):
+    """The plugin's send guard: the marker may also OPEN the body, with
+    private notes after it. `_ends_silent` stays the grammar shared with Plow."""
+    first = next((line for line in body.splitlines() if line.strip()), "")
+    return _ends_silent(body) or _is_marker(first)
 
 
 # Hermes' own diagnostics reach an adapter through plain send() carrying no
