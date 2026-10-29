@@ -452,8 +452,8 @@ def _ends_silent(body):
 def _is_silent(body):
     """The plugin's send guard: the marker may also OPEN the body, with
     private notes after it. `_ends_silent` stays the grammar shared with Plow."""
-    lines = [line for line in body.splitlines() if line.strip()]
-    return bool(lines) and (_is_marker(lines[0]) or _is_marker(lines[-1]))
+    first = next((line for line in body.splitlines() if line.strip()), "")
+    return _ends_silent(body) or _is_marker(first)
 
 
 # Hermes' own diagnostics reach an adapter through plain send() carrying no

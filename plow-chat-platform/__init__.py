@@ -62,10 +62,10 @@ from ._transport import (
     _auth_raise_for_status,
     _bearer,
     _ends_silent,
-    _is_silent,
     _chat_type,
     _granted_chats,
     _is_chatter,
+    _is_silent,
     _is_solo_dm,
     _line_name,
     _lines_fact,
@@ -2403,9 +2403,9 @@ class PlowChatAdapter(BasePlatformAdapter):
         # wrote around it is its working-out, not a message: Elm posted "This
         # is Daniel asking Spruce ... / NO_REPLY" into a live group
         # (2026-09-11) because an exact whole-body match let the pair through
-        # as ordinary text. A sentinel on either end drops the body. Still gated on the
-        # turn's own prompt having advertised it AND on the turn's own chat:
-        # on a solo owner DM, a cron delivery, or an explicit send to another
+        # as ordinary text. A sentinel on either end drops the body. Still
+        # gated on the turn's own prompt having advertised it AND on the
+        # turn's own chat: on a solo owner DM, a cron delivery, or an explicit send to another
         # granted chat, NO_REPLY is ordinary text and whoever asked for that
         # literal string must get it. No verbose-preference read: this is the
         # silence contract, not a diagnostic, so it never delivers.

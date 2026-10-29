@@ -6023,7 +6023,7 @@ async def test_no_reply_sentinel_is_dropped_before_delivery(
 
     result = await adapter.send("cht_a", body, metadata={"notify": True})
     assert result.success
-    assert len(http.posts) == (1 if delivered else 0)
+    assert [p["body"] for _, p in http.posts] == ([body] if delivered else [])
     assert http.gets == []
 
 
