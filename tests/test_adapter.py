@@ -2142,8 +2142,7 @@ async def _gate_turn(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, pa
     _mark_anchored(adapter, "cht_a")
     adapter._session_store = SimpleNamespace(
         get_or_create_session=lambda source, **kw: SimpleNamespace(session_id="s1"))
-    http = _ChatResourceHTTP(_Resp({"data": list(history), "has_more": False}))
-    monkeypatch.setattr(module.aiohttp, "ClientSession", lambda *a, **k: http)
+    monkeypatch.setattr(module.aiohttp, "ClientSession", lambda *a, **k: _ThreadHTTP(list(history)))
     mirrored = _stub_mirror(monkeypatch)
     if goal:
         module._goal_save("cht_a", module._goal_new("book the campsite"))
@@ -2160,6 +2159,20 @@ async def _gate_turn(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, pa
     await adapter._on_frame(frame, object())
     await _settle(adapter)
     return adapter, handled, llm, mirrored
+
+
+class _ThreadHTTP(_ChatResourceHTTP):
+    """A thread's messages, newest-first, paged older than `starting_after` as Plow pages them."""
+
+    def __init__(self, history: list[dict[str, Any]]) -> None:
+        super().__init__(_Resp({}))
+        self.history = history
+
+    def get(self, url: str, **kwargs: Any) -> _Resp:
+        uids = [m["uid"] for m in self.history]
+        after = url.partition("starting_after=")[2]
+        return _Resp({"data": self.history[uids.index(after) + 1:] if after in uids else self.history,
+                      "has_more": False})
 
 
 def _solo_member_dm() -> dict[str, Any]:
@@ -2214,7 +2227,9 @@ async def test_the_gate_reads_the_thread_as_this_line(
     own messages marked -- all as data, never instructions."""
     chat = _human_group_chat()
     chat["participants"][0]["line"]["display_name"] = name
-    history = [  # newest-first, as Plow serves it; the burst itself is in the page too
+    history = [  # newest-first, as Plow serves it: the burst and one message after it too
+        {"uid": "msg_2", "direction": "inbound", "body": "Who's picking up the keys?",
+         "sender": {"type": "member", "uid": "mem_sam_cht_a", "display_name": "Sam"}},
         {"uid": "msg_1", "direction": "inbound", "body": "Did the cleaners come today?",
          "sender": {"type": "member", "uid": "mem_daniel_cht_a", "display_name": "Daniel"}},
         {"uid": "msg_0b", "direction": "outbound", "body": "Abby, do you want me to order some?",
@@ -2230,7 +2245,7 @@ async def test_the_gate_reads_the_thread_as_this_line(
     _assert_in_order(text, "Sam: We're out of paper towels",
                      f"{who} (you): Abby, do you want me to order some?",
                      "Daniel: Did the cleaners come today?")
-    assert text.count("Did the cleaners come today?") == 1
+    assert text.count("Did the cleaners come today?") == 1 and "picking up the keys" not in text
     # Every bracket belongs to an untrusted fence: nothing said can close one.
     assert text.startswith("[Untrusted") and text.count("[") == text.count("]") == text.count("[Untrusted")
 

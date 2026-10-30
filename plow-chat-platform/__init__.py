@@ -3318,10 +3318,11 @@ class PlowChatAdapter(BasePlatformAdapter):
         _woken = True
         await self._handoff_message(event)
 
-    async def _history(self, http, chat_uid, limit, *, one_page=False):
-        """A chat's messages newest-first, a page at a time on a uid cursor,
-        until the caller stops or they run out. Catch-up takes one page."""
-        cursor = None
+    async def _history(self, http, chat_uid, limit, *, one_page=False, starting_after=None):
+        """A chat's messages newest-first (older than `starting_after`, when
+        given), a page at a time on a uid cursor, until the caller stops or
+        they run out. Catch-up takes one page."""
+        cursor = starting_after
         while True:
             url = f"{BASE}/v1/chats/{chat_uid}/messages?limit={limit}"
             if cursor:
@@ -3554,17 +3555,18 @@ class PlowChatAdapter(BasePlatformAdapter):
             for _ in burst:
                 queue.task_done()
 
-    async def _addressed(self, chat_uid, roster, sender, spoken, burst_uids):
+    async def _addressed(self, chat_uid, roster, sender, spoken, before):
         """The host model's answer to "is this message mine?", read against
-        the thread's last ten messages. Any failure runs the turn: a broken
+        the ten messages before uid `before` -- never anything said after it,
+        which could make it look addressed. Any failure runs the turn: a broken
         gate must not mute the agent, and the warning keeps it loud."""
         if _plugin_llm is None:
             return True                      # register() already warned
         who = _agent_name(roster) or "this assistant"
         try:
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as http:
-                page = [m async for m in self._history(http, chat_uid, 10, one_page=True)
-                        if m["uid"] not in burst_uids]
+                page = [m async for m in self._history(http, chat_uid, 10, one_page=True,
+                                                       starting_after=before)]
             thread = "\n".join(
                 f"{f'{who} (you)' if m['direction'] == 'outbound' else _speaker_name(m['sender'], roster)[0]}"
                 f": {m['body'] or '(attachment)'}" for m in reversed(page))
@@ -3573,8 +3575,10 @@ class PlowChatAdapter(BasePlatformAdapter):
                 instructions=_addressed_instructions(who, _head_count(roster)),
                 input=[{"type": "text", "text": f"{_untrusted('thread', thread)}\n\n"
                                                 f"{_untrusted('new message', said)}"}],
-                json_schema=_ADDRESSED_SCHEMA, schema_name="addressed", max_tokens=50,
-                purpose="plow_chat addressed gate",
+                # Room for a reasoning model to finish; a hung call fails open
+                # rather than stalling this chat's serve loop.
+                json_schema=_ADDRESSED_SCHEMA, schema_name="addressed", max_tokens=200,
+                timeout=15, purpose="plow_chat addressed gate",
             )
             return result.parsed["addressed"] is not False
         except Exception as exc:  # noqa: BLE001 - fail open, loudly
@@ -3690,7 +3694,7 @@ class PlowChatAdapter(BasePlatformAdapter):
                 and session_key not in self._active_sessions
                 and not any(m.reply_to and _from_self(m.reply_to["message"]["sender"], roster)
                             for m in burst)
-                and not await self._addressed(chat_uid, roster, sender, spoken, {m.uid for m in burst})
+                and not await self._addressed(chat_uid, roster, sender, spoken, burst[0].uid)
                 and session_key not in self._active_sessions):
             # Still read: the next turn here sees what the room said.
             await _record_sent(self, chat_uid, text, PLATFORM_NAME, role="user")
