@@ -3699,9 +3699,10 @@ class PlowChatAdapter(BasePlatformAdapter):
                 and not any(m.reply_to and _from_self(m.reply_to["message"]["sender"], roster)
                             for m in burst)
                 and not await self._addressed(chat_uid, roster, sender, spoken, burst[0].uid)
-                and session_key not in self._active_sessions):
-            # Still read: the next turn here sees what the room said.
-            await _record_sent(self, chat_uid, text, PLATFORM_NAME, role="user")
+                and session_key not in self._active_sessions
+                # Still read: the next turn here sees what the room said. A
+                # record that fails runs the turn, which records it itself.
+                and await _record_sent(self, chat_uid, text, PLATFORM_NAME, role="user")):
             log.info("[plow_chat] not addressed in %s; recorded without a turn", chat_uid)
             self._checkpoint(burst[-1].uid, chat_uid)
             return
@@ -4052,7 +4053,8 @@ async def _record_sent(adapter, chat_uid, body, platform, role="assistant"):
     Echoes of our sends do not start turns, and
     `_mirror_sent` alone cannot find a session that does not yet exist.
     Best-effort: a recording failure must not invalidate a delivered send.
-    Role "user" records a room message the addressed gate kept from a turn.
+    Role "user" records a room message the addressed gate kept from a turn,
+    which hands off instead when this returns False.
     """
     try:
         chat = await adapter.get_chat_info(chat_uid)
@@ -4061,8 +4063,8 @@ async def _record_sent(adapter, chat_uid, body, platform, role="assistant"):
             adapter._session_store.get_or_create_session, source, touch_activity=False)
     except Exception as exc:  # noqa: BLE001 - the message is already delivered
         log.warning("[%s] message not recorded for %s: %s", platform, chat_uid, exc)
-        return
-    await asyncio.to_thread(_mirror_sent, chat_uid, body, session.session_id, platform=platform, role=role)
+        return False
+    return await asyncio.to_thread(_mirror_sent, chat_uid, body, session.session_id, platform=platform, role=role)
 
 
 def _mirror_sent(chat_uid, body, session_id=None, platform=PLATFORM_NAME, role="assistant"):

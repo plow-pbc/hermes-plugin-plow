@@ -2136,7 +2136,7 @@ class _GateLlm:
 async def _gate_turn(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, parsed: Any, *,
                      chat: dict[str, Any] | None = None, body: str = "Did the cleaners come today?",
                      history: Any = (), reply_to: dict[str, Any] | None = None,
-                     goal: bool = False, busy: str = "") -> tuple[Any, list[Any], _GateLlm, list[dict[str, Any]]]:
+                     goal: bool = False, busy: str = "", recorded: bool = True) -> tuple[Any, list[Any], _GateLlm, list[dict[str, Any]]]:
     """Daniel speaks in a human group (or `chat`); the gate's model answers `parsed`."""
     module = _load(monkeypatch, tmp_path)
     module._plugin_llm = llm = _GateLlm(parsed)
@@ -2146,7 +2146,7 @@ async def _gate_turn(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, pa
     adapter._session_store = SimpleNamespace(
         get_or_create_session=lambda source, **kw: SimpleNamespace(session_id="s1"))
     monkeypatch.setattr(module.aiohttp, "ClientSession", lambda *a, **k: _ThreadHTTP(history))
-    mirrored = _stub_mirror(monkeypatch)
+    mirrored = _stub_mirror(monkeypatch, result=recorded)
     if goal:
         module._goal_save("cht_a", module._goal_new("book the campsite"))
     def start_a_turn() -> None:  # a turn running in this chat's session
@@ -2209,8 +2209,10 @@ _BEARER_REFUSAL = aiohttp.ClientResponseError(
     (RuntimeError("model down"), {}, True, True, True),
     (None, {}, True, True, True),
     ({"addressed": False}, {"history": _BEARER_REFUSAL}, True, False, True),
+    ({"addressed": False}, {"recorded": False}, True, True, False),
 ], ids=["not-addressed", "addressed", "reply-to-ours", "solo-dm", "slash-command", "goal",
-        "busy-session", "busy-during-the-call", "model-raises", "malformed", "history-refused"])
+        "busy-session", "busy-during-the-call", "model-raises", "malformed", "history-refused",
+        "record-fails"])
 async def test_a_group_message_not_for_this_agent_never_starts_a_turn(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture,
     parsed: Any, kw: dict[str, Any], handed_off: bool, asked: bool, warned: bool,
