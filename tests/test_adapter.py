@@ -33,7 +33,10 @@ from typing import Any, Iterator
 from unittest import mock
 
 import pytest
+import aiohttp
 from aiohttp import WSMsgType, web
+from multidict import CIMultiDict, CIMultiDictProxy
+import yarl
 
 PLUGIN = pathlib.Path(__file__).resolve().parents[1] / "plow-chat-platform" / "__init__.py"
 
@@ -2132,7 +2135,7 @@ class _GateLlm:
 
 async def _gate_turn(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, parsed: Any, *,
                      chat: dict[str, Any] | None = None, body: str = "Did the cleaners come today?",
-                     history: list[dict[str, Any]] = (), reply_to: dict[str, Any] | None = None,
+                     history: Any = (), reply_to: dict[str, Any] | None = None,
                      goal: bool = False, busy: str = "") -> tuple[Any, list[Any], _GateLlm, list[dict[str, Any]]]:
     """Daniel speaks in a human group (or `chat`); the gate's model answers `parsed`."""
     module = _load(monkeypatch, tmp_path)
@@ -2142,7 +2145,7 @@ async def _gate_turn(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, pa
     _mark_anchored(adapter, "cht_a")
     adapter._session_store = SimpleNamespace(
         get_or_create_session=lambda source, **kw: SimpleNamespace(session_id="s1"))
-    monkeypatch.setattr(module.aiohttp, "ClientSession", lambda *a, **k: _ThreadHTTP(list(history)))
+    monkeypatch.setattr(module.aiohttp, "ClientSession", lambda *a, **k: _ThreadHTTP(history))
     mirrored = _stub_mirror(monkeypatch)
     if goal:
         module._goal_save("cht_a", module._goal_new("book the campsite"))
@@ -2164,11 +2167,13 @@ async def _gate_turn(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, pa
 class _ThreadHTTP(_ChatResourceHTTP):
     """A thread's messages, newest-first, paged older than `starting_after` as Plow pages them."""
 
-    def __init__(self, history: list[dict[str, Any]]) -> None:
+    def __init__(self, history: Any) -> None:
         super().__init__(_Resp({}))
         self.history = history
 
     def get(self, url: str, **kwargs: Any) -> _Resp:
+        if isinstance(self.history, Exception):
+            raise self.history
         uids = [m["uid"] for m in self.history]
         after = url.partition("starting_after=")[2]
         return _Resp({"data": self.history[uids.index(after) + 1:] if after in uids else self.history,
@@ -2186,22 +2191,29 @@ _OUR_MESSAGE = {"part_index": None, "message": {
     "body": "Abby, do you want me to order some?", "attachments": []}}
 
 
-@pytest.mark.parametrize("parsed, kw, handed_off, asked", [
-    ({"addressed": False}, {}, False, True),
-    ({"addressed": True}, {}, True, True),
-    ({"addressed": False}, {"reply_to": _OUR_MESSAGE}, True, False),
-    ({"addressed": False}, {"chat": _solo_member_dm()}, True, False),
-    ({"addressed": False}, {"body": "/restart"}, True, False),
-    ({"addressed": False}, {"goal": True}, True, False),
-    ({"addressed": False}, {"busy": "before"}, True, False),
-    ({"addressed": False}, {"busy": "during"}, True, True),
-    (RuntimeError("model down"), {}, True, True),
-    (None, {}, True, True),
+_BEARER_REFUSAL = aiohttp.ClientResponseError(
+    aiohttp.RequestInfo(yarl.URL("https://plow.test/v1"), "GET",
+                        CIMultiDictProxy(CIMultiDict(Authorization="Bearer plow_tok")), yarl.URL("https://plow.test/v1")),
+    (), status=503)
+
+
+@pytest.mark.parametrize("parsed, kw, handed_off, asked, warned", [
+    ({"addressed": False}, {}, False, True, False),
+    ({"addressed": True}, {}, True, True, False),
+    ({"addressed": False}, {"reply_to": _OUR_MESSAGE}, True, False, False),
+    ({"addressed": False}, {"chat": _solo_member_dm()}, True, False, False),
+    ({"addressed": False}, {"body": "/restart"}, True, False, False),
+    ({"addressed": False}, {"goal": True}, True, False, False),
+    ({"addressed": False}, {"busy": "before"}, True, False, False),
+    ({"addressed": False}, {"busy": "during"}, True, True, False),
+    (RuntimeError("model down"), {}, True, True, True),
+    (None, {}, True, True, True),
+    ({"addressed": False}, {"history": _BEARER_REFUSAL}, True, False, True),
 ], ids=["not-addressed", "addressed", "reply-to-ours", "solo-dm", "slash-command", "goal",
-        "busy-session", "busy-during-the-call", "model-raises", "malformed"])
+        "busy-session", "busy-during-the-call", "model-raises", "malformed", "history-refused"])
 async def test_a_group_message_not_for_this_agent_never_starts_a_turn(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture,
-    parsed: Any, kw: dict[str, Any], handed_off: bool, asked: bool,
+    parsed: Any, kw: dict[str, Any], handed_off: bool, asked: bool, warned: bool,
 ) -> None:
     """The model decides "is this mine?" before any tools can pull it into
     answering. A turn that is structurally ours skips the call; a gate that
@@ -2210,7 +2222,8 @@ async def test_a_group_message_not_for_this_agent_never_starts_a_turn(
         adapter, handled, llm, mirrored = await _gate_turn(monkeypatch, tmp_path, parsed, **kw)
     assert bool(handled) is handed_off
     assert bool(llm.calls) is asked
-    assert ("addressed gate failed" in caplog.text) is (not isinstance(parsed, dict))
+    assert ("addressed gate failed" in caplog.text) is warned
+    assert "Bearer" not in caplog.text, "a failure's repr carries the request's headers"
     if not handed_off:
         # Still read: the room's words land in the chat's session for the next turn.
         [record] = mirrored

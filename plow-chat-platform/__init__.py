@@ -3582,7 +3582,11 @@ class PlowChatAdapter(BasePlatformAdapter):
             )
             return result.parsed["addressed"] is not False
         except Exception as exc:  # noqa: BLE001 - fail open, loudly
-            log.warning("[plow_chat] addressed gate failed for %s; running the turn: %r", chat_uid, exc)
+            # Name and status only: a ClientResponseError's repr carries the
+            # request's headers, bearer token included.
+            status = f" {exc.status}" if isinstance(exc, aiohttp.ClientResponseError) else ""
+            log.warning("[plow_chat] addressed gate failed for %s; running the turn: %s%s",
+                        chat_uid, type(exc).__name__, status)
             return True
 
     async def _deliver(self, burst, resolved, chat_uid):
