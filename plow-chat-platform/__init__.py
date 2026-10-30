@@ -287,6 +287,11 @@ def _chat_summary(chat):
     return summary
 
 
+def _head_count(chat):
+    """The people in a thread: its human members, not the agents."""
+    return sum(p.get("type") == "member" for p in chat["participants"])
+
+
 def _collaboration_prompt(prompt, chat, identity, speak_rule=True):
     """System-authority context contains ops-seeded agent names only.
 
@@ -304,8 +309,7 @@ def _collaboration_prompt(prompt, chat, identity, speak_rule=True):
         # group-shaped prompts.
         # A wake or setup turn has no speaker to be addressed by, and its own
         # text is the errand.
-        rule = (_group_speak_rule(sum(p.get("type") == "member" for p in chat["participants"]))
-                if speak_rule else "")
+        rule = _group_speak_rule(_head_count(chat)) if speak_rule else ""
         prompt = (f"{_VOICE_RULE}{_RELATIONSHIP_FACT} {_NAME_FACT} "
                   f"{rule}{prompt}")
     participants = chat.get("participants") or []
@@ -808,13 +812,18 @@ def _reply_parts(reply):
     return attachments, "media (unresolved)" if attachments else None
 
 
+def _from_self(sender, chat):
+    """Whether a message came from this agent: by line uid, not by name. A
+    reply to our own message is a fact the frame already carries, and the
+    model should not have to infer it."""
+    ours = _self_agent_line(chat).get("uid")
+    return bool(ours) and ((sender or {}).get("line") or {}).get("uid") == ours
+
+
 def _quoted_reply_context(reply, chat):
     """Quote frame data without letting its text or labels close the fence."""
     parent = reply["message"]
-    # Ours by line uid, not by name: a reply to this agent's own message is a
-    # fact the frame already carries, and the model should not have to infer it.
-    ours = _self_agent_line(chat).get("uid")
-    if ours and ((parent["sender"] or {}).get("line") or {}).get("uid") == ours:
+    if _from_self(parent["sender"], chat):
         name = "you (this agent)"
     else:
         name = _speaker_name(parent["sender"], chat)[0]
