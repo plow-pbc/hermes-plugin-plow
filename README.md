@@ -426,22 +426,24 @@ an instruction to Elm without parsing names or inventing a second router.
 
 Peer-agent messages are real inbound turns and remain visible in the same group
 as every human message. Only this line's own outbound echo is ignored. Whether a
-message in a shared room is this agent's to answer is the **model's** judgement,
-made from the speak rule its channel prompt carries — its name, a follow-up to
-what it was just asked or just said, a reply to a message of its own, or an
-active goal — and answered with the sentinel when the answer is no. The adapter
-holds no name match and no addressed-ness check of its own: a substring match
-read "we paid cash" as an agent called Ash, and no check could read a follow-up
-one line after the agent was named (owner ruling, 2026-09-11). The rule also tells it to settle that question before
-calling any tool, so someone else's errand never moves the owner's mail,
-calendar or Mac — an instruction with **no enforcement behind it**: suppression
-lands in `send`, which runs after a tool already has. One call is carved out of
-that: praise of this agent from a person who is not its owner, or an ask for an
-agent of their own, is an invite opening whether it is addressed to the agent or
-spoken about it to someone else, so `plow_offer_invite` may run on a turn the
-agent otherwise stays silent on. It only offers that person an agent of their own
-and moves nothing of the owner's, and the reply is still the sentinel unless the
-turn was the agent's. What the code
+message in a shared room is this agent's to answer — it uses the agent's name,
+or answers something the agent said — is the **model's** judgement, never a
+name match: a substring match read "we paid cash" as an agent called Ash, and no
+match could read a follow-up one line after the agent was named (owner ruling,
+2026-09-11). That judgement is made **before the turn**, by one tool-free call
+to the host model (`ctx.llm`) carrying the line's name, the room's head-count
+and the ten messages before this one as untrusted data, so someone else's
+errand never reaches a tool that could move the owner's mail, calendar or Mac.
+It is skipped where the message is already the agent's or the session cannot
+take a side write: a DM, a slash command, an active goal, a reply to one of the
+agent's own messages, and a chat whose session is mid-turn. A "no" records the
+message in the chat's session as a user turn, acks it and starts nothing, so
+the next turn still reads the room. Any failure — the model, the history read,
+the record — runs the turn as before and logs a warning. Praise of this agent,
+or an ask for an agent like it, counts as addressed, so `plow_offer_invite`
+still gets its turn; the speak rule in the channel prompt then decides the
+reply, and is still answered with the sentinel when the turn is not the
+agent's. What the code
 does hold is the sentinel. `send` drops a body whose first or last non-empty line is
 the marker — bare, or decorated the way models emit it (`.NO_REPLY`, `*NO_REPLY*`) —
 so an answer with the marker on either end (working-out then `NO_REPLY`, or
