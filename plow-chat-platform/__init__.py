@@ -3667,18 +3667,6 @@ class PlowChatAdapter(BasePlatformAdapter):
         if _goal_active(goal):
             text = f"{_goal_turn_line(goal)}\n\n{text}"
         channel_prompt = _channel_prompt(chat, role, roster, self._identity, authority)
-        # A shared room's message that may go unanswered is asked "is this
-        # yours?" before the turn: a reply to us or an active goal already is.
-        if (not _is_solo_dm(roster) and NO_REPLY_SENTINEL in channel_prompt
-                and not burst[0].starts_slash_command and not _goal_active(goal)
-                and not any(m.reply_to and _from_self(m.reply_to["message"]["sender"], roster)
-                            for m in burst)
-                and not await self._addressed(chat_uid, roster, sender, spoken, {m.uid for m in burst})):
-            # Still read: the next turn here sees what the room said.
-            await _record_sent(self, chat_uid, text, PLATFORM_NAME, role="user")
-            log.info("[plow_chat] not addressed in %s; recorded without a turn", chat_uid)
-            self._checkpoint(burst[-1].uid, chat_uid)
-            return
         event = MessageEvent(
             text=text,
             source=self.build_source(chat_id=chat_uid, chat_name=chat["name"], chat_type=chat["type"],
@@ -3691,6 +3679,21 @@ class PlowChatAdapter(BasePlatformAdapter):
             message_type=_message_type(media_types),
             channel_prompt=channel_prompt,
         )
+        # A shared room's message that may go unanswered is asked "is this
+        # yours?" before the turn: a reply to us or an active goal already is.
+        # Not while this chat's session is busy: Hermes queues that message,
+        # and a row written mid-run could land between a tool call and its result.
+        if (not _is_solo_dm(roster) and NO_REPLY_SENTINEL in channel_prompt
+                and not burst[0].starts_slash_command and not _goal_active(goal)
+                and self._event_session_key(event) not in self._active_sessions
+                and not any(m.reply_to and _from_self(m.reply_to["message"]["sender"], roster)
+                            for m in burst)
+                and not await self._addressed(chat_uid, roster, sender, spoken, {m.uid for m in burst})):
+            # Still read: the next turn here sees what the room said.
+            await _record_sent(self, chat_uid, text, PLATFORM_NAME, role="user")
+            log.info("[plow_chat] not addressed in %s; recorded without a turn", chat_uid)
+            self._checkpoint(burst[-1].uid, chat_uid)
+            return
         event.invite_operation_message_id = burst[0].uid
         # Recall queries the speaker's own words, not the rendered prompt. The
         # roster paragraph is stripped by marker, but a goal line is a second
