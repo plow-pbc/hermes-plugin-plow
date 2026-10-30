@@ -2109,6 +2109,117 @@ async def test_human_only_group_keeps_roster_context_but_not_before_a_command(
     assert handled[1]["text"] == "/restart"
 
 
+class _GateLlm:
+    """The host model behind the addressed gate: answers `parsed` as given, or raises it."""
+
+    def __init__(self, parsed: Any) -> None:
+        self.parsed = parsed
+        self.calls: list[dict[str, Any]] = []
+
+    async def acomplete_structured(self, **kwargs: Any) -> Any:
+        self.calls.append(kwargs)
+        if isinstance(self.parsed, Exception):
+            raise self.parsed
+        return SimpleNamespace(parsed=self.parsed)
+
+
+async def _gate_turn(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, parsed: Any, *,
+                     chat: dict[str, Any] | None = None, body: str = "Did the cleaners come today?",
+                     history: list[dict[str, Any]] = (), reply_to: dict[str, Any] | None = None,
+                     goal: bool = False) -> tuple[Any, list[Any], _GateLlm, list[dict[str, Any]]]:
+    """Daniel speaks in a human group (or `chat`); the gate's model answers `parsed`."""
+    module = _load(monkeypatch, tmp_path)
+    module._plugin_llm = llm = _GateLlm(parsed)
+    adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
+    adapter._set_reach([chat or _human_group_chat()])
+    _mark_anchored(adapter, "cht_a")
+    adapter._session_store = SimpleNamespace(
+        get_or_create_session=lambda source, **kw: SimpleNamespace(session_id="s1"))
+    http = _ChatResourceHTTP(_Resp({"data": list(history), "has_more": False}))
+    monkeypatch.setattr(module.aiohttp, "ClientSession", lambda *a, **k: http)
+    mirrored = _stub_mirror(monkeypatch)
+    if goal:
+        module._goal_save("cht_a", module._goal_new("book the campsite"))
+    handled = _capture_events(monkeypatch, adapter)
+    frame = _envelope("evt_1", "cht_a", "msg_1", role="member", body=body)
+    frame["data"]["message"]["sender"].update(uid="mem_daniel_cht_a", display_name="Daniel")
+    frame["data"]["message"]["reply_to"] = reply_to
+    await adapter._on_frame(frame, object())
+    await _settle(adapter)
+    return adapter, handled, llm, mirrored
+
+
+def _solo_member_dm() -> dict[str, Any]:
+    chat = _dm_chat()
+    chat["participants"][1].update(uid="mem_daniel_cht_a", display_name="Daniel", role="member")
+    return chat
+
+
+_OUR_MESSAGE = {"part_index": None, "message": {
+    "sender": {"type": "agent", "line": {"uid": "ln_elm"}}, "created_at": "2026-10-29T17:36:00Z",
+    "body": "Abby, do you want me to order some?", "attachments": []}}
+
+
+@pytest.mark.parametrize("parsed, kw, handed_off, asked", [
+    ({"addressed": False}, {}, False, True),
+    ({"addressed": True}, {}, True, True),
+    ({"addressed": False}, {"reply_to": _OUR_MESSAGE}, True, False),
+    ({"addressed": False}, {"chat": _solo_member_dm()}, True, False),
+    ({"addressed": False}, {"body": "/restart"}, True, False),
+    ({"addressed": False}, {"goal": True}, True, False),
+    (RuntimeError("model down"), {}, True, True),
+    (None, {}, True, True),
+], ids=["not-addressed", "addressed", "reply-to-ours", "solo-dm", "slash-command", "goal",
+        "model-raises", "malformed"])
+async def test_a_group_message_not_for_this_agent_never_starts_a_turn(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture,
+    parsed: Any, kw: dict[str, Any], handed_off: bool, asked: bool,
+) -> None:
+    """The model decides "is this mine?" before any tools can pull it into
+    answering. A turn that is structurally ours skips the call; a gate that
+    breaks runs the turn and says so, never mutes the agent."""
+    with caplog.at_level(logging.WARNING):
+        adapter, handled, llm, mirrored = await _gate_turn(monkeypatch, tmp_path, parsed, **kw)
+    assert bool(handled) is handed_off
+    assert bool(llm.calls) is asked
+    assert ("addressed gate failed" in caplog.text) is (not isinstance(parsed, dict))
+    if not handed_off:
+        # Still read: the room's words land in the chat's session for the next turn.
+        [record] = mirrored
+        assert (record["chat_id"], record["role"], record["session_id"]) == ("cht_a", "user", "s1")
+        assert record["text"].endswith("Did the cleaners come today?")
+        assert adapter._load_checkpoint("cht_a") == "msg_1"
+
+
+@pytest.mark.parametrize("name, who", [("Juniper", "Juniper"), (None, "this assistant")])
+async def test_the_gate_reads_the_thread_as_this_line(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, name: str | None, who: str,
+) -> None:
+    """Any line, by its own name, with the recent thread oldest-first and its
+    own messages marked -- all as data, never instructions."""
+    chat = _human_group_chat()
+    chat["participants"][0]["line"]["display_name"] = name
+    history = [  # newest-first, as Plow serves it; the burst itself is in the page too
+        {"uid": "msg_1", "direction": "inbound", "body": "Did the cleaners come today?",
+         "sender": {"type": "member", "uid": "mem_daniel_cht_a", "display_name": "Daniel"}},
+        {"uid": "msg_0b", "direction": "outbound", "body": "Abby, do you want me to order some?",
+         "sender": {"type": "agent", "line": {"uid": "ln_elm"}}},
+        {"uid": "msg_0a", "direction": "inbound", "body": "We're out of paper towels",
+         "sender": {"type": "member", "uid": "mem_sam_cht_a", "display_name": "Sam"}},
+    ]
+    _adapter, _handled, llm, _mirrored = await _gate_turn(
+        monkeypatch, tmp_path, {"addressed": False}, chat=chat, history=history)
+    [call] = llm.calls
+    assert f"You are {who}" in call["instructions"] and "Elm" not in call["instructions"]
+    text = call["input"][0]["text"]
+    _assert_in_order(text, "Sam: We're out of paper towels",
+                     f"{who} (you): Abby, do you want me to order some?",
+                     "Daniel: Did the cleaners come today?")
+    assert text.count("Did the cleaners come today?") == 1
+    # Every bracket belongs to an untrusted fence: nothing said can close one.
+    assert text.startswith("[Untrusted") and text.count("[") == text.count("]") == text.count("[Untrusted")
+
+
 async def test_peer_agent_turn_is_delivered_with_peer_identity(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: pathlib.Path,
