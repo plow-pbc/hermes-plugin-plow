@@ -33,7 +33,10 @@ from typing import Any, Iterator
 from unittest import mock
 
 import pytest
+import aiohttp
 from aiohttp import WSMsgType, web
+from multidict import CIMultiDict, CIMultiDictProxy
+import yarl
 
 PLUGIN = pathlib.Path(__file__).resolve().parents[1] / "plow-chat-platform" / "__init__.py"
 
@@ -123,9 +126,14 @@ def _load(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, *, deferred_q
             self.platform = platform
             # base.py:1901 -- chats whose indicator `_keep_typing` must skip.
             self._typing_paused: set[str] = set()
+            # base.py:1831 -- session key -> interrupt event while a turn runs.
+            self._active_sessions: dict[str, Any] = {}
 
         def build_source(self, **kw: Any) -> Any:
             return _AttrDict(platform=self.platform, **kw)
+
+        def _event_session_key(self, event: Any) -> str:
+            return session.build_session_key(event.source)
 
         async def handle_message(self, event: Any) -> None: ...
 
@@ -2107,6 +2115,154 @@ async def test_human_only_group_keeps_roster_context_but_not_before_a_command(
     await _settle(adapter)
 
     assert handled[1]["text"] == "/restart"
+
+
+class _GateLlm:
+    """The host model behind the addressed gate: answers `parsed` as given, or raises it."""
+
+    def __init__(self, parsed: Any) -> None:
+        self.parsed = parsed
+        self.calls: list[dict[str, Any]] = []
+        self.during = lambda: None
+
+    async def acomplete_structured(self, **kwargs: Any) -> Any:
+        self.calls.append(kwargs)
+        self.during()
+        if isinstance(self.parsed, Exception):
+            raise self.parsed
+        return SimpleNamespace(parsed=self.parsed)
+
+
+async def _gate_turn(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, parsed: Any, *,
+                     chat: dict[str, Any] | None = None, body: str = "Did the cleaners come today?",
+                     history: Any = (), reply_to: dict[str, Any] | None = None,
+                     goal: bool = False, busy: str = "", recorded: bool = True) -> tuple[Any, list[Any], _GateLlm, list[dict[str, Any]]]:
+    """Daniel speaks in a human group (or `chat`); the gate's model answers `parsed`."""
+    module = _load(monkeypatch, tmp_path)
+    module._plugin_llm = llm = _GateLlm(parsed)
+    adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
+    adapter._set_reach([chat or _human_group_chat()])
+    _mark_anchored(adapter, "cht_a")
+    adapter._session_store = SimpleNamespace(
+        get_or_create_session=lambda source, **kw: SimpleNamespace(session_id="s1"))
+    monkeypatch.setattr(module.aiohttp, "ClientSession", lambda *a, **k: _ThreadHTTP(history))
+    mirrored = _stub_mirror(monkeypatch, result=recorded)
+    if goal:
+        module._goal_save("cht_a", module._goal_new("book the campsite"))
+    def start_a_turn() -> None:  # a turn running in this chat's session
+        adapter._active_sessions[f"agent:main:{module.PLATFORM_NAME}:dm:cht_a"] = asyncio.Event()
+    if busy == "before":
+        start_a_turn()
+    elif busy == "during":
+        llm.during = start_a_turn
+    handled = _capture_events(monkeypatch, adapter)
+    frame = _envelope("evt_1", "cht_a", "msg_1", role="member", body=body)
+    frame["data"]["message"]["sender"].update(uid="mem_daniel_cht_a", display_name="Daniel")
+    frame["data"]["message"]["reply_to"] = reply_to
+    await adapter._on_frame(frame, object())
+    await _settle(adapter)
+    return adapter, handled, llm, mirrored
+
+
+class _ThreadHTTP(_ChatResourceHTTP):
+    """A thread's messages, newest-first, paged older than `starting_after` as Plow pages them."""
+
+    def __init__(self, history: Any) -> None:
+        super().__init__(_Resp({}))
+        self.history = history
+
+    def get(self, url: str, **kwargs: Any) -> _Resp:
+        if isinstance(self.history, Exception):
+            raise self.history
+        uids = [m["uid"] for m in self.history]
+        after = url.partition("starting_after=")[2]
+        return _Resp({"data": self.history[uids.index(after) + 1:] if after in uids else self.history,
+                      "has_more": False})
+
+
+def _solo_member_dm() -> dict[str, Any]:
+    chat = _dm_chat()
+    chat["participants"][1].update(uid="mem_daniel_cht_a", display_name="Daniel", role="member")
+    return chat
+
+
+_OUR_MESSAGE = {"part_index": None, "message": {
+    "sender": {"type": "agent", "line": {"uid": "ln_elm"}}, "created_at": "2026-10-29T17:36:00Z",
+    "body": "Abby, do you want me to order some?", "attachments": []}}
+
+
+_BEARER_REFUSAL = aiohttp.ClientResponseError(
+    aiohttp.RequestInfo(yarl.URL("https://plow.test/v1"), "GET",
+                        CIMultiDictProxy(CIMultiDict(Authorization="Bearer plow_tok")), yarl.URL("https://plow.test/v1")),
+    (), status=503)
+
+
+@pytest.mark.parametrize("parsed, kw, handed_off, asked, warned", [
+    ({"addressed": False}, {}, False, True, False),
+    ({"addressed": True}, {}, True, True, False),
+    ({"addressed": False}, {"reply_to": _OUR_MESSAGE}, True, False, False),
+    ({"addressed": False}, {"chat": _solo_member_dm()}, True, False, False),
+    ({"addressed": False}, {"body": "/restart"}, True, False, False),
+    ({"addressed": False}, {"goal": True}, True, False, False),
+    ({"addressed": False}, {"busy": "before"}, True, False, False),
+    ({"addressed": False}, {"busy": "during"}, True, True, False),
+    (RuntimeError("model down"), {}, True, True, True),
+    (None, {}, True, True, True),
+    ({"addressed": False}, {"history": _BEARER_REFUSAL}, True, False, True),
+    ({"addressed": False}, {"recorded": False}, True, True, False),
+], ids=["not-addressed", "addressed", "reply-to-ours", "solo-dm", "slash-command", "goal",
+        "busy-session", "busy-during-the-call", "model-raises", "malformed", "history-refused",
+        "record-fails"])
+async def test_a_group_message_not_for_this_agent_never_starts_a_turn(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture,
+    parsed: Any, kw: dict[str, Any], handed_off: bool, asked: bool, warned: bool,
+) -> None:
+    """The model decides "is this mine?" before any tools can pull it into
+    answering. A turn that is structurally ours skips the call; a gate that
+    breaks runs the turn and says so, never mutes the agent."""
+    with caplog.at_level(logging.WARNING):
+        adapter, handled, llm, mirrored = await _gate_turn(monkeypatch, tmp_path, parsed, **kw)
+    assert bool(handled) is handed_off
+    assert bool(llm.calls) is asked
+    assert ("addressed gate failed" in caplog.text) is warned
+    assert "Bearer" not in caplog.text, "a failure's repr carries the request's headers"
+    if not handed_off:
+        # Still read: the room's words land in the chat's session for the next turn.
+        [record] = mirrored
+        assert (record["chat_id"], record["role"], record["session_id"]) == ("cht_a", "user", "s1")
+        assert record["text"].endswith("Did the cleaners come today?")
+        assert adapter._load_checkpoint("cht_a") == "msg_1"
+
+
+@pytest.mark.parametrize("name, who", [("Juniper", "Juniper"), (None, "this assistant")])
+async def test_the_gate_reads_the_thread_as_this_line(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, name: str | None, who: str,
+) -> None:
+    """Any line, by its own name, with the recent thread oldest-first and its
+    own messages marked -- all as data, never instructions."""
+    chat = _human_group_chat()
+    chat["participants"][0]["line"]["display_name"] = name
+    history = [  # newest-first, as Plow serves it: the burst and one message after it too
+        {"uid": "msg_2", "direction": "inbound", "body": "Who's picking up the keys?",
+         "sender": {"type": "member", "uid": "mem_sam_cht_a", "display_name": "Sam"}},
+        {"uid": "msg_1", "direction": "inbound", "body": "Did the cleaners come today?",
+         "sender": {"type": "member", "uid": "mem_daniel_cht_a", "display_name": "Daniel"}},
+        {"uid": "msg_0b", "direction": "outbound", "body": "Abby, do you want me to order some?",
+         "sender": {"type": "agent", "line": {"uid": "ln_elm"}}},
+        {"uid": "msg_0a", "direction": "inbound", "body": "We're out of paper towels",
+         "sender": {"type": "member", "uid": "mem_sam_cht_a", "display_name": "Sam"}},
+    ]
+    _adapter, _handled, llm, _mirrored = await _gate_turn(
+        monkeypatch, tmp_path, {"addressed": False}, chat=chat, history=history)
+    [call] = llm.calls
+    assert f"You are {who}" in call["instructions"] and "Elm" not in call["instructions"]
+    text = call["input"][0]["text"]
+    _assert_in_order(text, "Sam: We're out of paper towels",
+                     f"{who} (you): Abby, do you want me to order some?",
+                     "Daniel: Did the cleaners come today?")
+    assert text.count("Did the cleaners come today?") == 1 and "picking up the keys" not in text
+    # Every bracket belongs to an untrusted fence: nothing said can close one.
+    assert text.startswith("[Untrusted") and text.count("[") == text.count("]") == text.count("[Untrusted")
 
 
 async def test_peer_agent_turn_is_delivered_with_peer_identity(
