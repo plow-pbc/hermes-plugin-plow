@@ -2120,9 +2120,11 @@ class _GateLlm:
     def __init__(self, parsed: Any) -> None:
         self.parsed = parsed
         self.calls: list[dict[str, Any]] = []
+        self.during = lambda: None
 
     async def acomplete_structured(self, **kwargs: Any) -> Any:
         self.calls.append(kwargs)
+        self.during()
         if isinstance(self.parsed, Exception):
             raise self.parsed
         return SimpleNamespace(parsed=self.parsed)
@@ -2131,7 +2133,7 @@ class _GateLlm:
 async def _gate_turn(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, parsed: Any, *,
                      chat: dict[str, Any] | None = None, body: str = "Did the cleaners come today?",
                      history: list[dict[str, Any]] = (), reply_to: dict[str, Any] | None = None,
-                     goal: bool = False, busy: bool = False) -> tuple[Any, list[Any], _GateLlm, list[dict[str, Any]]]:
+                     goal: bool = False, busy: str = "") -> tuple[Any, list[Any], _GateLlm, list[dict[str, Any]]]:
     """Daniel speaks in a human group (or `chat`); the gate's model answers `parsed`."""
     module = _load(monkeypatch, tmp_path)
     module._plugin_llm = llm = _GateLlm(parsed)
@@ -2145,8 +2147,12 @@ async def _gate_turn(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, pa
     mirrored = _stub_mirror(monkeypatch)
     if goal:
         module._goal_save("cht_a", module._goal_new("book the campsite"))
-    if busy:  # a turn already running in this chat's session
+    def start_a_turn() -> None:  # a turn running in this chat's session
         adapter._active_sessions[f"agent:main:{module.PLATFORM_NAME}:dm:cht_a"] = asyncio.Event()
+    if busy == "before":
+        start_a_turn()
+    elif busy == "during":
+        llm.during = start_a_turn
     handled = _capture_events(monkeypatch, adapter)
     frame = _envelope("evt_1", "cht_a", "msg_1", role="member", body=body)
     frame["data"]["message"]["sender"].update(uid="mem_daniel_cht_a", display_name="Daniel")
@@ -2174,11 +2180,12 @@ _OUR_MESSAGE = {"part_index": None, "message": {
     ({"addressed": False}, {"chat": _solo_member_dm()}, True, False),
     ({"addressed": False}, {"body": "/restart"}, True, False),
     ({"addressed": False}, {"goal": True}, True, False),
-    ({"addressed": False}, {"busy": True}, True, False),
+    ({"addressed": False}, {"busy": "before"}, True, False),
+    ({"addressed": False}, {"busy": "during"}, True, True),
     (RuntimeError("model down"), {}, True, True),
     (None, {}, True, True),
 ], ids=["not-addressed", "addressed", "reply-to-ours", "solo-dm", "slash-command", "goal",
-        "busy-session", "model-raises", "malformed"])
+        "busy-session", "busy-during-the-call", "model-raises", "malformed"])
 async def test_a_group_message_not_for_this_agent_never_starts_a_turn(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture,
     parsed: Any, kw: dict[str, Any], handed_off: bool, asked: bool,

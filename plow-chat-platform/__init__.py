@@ -3681,14 +3681,17 @@ class PlowChatAdapter(BasePlatformAdapter):
         )
         # A shared room's message that may go unanswered is asked "is this
         # yours?" before the turn: a reply to us or an active goal already is.
-        # Not while this chat's session is busy: Hermes queues that message,
-        # and a row written mid-run could land between a tool call and its result.
+        # Not while this chat's session is busy, before the call or after it:
+        # Hermes queues that message, and a row written mid-run could land
+        # between a tool call and its result.
+        session_key = self._event_session_key(event)
         if (not _is_solo_dm(roster) and NO_REPLY_SENTINEL in channel_prompt
                 and not burst[0].starts_slash_command and not _goal_active(goal)
-                and self._event_session_key(event) not in self._active_sessions
+                and session_key not in self._active_sessions
                 and not any(m.reply_to and _from_self(m.reply_to["message"]["sender"], roster)
                             for m in burst)
-                and not await self._addressed(chat_uid, roster, sender, spoken, {m.uid for m in burst})):
+                and not await self._addressed(chat_uid, roster, sender, spoken, {m.uid for m in burst})
+                and session_key not in self._active_sessions):
             # Still read: the next turn here sees what the room said.
             await _record_sent(self, chat_uid, text, PLATFORM_NAME, role="user")
             log.info("[plow_chat] not addressed in %s; recorded without a turn", chat_uid)
