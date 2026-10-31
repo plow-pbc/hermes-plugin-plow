@@ -1487,11 +1487,12 @@ _live = None  # tuple[PlowChatAdapter, asyncio.AbstractEventLoop] | None
 # One person's rapid-fire messages are one turn. iMessage splits a single
 # intent into a text bubble and a link preview; people send a thought as two
 # lines. Each used to reach hermes as its own turn, the second interrupting
-# the first. The bubble and its preview land about 0.8s apart (plow#442);
-# 1.5s covers that without making every single message wait longer. A
-# slash command or change of speaker closes the burst, so command semantics
-# and a group's order are never reshuffled.
-INBOUND_DEBOUNCE_SECONDS = 1.5
+# the first. The window is measured between arrivals, and arrivals spread
+# wider than sends: a question and its link sent 0.78s apart reached Plow's
+# webhook 1.50s apart, which 1.5s split. A slash command or change of
+# speaker closes the burst, so command semantics and a group's order are
+# never reshuffled.
+INBOUND_DEBOUNCE_SECONDS = 2.0
 # The base spawns `_keep_typing` for every turn (`base.py:3993`) and ticks
 # `send_typing` every 2s; the provider lapses the indicator at 85-90s. One POST
 # a window holds it and the other ticks cost a dict lookup -- which is why no
