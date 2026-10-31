@@ -1499,33 +1499,13 @@ async def test_an_initial_marker_that_will_not_persist_does_not_connect(monkeypa
     assert adapter._last_uids[adapter.home_chat_uid] is None, "state must not claim what the disk does not hold"
 
 
-async def test_each_turn_names_its_own_chat_for_latch(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: pathlib.Path,
-) -> None:
-    """The host judges a latch call against the chat it names, so a turn in
-    one chat must never carry another chat's uid: the uid rides each turn's
-    prompt, not the per-session section."""
-    module = _load(monkeypatch, tmp_path)
-    _install_latch(monkeypatch, tmp_path)
-    adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
-    adapter._set_reach([_chat("cht_a"), _chat("cht_b", name="Project room", group=True)])
-    _mark_anchored(adapter, "cht_a", "cht_b")
-    handled = _capture_events(monkeypatch, adapter)
-    await adapter._on_frame(_envelope("evt_a", "cht_a", "msg_a"))
-    await adapter._on_frame(_envelope("evt_b", "cht_b", "msg_b"))
-    await _settle(adapter)
-    prompts = {event["source"]["chat_id"]: event["channel_prompt"] for event in handled}
-    assert "pass `--plow-chat cht_a`" in prompts["cht_a"] and "cht_b" not in prompts["cht_a"]
-    assert "pass `--plow-chat cht_b`" in prompts["cht_b"] and "--plow-chat cht_a" not in prompts["cht_b"]
-
-
 async def test_one_socket_demuxes_and_checkpoints_two_chats(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: pathlib.Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     module = _load(monkeypatch, tmp_path)
+    _install_latch(monkeypatch, tmp_path)
     config = SimpleNamespace(extra={})
     adapter = module.PlowChatAdapter(config)
     room = _chat("cht_b", name="Project room", group=True)
@@ -1571,9 +1551,15 @@ async def test_one_socket_demuxes_and_checkpoints_two_chats(
         assert block in owner_prompt
     member_prompt = handled[2]["channel_prompt"]
     assert member_prompt == _rendered(module,
-        _voiced(module, _membered(module, module.EXTERNAL_CHANNEL_PROMPT)), None, adapter._identity)
+        _voiced(module, _membered(module, module.EXTERNAL_CHANNEL_PROMPT)), None, adapter._identity, "cht_b")
     for block in (module._SPEAKER_FACT, module._DISCLOSURE, module._NO_RELAY):
         assert block in member_prompt
+    # A latch host judges each call against the chat it names, so no turn may
+    # carry another chat's uid.
+    for event, uid, other in ((handled[0], "cht_a", "cht_b"), (handled[1], "cht_b", "cht_a"),
+                              (handled[2], "cht_b", "cht_a")):
+        assert f"pass `--plow-chat {uid}`" in event["channel_prompt"]
+        assert f"--plow-chat {other}" not in event["channel_prompt"]
     assert module._SPEAKER_FACT not in owner_prompt, "the owner is not a member"
     assert "first-user onboarding" not in owner_prompt.lower()
     assert config.extra["group_sessions_per_user"] is False
