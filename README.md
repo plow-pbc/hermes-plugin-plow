@@ -208,7 +208,7 @@ first boot (no home checkpoint yet) or a restart. The plugin sends nothing of it
 own at boot; what the agent says, if anything, is its own.
 
 One person's rapid-fire messages are one turn: inbound is buffered per chat
-for a 2s window that resets on each arrival — iMessage's bubble + link-preview
+for a 1.5s window that resets on each arrival — iMessage's bubble + link-preview
 split, or a thought sent as two lines, reaches hermes as a single message
 instead of the second interrupting the first. A change of speaker closes the
 burst, and a slash-prefixed message closes it on both sides so commands remain
