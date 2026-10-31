@@ -897,6 +897,29 @@ async def test_a_burst_carries_every_part_s_media(monkeypatch: pytest.MonkeyPatc
     assert event["message_id"] == "msg_3"
 
 
+async def test_the_timing_log_places_each_message_without_its_words(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture) -> None:
+    """A burst that splits is placed from the log alone: when each message was
+    read and queued, whether it had a link, and what closed the burst. A
+    message's words never reach the log."""
+    module = _load(monkeypatch, tmp_path)
+    adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
+    _mark_anchored(adapter, "cht_a")
+    _capture_events(monkeypatch, adapter)
+    module.INBOUND_DEBOUNCE_SECONDS = 0.05
+    caplog.set_level(logging.INFO)
+    await adapter._on_frame(_envelope("evt_1", "cht_a", "msg_1", body="pitch him this:"), None, 1.0)
+    await adapter._on_frame(_envelope("evt_2", "cht_a", "msg_2", body="https://notion.so/secret-page"), None, 2.0)
+    await _settle(adapter)
+
+    lines = [r.getMessage() for r in caplog.records if "[plow_chat] inbound" in r.getMessage()
+             or "[plow_chat] burst closed" in r.getMessage()]
+    assert [line.split()[1:3] for line in lines[:2]] == [["inbound", "msg_1"], ["inbound", "msg_2"]]
+    assert "link=n" in lines[0] and "read_at=1.000" in lines[0] and "link=y" in lines[1]
+    assert "uids=msg_1,msg_2 by=quiet" in lines[2]
+    assert not any("pitch" in line or "notion" in line for line in lines)
+
+
 async def test_a_slow_preview_fetch_does_not_split_the_turn(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> None:
     """The preview bubble's bytes can take longer to fetch than the window
     lasts. It joined the burst the moment it arrived; the fetch is the

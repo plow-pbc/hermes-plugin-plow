@@ -1492,6 +1492,7 @@ _live = None  # tuple[PlowChatAdapter, asyncio.AbstractEventLoop] | None
 # slash command or change of speaker closes the burst, so command semantics
 # and a group's order are never reshuffled.
 INBOUND_DEBOUNCE_SECONDS = 1.5
+_URL_RE = re.compile(r"https?://")
 # The base spawns `_keep_typing` for every turn (`base.py:3993`) and ticks
 # `send_typing` every 2s; the provider lapses the indicator at 85-90s. One POST
 # a window holds it and the other ticks cost a dict lookup -- which is why no
@@ -3411,7 +3412,7 @@ class PlowChatAdapter(BasePlatformAdapter):
                 async def read_frames():
                     try:
                         async for frame in ws:
-                            frames.put_nowait(frame)
+                            frames.put_nowait((time.time(), frame))
                     finally:
                         frames.put_nowait(None)
 
@@ -3435,8 +3436,9 @@ class PlowChatAdapter(BasePlatformAdapter):
                             continue
                         if frame is None:
                             break
+                        read_at, frame = frame
                         if frame.type == aiohttp.WSMsgType.TEXT:
-                            await self._on_frame(frame.json(), http)
+                            await self._on_frame(frame.json(), http, read_at)
                     reader.result()
                 finally:
                     reader.cancel()
@@ -3453,7 +3455,7 @@ class PlowChatAdapter(BasePlatformAdapter):
         if _live is not None and _live[0] is self:
             _live = None
 
-    async def _on_frame(self, frame, http=None):
+    async def _on_frame(self, frame, http=None, read_at=None):
         if frame.get("type") == "connected":
             return
         chat_uid = frame["chat_id"]
@@ -3477,11 +3479,11 @@ class PlowChatAdapter(BasePlatformAdapter):
         event_id = frame["event_id"]
         if event_id in self._seen_events:
             return
-        await self._on_message(frame["data"]["message"], chat_uid)
+        await self._on_message(frame["data"]["message"], chat_uid, read_at)
         self._seen_events.append(event_id)
         del self._seen_events[:-512]
 
-    async def _on_message(self, msg, chat_uid):
+    async def _on_message(self, msg, chat_uid, read_at=None):
         """One inbound message, from the socket or from the backfill, queued
         for the chat's server."""
         if msg["direction"] != "inbound":
@@ -3515,6 +3517,11 @@ class PlowChatAdapter(BasePlatformAdapter):
                 msg.get("reply_to"),
             )
         )
+        # When each message was read off the socket and queued, against when
+        # Plow says it was sent: what places a burst that split. Never the body.
+        log.info("[plow_chat] inbound %s chat=%s created_at=%s link=%s len=%d read_at=%s queued_at=%.3f",
+                 uid, chat_uid, msg.get("created_at"), "y" if _URL_RE.search(msg["body"]) else "n",
+                 len(msg["body"]), "backfill" if read_at is None else f"{read_at:.3f}", time.time())
         # Seen at enqueue: queued, in flight or delivered, a second copy is the
         # same overlap. The durable ack is the checkpoint, written after the
         # hand-off; a replacement adapter starts with an empty `_seen` and its
@@ -3545,6 +3552,8 @@ class PlowChatAdapter(BasePlatformAdapter):
                     carry = nxt
                     break
                 burst.append(nxt)
+            log.info("[plow_chat] burst closed chat=%s uids=%s by=%s at=%.3f", chat_uid,
+                     ",".join(m.uid for m in burst), "boundary" if carry else "quiet", time.time())
             resolved = [await m.resolved for m in burst]
             while True:
                 try:
