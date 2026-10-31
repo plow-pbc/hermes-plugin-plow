@@ -137,8 +137,8 @@ URL in git.
 | `PLOW_AGENT_TOKEN` | yes | the line-scoped bearer activation mints |
 | `PLOW_HOME_CHANNEL` | yes | the home chat, `cht_…` — where cron and default output land, and must be a phone-line chat (the line's `provider_type` is `imessage`). Must be inside the credential's grant; a grant without it refuses to connect |
 | `PLOW_API_BASE` | no | API base, default `https://api.plow.co` (no `/v1` suffix) |
-| `PLOW_MCP_URL` | no | the Mac relay URL plow-init exports when the account has a Mac; when set, the plugin adds a system-prompt section that makes the Mac the default for owner work |
 | `PLOW_WIKI_EMBED_URL` | no | Ollama base URL that embeds the owner's wiki for recall (e.g. `http://<ollama-host>:11434`); when set, turns in the owner's DM and trusted rooms carry the nearest wiki facts, read from `~/Plow/wiki` on the owner's machine with latch |
+| `PLOW_WIKI_HOST` | no | the latch host that holds `~/Plow/wiki`; wiki recall passes it as `--host`, and unset leaves the choice to latch's default host |
 | `WIKI_WRITER` | no | this agent's writer name in the wiki's `wiki.toml`; wiki recall reaches `shared` roots plus the roots this agent writes — unset reaches `shared` roots only |
 
 Diagnostics — agent status frames, 💾 background-review posts, ⏳ long-running
@@ -387,8 +387,8 @@ hook appends up to five of the owner's wiki facts nearest the turn, by
 embedding, to turns where recall reaches every chat (the owner's DM, a trusted
 room). `wiki index` writes the facts to `.wiki/chunks.json`; a background
 refresh reads and writes the wiki on the owner's machine with `latch file`
-(latch's default host, or `LATCH_HOST`; judged there as acting for the home
-chat), embeds any fact it has no vector for and stores the vectors in
+(on `PLOW_WIKI_HOST`, else latch's default host; judged there as acting for
+the home chat), embeds any fact it has no vector for and stores the vectors in
 `~/Plow/wiki.recall.json`, beside the wiki rather than inside it so
 `wiki snapshot` never commits them, so agents sharing a wiki share its vectors —
 every agent embeds every chunk, whether or not it may recall it. A refresh
@@ -524,9 +524,7 @@ The agent no longer has to choose to do that: after every turn, a small
 structured side call reads what the speaker said against the people they may
 name and writes the admitted facts — the owner's words name anyone the roster
 or book knows and overwrite; a member's words fill only their own empty row and
-never a relationship. A reach refresh also resolves still-bare handles against
-the owner's macOS Contacts through the Latch relay and fills empty names where
-exactly one person matches.
+never a relationship.
 
 `plow_contacts` reads the
 book back, owner's row first, for the turns that have no roster at all — a

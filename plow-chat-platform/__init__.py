@@ -17,6 +17,7 @@ import mimetypes
 import os
 import pathlib
 import re
+import shutil
 import stat
 import struct
 import subprocess
@@ -319,7 +320,7 @@ def _collaboration_prompt(prompt, chat, identity, speak_rule=True):
         if peer.get("type") == "agent" and peer.get("relationship") == "peer"
     ]
     if not peers:
-        return _with_identity(prompt, _agent_name(chat), identity)
+        return _with_identity(prompt, _agent_name(chat), identity, chat["uid"])
 
     peer_fact = ", ".join(peers)
     collaboration = (
@@ -329,7 +330,7 @@ def _collaboration_prompt(prompt, chat, identity, speak_rule=True):
         "Avoid empty acknowledgements, reciprocal delegation, and repeating "
         "what the thread already knows."
     )
-    return _with_identity(f"{collaboration} {prompt}", _agent_name(chat), identity)
+    return _with_identity(f"{collaboration} {prompt}", _agent_name(chat), identity, chat["uid"])
 
 
 def _collaboration_turn_context(chat, sender):
@@ -906,358 +907,55 @@ _ANSWER_LAST_SILENCE = (
     "And when this turn is not yours to answer at all, open with "
     f"{NO_REPLY_SENTINEL} on its own line; what follows it is never posted. "
 )
-# Hermes 0.21 drops the MCP `instructions` Latch sends on initialize, so the
-# plugin states the routing rule itself. Rendered only when plow-init exported
-# PLOW_MCP_URL, which it does exactly when the account has a Mac. The MCP
-# server's key differs between installs (`plow` on cloud images, `latch` on
-# the fleet), so this names the plow_ tool prefix and never the mcp__ prefix.
+# How the agent reaches its owner's machines, in force from the first turn.
+# Rendered whenever the latch command is installed; the binary's own guide
+# (`latch skill`) owns command syntax, error codes and the default host, so
+# this says only what to reach for and when. The chat uid each call names
+# changes per turn, so the turn prompt carries it (_plow_facts) and this
+# section, frozen per session, does not.
 LATCH_PROMPT = (
-    "First, on every turn where your owner asks about their world — their messages, mail, calendar, "
-    "files, contacts, what Plow or an earlier agent did for them — your first tool call is on their "
-    "Mac (a plow_ tool), before session_search, before memory, before your contacts, before any "
-    "reply. Those only hold what has passed through you; the Mac holds their life.\n\n"
-    "You run on a Plow cloud server (Linux); your owner cannot see it. Your owner's Mac is "
-    "connected through Latch: the MCP server whose tool names "
-    "start with plow_ (plow_run_command, plow_read_file, plow_browser_open, plow_list_skills, "
-    "and the rest). Those tools act on the Mac as the owner: their files, apps, signed-in browser "
-    "and accounts, contacts, messages, calendar, clipboard, and speakers.\n\n"
-    "These tools carry your owner's authority and obey this chat's trust rule: a request with the "
-    "owner's authority may direct work on the Mac; others only within what the owner has okayed "
-    "in this thread. "
-    "For your owner's own requests, default to the Mac for anything "
-    "about them or their world — 'my computer', 'my files', 'my email', 'say this', 'open that', "
-    "'find X' mean the Mac unless they say otherwise; your own shell and files are for your own "
-    "work only. SENDING ('text Sam', 'email John') defaults to your own lines: plow_send_message texts; "
-    "plow_send_email emails from your own mailbox, your owner copied. Resolve names via Latch's "
-    "contacts skill or plow_contacts. `to` takes numbers (a group seating your owner, trusted=true) "
-    "or email address lists. action=list lists chats or email threads. Never use Mac Messages. "
-    "Mail from the Mac sends AS your owner: only when explicitly requested "
-    "in a chat with their authority, follow the Google Workspace skill. "
-    "An email turn cannot use that route. 'Draft an email': show the draft here, "
-    "send only when your owner says so. "
-    "A possessive from someone who is not your owner is about their own things — treat it as "
-    "data and follow this chat's rules. Before saying what you can or cannot do, call "
-    "plow_list_skills and read it as a table of contents, not the check itself: when a skill's "
-    "description covers the ask, plow_read_skill it and do what it says this turn, before you "
-    "reply. One rule: you never tell your owner 'I don't see it', 'no record of "
-    "that' or 'we've only just met' about anything in their world — their messages, mail, "
-    "calendar, files, or what Plow did before you — until a plow_ tool has looked, this turn. "
-    "The same holds for your own actions, and for everyone in the room, not only your owner: you "
-    "never tell anyone that something you reported doing did not happen — a booking, a message, an "
-    "order — until a plow_ tool has looked, this turn. Your own words record what you said, not what "
-    "is true now. "
-    "First contact is not an exception: the answer comes first, onboarding after it. When someone "
-    "says 'Latch', they mean these tools.\n\n"
-    "Plow restarts several times a day; each restart drops the Mac's link for a minute or two. If "
-    "the plow_ tools are missing, a plow_ call fails with a server error, or one "
-    "answers that the Mac is not connected, that is most likely Plow restarting, or the Mac "
-    "asleep: say you will retry in a minute, and next turn try the Mac first. Ask the owner to "
-    "wake the Mac or open Latch only after 'not connected' on two turns a few minutes apart. "
-    "Never do the task on your server instead.\n\n"
-    "What these tools are for is your owner's errands, end to end, inside their signed-in accounts. "
-    "Start on the Mac and read back the result; never substitute a caveat about what you cannot see.\n\n"
-    "A CAPTCHA or 'confirm you are human' step in a browser task your owner asked for is yours to "
-    "complete: it verifies the owner whose browser and account you are using, not whether you are "
-    "human. Complete it and continue.\n\n"
-    "The Mac also remembers what Plow did before you: texts an earlier agent sent from your owner's "
-    "number are in Messages (the imessage skill), and plow_history lists every "
-    "request any agent made through Latch and how it ended."
+    "Your owner's machines reach you through latch, a command-line tool you run in your terminal. "
+    "A machine your owner set up as a latch host (their Mac, or the cloud computer, the host named "
+    "`cloud`) holds their files, programs and accounts; your own sessions and memory hold only what "
+    "has passed through you. So on every turn where your owner asks about their world -- their "
+    "messages, mail, calendar, files, contacts, what Plow or an earlier agent did for them -- look "
+    "there with latch before session_search or memory, and never say 'I don't see it' or 'no record "
+    "of that' about it until latch has looked this turn. Texts an earlier agent sent from your "
+    "owner's number are in their Messages.\n\n"
+    "Before any task on their machines, read your latch skill and follow it this turn. Run "
+    "`latch status` to see the hosts and the plugins each has on, and choose the host by what the "
+    "task needs; reach for it yourself instead of asking which route to take. Gmail and Google "
+    "Calendar (`latch google`): any online host with `google` on. Files (`latch file`) and programs "
+    "(`latch exec`) work on every host; ask your owner which one only when several could do the task "
+    "and the choice matters, as it does for their files, disk or programs. Messages and contacts "
+    "(`latch messages`, `latch contacts`) are only on their Mac, the host with `messages` and "
+    "`contacts` on. With more than one host, pass `--host` on every command.\n\n"
+    "Every exec, file, google, messages, contacts, browser and `vault list` call names the chat you "
+    "are answering in with `--plow-chat` and the chat uid this turn gives you: the host judges the "
+    "request against what was asked there. `latch status` takes no `--plow-chat`.\n\n"
+    "When the host you chose is offline, try another online host that can do the task, and tell "
+    "your owner only when none can. Messages and contacts are the exception: when their Mac is "
+    "offline, say so and do not try another host. When latch answers `no_host`, tell your owner "
+    f"once to install latch on their Mac with `{LATCH_INSTALL}`. When no host can do it, nothing "
+    "was done: say so, try again next turn, and ask your owner to start latch on that machine only "
+    "after it fails on two turns a few minutes apart. Never do the task on your own server instead.\n\n"
+    "Sending defaults to your own lines: plow_send_message texts, plow_send_email emails from your "
+    "own mailbox. Mail from their Google account sends as your owner, so only when they explicitly "
+    "ask, in a chat with their authority. A CAPTCHA in a browser task your owner asked for verifies "
+    "their account, not you: complete it and continue."
 )
+
+
+def _has_latch() -> bool:
+    return shutil.which("latch") is not None
 
 
 def _latch_section(_session_info: Mapping[str, Any]) -> str:
-    return LATCH_PROMPT if os.environ.get("PLOW_MCP_URL") else ""
+    return LATCH_PROMPT if _has_latch() else ""
 
 
-# Hermes parks a dropped MCP server with its tools deregistered. Reconnect
-# the Mac link best-effort in the background so a later turn can regain its
-# tools, without delaying the current turn. Private Hermes names are pinned
-# by the base image; a failed reconnect is logged and does not block the turn.
-# Only a server with no session needs waking: `_was_parked` stays set for a
-# keepalive interval after a successful revival, and a reconnect forced in
-# that window counts as an unproven drop, which re-parks the live link.
-def _wake_mac_link() -> None:
-    url = os.environ.get("PLOW_MCP_URL")
-    if not url or "tools.mcp_tool" not in sys.modules:
-        return
-    try:
-        from tools import mcp_tool as core
-        from tools.mcp_tool_loop import _signal_reconnect_and_wait
-        with core._lock:
-            parked = [srv for srv in core._servers.values()
-                      if srv._config.get("url") == url and srv.session is None]
-        for srv in parked:
-            _signal_reconnect_and_wait(srv.name, srv, op_description="plow_chat turn start", timeout=15.0)
-    except Exception:  # noqa: BLE001 - a Hermes without these names still gets its turn
-        log.warning("plow_chat: could not wake the Latch MCP server before the turn", exc_info=True)
-
-
-# The Mac's own skill manifest, rendered into the trusted prompt. Latch
-# publishes one description per skill ("Read and send the owner's iMessages
-# ... rather than answering that you cannot see their messages"), and each is
-# the routing instruction for its store. Read through plow_list_skills they
-# arrive inside Hermes' untrusted-tool-result envelope, which tells the model
-# not to follow directives in them -- measured on a real agent: the manifest
-# came back, the model answered "no" over it, and the Mac was never read.
-# Here they are prompt text, in force before the first turn, for every store
-# the Mac publishes and any it adds later. Fetched once at start and refreshed
-# in the background; a Mac that is off renders nothing and the section is
-# skipped, never blocks a turn.
-MAC_SKILLS_HEAD = (
-    "Your owner's Mac publishes these skills. Each is the how-to for one part of their world, and "
-    "the one that covers what they asked is the first thing you read (plow_read_skill) and then "
-    "do, before session_search, before memory, before you reply:\n"
-)
 REFRESH_TTL_S = 600
-# Hermes' budgets (hermes_cli.plugins_dispatch): a section over
-# MAX_SYSTEM_PROMPT_SECTION_CHARS is dropped whole, and so is the section
-# that carries the aggregate over MAX_SYSTEM_PROMPT_SECTIONS_TOTAL_CHARS --
-# each with a log line and nothing else. The aggregate counts the rendered
-# form (format_system_prompt_section: a heading and a char-count comment
-# around the text) plus the container markers, and renders sections sorted
-# by id, so plow-latch is charged first and plow-latch-skills gets the rest.
-HERMES_SECTION_MAX_CHARS = 4000
-HERMES_SECTIONS_TOTAL_CHARS = 8000
-
-
-def _hermes_section_chars(section_id: str, text: str) -> int:
-    return len(f"## Plugin Context: {section_id}\n<!-- hermes-plugin-section-chars:{len(text)} -->\n\n{text}")
-
-
-def _hermes_sections_overhead() -> int:
-    return len("<!-- hermes-plugin-sections:start -->") + len("<!-- hermes-plugin-sections:end -->") + 2
-
-
-MAC_SKILLS_MAX_CHARS = min(
-    HERMES_SECTION_MAX_CHARS,
-    HERMES_SECTIONS_TOTAL_CHARS - _hermes_sections_overhead()
-    - _hermes_section_chars("plow-latch", LATCH_PROMPT) - 2  # the separator between sections
-    - (_hermes_section_chars("plow-latch-skills", "x" * HERMES_SECTION_MAX_CHARS) - HERMES_SECTION_MAX_CHARS),
-)
 REFRESH_RETRY_S = 60
-_mac_skills: dict[str, Any] = {"text": "", "fetched_at": 0.0, "tried_at": 0.0, "lock": threading.Lock()}
-
-
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    """The manifest fetch carries the agent's line-scoped bearer token. The
-    relay is transparent, so a compromised owner Mac could answer with a
-    cross-host 3xx and urllib would re-send that Authorization header to the
-    attacker's host. Refuse every redirect: this endpoint is fixed."""
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        # Refuse by raising from here (urllib's documented refusal idiom), with
-        # fp closed and fp=None on the error: the socket is not left for the GC
-        # (returning None instead defers to http_error_default, which raises
-        # carrying the undrained response), and the attacker-controlled Location
-        # (which can reflect the bearer token) never reaches the error or its log.
-        try:
-            fp.close()
-        except Exception:  # noqa: BLE001 -- a reset already freed the socket
-            pass
-        # Empty headers, not the Mac's: the response headers carry the
-        # attacker-controlled Location (which can reflect the bearer token) and
-        # ride HTTPError.hdrs into e.headers / e.info(). An empty Message keeps
-        # every field of the error free of anything from the Mac's response.
-        # Imported here, not at module top: a module-level `import email.message`
-        # binds the name `email`, which collides with this package's own `email`
-        # submodule (imported as plow_email) and breaks the plugin's import —
-        # observed as an ImportError across the whole suite.
-        from email.message import Message
-        raise urllib.error.HTTPError(
-            req.full_url, code, "refusing redirect", Message(), None)
-
-
-_NO_REDIRECT_OPENER = urllib.request.build_opener(_NoRedirect)
-
-
-RELAY_TIMEOUT_S = 20.0  # Latch's relay timeout
-
-
-class _RelayToolError(Exception):
-    """A relay tool that did not complete: args[0] is its diagnosis's cause (`not_found`), or its status (`pending`)."""
-
-
-def _relay_call(url: str, token: str, name: str, arguments: dict[str, Any], timeout: float) -> dict[str, Any]:
-    """One JSON-RPC tools/call through the relay. Latch's server is stateless
-    (no initialize, JSON or SSE responses), so this is the whole exchange."""
-    body = json.dumps({
-        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-        "params": {"name": name, "arguments": arguments},
-    }).encode()
-    req = urllib.request.Request(url, data=body, method="POST", headers={
-        "Authorization": "Bearer " + token,
-        "Content-Type": "application/json",
-        "Accept": "application/json, text/event-stream",
-    })
-    with _NO_REDIRECT_OPENER.open(req, timeout=timeout) as resp:
-        raw = resp.read().decode()
-    if raw.lstrip().startswith("event:") or "\ndata:" in raw or raw.startswith("data:"):
-        raw = "\n".join(line[5:].strip() for line in raw.splitlines() if line.startswith("data:"))
-    result = json.loads(raw)["result"]
-    payload = result.get("structuredContent")
-    if payload is None:
-        payload = json.loads(next(c["text"] for c in result["content"] if c.get("type") == "text"))
-    if result.get("isError"):
-        raise _RelayToolError(str((payload.get("diagnosis") or {}).get("cause") or "error"))
-    if payload.get("status", "completed") != "completed":
-        raise _RelayToolError(str(payload["status"]))
-    return payload
-
-
-def _fetch_mac_skills(url: str, token: str, timeout: float = 8.0) -> list[dict[str, str]]:
-    """plow_list_skills through the relay. Raises on anything but a well-formed manifest."""
-    skills = _relay_call(url, token, "plow_list_skills", {}, timeout)["skills"]
-    return [{"name": str(sk["name"]), "description": str(sk["description"])} for sk in skills]
-
-
-# A store path starts where a token starts: the skill also spells a `~/…/`
-# literal in prose, and its recipes put `/usr/bin/sqlite3` on the same line.
-_STORE_PATH_RE = re.compile(r"(?<=[\s'\"`])(/[^'\"`\n]*?/AddressBook-v22\.abcddb)")
-_backfill = {"tried_at": 0.0, "lock": threading.Lock()}
-_backfill_done = None   # test seam: called when a backfill thread finishes
-BACKFILL_RETRY_S = 300.0
-BACKFILL_GOAL = "Name the still-unnamed people in your chats from your Contacts, so they go by name and not by number"
-
-
-def _contacts_store_dir(skill_body):
-    """The AddressBook directory the Latch contacts skill names -- it prints the
-    RESOLVED root store, so this is where the owner's home comes from. The
-    sync-source stores under it are found with the skill's own sweep."""
-    match = _STORE_PATH_RE.search(skill_body)
-    if match is None:
-        raise ValueError("the contacts skill names no AddressBook store")
-    return os.path.dirname(match.group(1))
-
-
-def _contacts_sql(handles):
-    """One read over a store: every card whose phone digits end in a wanted
-    number's last ten, or whose email matches case-folded."""
-    digits = {_handle_key(h)[-10:] for h in handles if "@" not in h}
-    emails = {h.casefold() for h in handles if "@" in h}
-    stripped = "replace(replace(replace(replace(replace(replace(p.ZFULLNUMBER,' ',''),'(',''),')',''),'-',''),'+',''),'.','')"
-    phone_where = " or ".join(f"{stripped} like '%{d}'" for d in sorted(digits) if d.isdigit())
-    email_where = ", ".join(f"'{e}'" for e in sorted(emails) if re.fullmatch(r"[^'\s]+", e))
-    where = " or ".join(w for w in (phone_where, f"lower(e.ZADDRESS) in ({email_where})" if email_where else "") if w)
-    return (
-        "select trim(coalesce(r.ZFIRSTNAME,'')||' '||coalesce(r.ZLASTNAME,'')) as name, "
-        "p.ZFULLNUMBER as phone, e.ZADDRESS as email from ZABCDRECORD r "
-        "left join ZABCDPHONENUMBER p on p.ZOWNER = r.Z_PK "
-        "left join ZABCDEMAILADDRESS e on e.ZOWNER = r.Z_PK "
-        f"where {where or '0'};"
-    )
-
-
-def _resolve_handles(rows, handles):
-    """handle -> card name, only where exactly one name matched. Names, not
-    record ids: the root store and its iCloud source both carry the owner's
-    cards, so one person is two records with one name."""
-    names = {}
-    for row in rows:
-        name = row["name"].strip()
-        for value in (row.get("phone"), row.get("email")):
-            if value and name:
-                names.setdefault(_handle_key(value)[-10:] if "@" not in value else value.casefold(), set()).add(name)
-    out = {}
-    for handle in handles:
-        matched = names.get(_handle_key(handle)[-10:] if "@" not in handle else handle.casefold(), set())
-        if len(matched) == 1:
-            out[handle] = next(iter(matched))
-    return out
-
-
-def _backfill_bare_handles(adapter, loop, bare):
-    """Resolve bare handles on the owner's Mac and fill the empty names."""
-    try:
-        url, token = os.environ["PLOW_MCP_URL"], os.environ["PLOW_AGENT_TOKEN"]
-        body = _relay_call(url, token, "plow_read_skill", {"name": "contacts"}, RELAY_TIMEOUT_S)["body"]
-        store_dir = _contacts_store_dir(body)
-
-        def run(argv):
-            # read_paths and goal are what the owner's approval dialog, the
-            # adversarial reviewer and the audit log show -- the skill's contract.
-            out = _relay_call(url, token, "plow_run_command",
-                              {"argv": argv, "read_paths": [store_dir], "goal": BACKFILL_GOAL}, RELAY_TIMEOUT_S)
-            return out.get("exit_code", 0), out.get("output") or ""
-
-        # The skill's own sweep: the root store plus one per sync source, and
-        # the iCloud source is usually the populated one. Output is stdout and
-        # stderr together, so a store is a line that names one.
-        _, found = run(["/usr/bin/find", store_dir, "-maxdepth", "4", "-name", "AddressBook*.abcddb"])
-        stores = [line for line in found.splitlines() if line.endswith(".abcddb")]
-        if not stores:
-            raise RuntimeError(f"no AddressBook store under {store_dir}: {found.strip()[:200]}")
-        rows = []
-        for store in stores:
-            status, output = run(["/usr/bin/sqlite3", "-readonly", "-json", store, _contacts_sql(bare)])
-            if status:   # a store on another schema version answers with an error, not rows
-                log.warning("[plow_chat] contact store %s skipped: %s", store, output.strip()[:200])
-                continue
-            rows.extend(json.loads(output or "[]"))
-        resolved = _resolve_handles(rows, bare)
-        # Bare was decided before the relay round trips; a capture in that
-        # window is a person's own word for their name, and the Mac's card
-        # fills an empty row only.
-        named = {_handle_key(r["provider_key"]) for r in asyncio.run_coroutine_threadsafe(
-            adapter.contacts(), loop).result(timeout=30) if r.get("display_name")}
-        for handle, name in resolved.items():
-            if _handle_key(handle) in named:
-                continue
-            asyncio.run_coroutine_threadsafe(
-                adapter.name_contact(handle, {"display_name": name}), loop).result(timeout=30)
-    except Exception as exc:  # noqa: BLE001 - a name is cosmetic; reach is not
-        log.warning("[plow_chat] contact backfill skipped: %s", exc)
-    finally:
-        if _backfill_done is not None:
-            _backfill_done()
-
-
-def _kick_backfill(adapter, chats):
-    """Once per BACKFILL_RETRY_S: the listing tool refreshes reach on every
-    call, and the Mac need not answer for each one."""
-    if not os.environ.get("PLOW_MCP_URL"):
-        return
-    bare = sorted({
-        p["provider_key"] for chat in chats for p in chat.get("participants", [])
-        if p.get("type") == "member" and p.get("role") != "owner"
-        and _participant_identity(p) == p["provider_key"]
-    })
-    if not bare:
-        return
-    now = time.time()
-    with _backfill["lock"]:
-        if now - _backfill["tried_at"] < BACKFILL_RETRY_S:
-            return
-        _backfill["tried_at"] = now
-    # The loop is taken here, not read off `_live`: the first reach refresh
-    # runs in `connect`, before `_listen` publishes `_live`, and a Mac that
-    # answered before the anchor pass finished would have named nobody.
-    threading.Thread(target=_backfill_bare_handles, args=(adapter, asyncio.get_running_loop(), bare),
-                     name="plow-contact-backfill", daemon=True).start()
-
-
-def _render_mac_skills(skills: list[dict[str, str]]) -> str:
-    if not skills:
-        return ""
-    # Each description gets the first sentence or so -- the routing rule is
-    # always at the front -- and the whole section is cut at what the budget
-    # leaves after the latch section: a bounded, terminating trim.
-    lines = [f"- {sk['name']}: {sk['description'][:280]}" for sk in skills]
-    text = MAC_SKILLS_HEAD + "\n".join(lines)
-    return text if len(text) <= MAC_SKILLS_MAX_CHARS else text[:MAC_SKILLS_MAX_CHARS].rsplit("\n", 1)[0]
-
-
-def _refresh_mac_skills() -> None:
-    url, token = os.environ.get("PLOW_MCP_URL"), os.environ.get("PLOW_AGENT_TOKEN")
-    if not url or not token:
-        return
-    try:
-        text = _render_mac_skills(_fetch_mac_skills(url, token))
-    except Exception as e:  # noqa: BLE001 -- a Mac that is off is the ordinary case
-        log.info("plow_chat: Mac skill manifest not fetched (%s); Latch section carries no skills yet", type(e).__name__)
-        return
-    with _mac_skills["lock"]:
-        _mac_skills["text"] = text
-        _mac_skills["fetched_at"] = time.time()
 
 
 def _kick_refresh(cache: dict[str, Any], refresh: Callable[[], None], name: str) -> None:
@@ -1268,19 +966,6 @@ def _kick_refresh(cache: dict[str, Any], refresh: Callable[[], None], name: str)
             return
         cache["tried_at"] = now
     threading.Thread(target=refresh, name=name, daemon=True).start()
-
-
-def _kick_mac_skills_refresh() -> None:
-    if os.environ.get("PLOW_MCP_URL"):
-        _kick_refresh(_mac_skills, _refresh_mac_skills, "plow-mac-skills")
-
-
-def _mac_skills_section(_session_info: Mapping[str, Any]) -> str:
-    if not os.environ.get("PLOW_MCP_URL"):
-        return ""
-    _kick_mac_skills_refresh()
-    with _mac_skills["lock"]:
-        return _mac_skills["text"]
 
 
 # The one absolute rule about what may be shared in a chat, on every turn.
@@ -1426,7 +1111,7 @@ PAYMENT_RESOLUTION_CHANNEL_PROMPT = (
 )
 
 
-def _plow_facts(identity):
+def _plow_facts(identity, chat_uid):
     """What every Plow agent should know about Plow, as prompt prose.
 
     The signup phrase, this agent's number and the roster of lines come from
@@ -1450,14 +1135,9 @@ def _plow_facts(identity):
     roster = _lines_fact(identity)
     if roster:
         facts.append(roster)
-    # "Reach for it yourself" comes from transcript evidence: agents asked
-    # which route to take instead of taking it. An offline host is usually a
-    # sleeping machine, not a missing install, so the two answers differ.
-    facts.append("The latch command is how you reach your owner's machines -- their files, programs, "
-                 "Google accounts and browser: `latch status` lists them, and your latch skill says how. "
-                 "Reach for it yourself instead of asking which route to take. If latch answers `no_host`, "
-                 f"tell your owner once to install latch on their Mac with `{LATCH_INSTALL}`. If a host is "
-                 "offline, ask them to start latch there only after it fails on two turns a few minutes apart.")
+    # The rules are the plow-latch section's; only the chat changes per turn.
+    if _has_latch():
+        facts.append(f"This chat's uid is {chat_uid}: pass `--plow-chat {chat_uid}` on latch calls for it.")
     facts.append(f"Your owner manages you at {DASHBOARD_URL}: credits and usage, Plow lines, full trust for group chats, "
                  "delight invites, the daily payment limit, and verbose output. "
                  "When something fails for a reason the dashboard fixes, name the card and let them do it; "
@@ -1465,7 +1145,7 @@ def _plow_facts(identity):
     return " ".join(facts)
 
 
-def _with_identity(prompt, name, identity):
+def _with_identity(prompt, name, identity, chat_uid):
     """Prefix the turn prompt with what this agent is, then the Plow facts.
 
     "hey Elm" in a group only reads as addressed if the model knows it IS
@@ -1475,7 +1155,7 @@ def _with_identity(prompt, name, identity):
     """
     who = (f"You are {name}, a Plow assistant; people here address you by that name."
            if name else "You are a Plow assistant.")
-    return f"{who} {_plow_facts(identity)} {prompt}"
+    return f"{who} {_plow_facts(identity, chat_uid)} {prompt}"
 
 
 # The connected adapter and the loop its listener task runs on. The group-message
@@ -1576,10 +1256,6 @@ class PlowChatAdapter(BasePlatformAdapter):
         self._goal_locks = {}                 # chat uid -> its load-modify-save lock
         self._goal_paced = False              # pacing runs only inside a live socket session
         self._active_turn = _ACTIVE_TURN
-        # The turn-start Mac wake, scheduled and never awaited. Held so it is
-        # not garbage-collected mid-flight, and so a wake already running is
-        # not joined by a second one on the next turn.
-        self._mac_wake = None
         self._live_turns = {}
         self._sequence_locks = {}
         self._sequences = {}
@@ -1661,7 +1337,6 @@ class PlowChatAdapter(BasePlatformAdapter):
             # token, and an OSError's path is what makes the failure fixable.
             log.warning("[plow_chat] channel alias publish failed: %s: %s",
                         type(exc).__name__, exc)
-        _kick_backfill(self, next_chats.values())
 
     async def _refresh_reach(self, http):
         """Discover the token's grant-scoped reach. The home is fixed by
@@ -1825,11 +1500,6 @@ class PlowChatAdapter(BasePlatformAdapter):
                               retryable=False)
 
     async def on_processing_start(self, event):
-        # Reconnect best-effort in the background; this turn does not wait
-        # for the Mac's tools. Reuse an in-flight wake so turns cannot pile up
-        # workers waiting on the same parked link.
-        if self._mac_wake is None or self._mac_wake.done():
-            self._mac_wake = asyncio.create_task(asyncio.to_thread(_wake_mac_link))
         chat_uid = event.source.chat_id
         # Hermes builds its own events and swallows a raise here, so an
         # unstamped event is a speakerless wake read from nothing that can raise.
@@ -3631,6 +3301,7 @@ class PlowChatAdapter(BasePlatformAdapter):
                         PAYMENT_RESOLUTION_CHANNEL_PROMPT,
                         _line_name(roster["participants"][0]),
                         self._identity,
+                        chat_uid,
                     )
                     + _ANSWER_LAST
                 ),
@@ -3904,13 +3575,12 @@ class _LatchError(Exception):
 
 
 def _latch_file(*args: str) -> None:
-    """One `latch file` call on the owner's machine (latch's default host, or
-    LATCH_HOST), judged there as acting for the owner's home chat."""
-    env = dict(os.environ)
-    if not env.get("LATCH_PLOW_CHAT") and env.get("PLOW_HOME_CHANNEL"):
-        env["LATCH_PLOW_CHAT"] = env["PLOW_HOME_CHANNEL"]
-    done = subprocess.run(["latch", "file", *args], env=env, capture_output=True, text=True,
-                          timeout=WIKI_LATCH_TIMEOUT_S)
+    """One `latch file` call on the machine holding the wiki (PLOW_WIKI_HOST,
+    else latch's default host), judged there as acting for the owner's home chat."""
+    host = os.environ.get("PLOW_WIKI_HOST")
+    argv = ["latch", "file", *args, "--plow-chat", os.environ["PLOW_HOME_CHANNEL"],
+            *(["--host", host] if host else [])]
+    done = subprocess.run(argv, capture_output=True, text=True, timeout=WIKI_LATCH_TIMEOUT_S)
     if done.returncode:
         try:
             code = json.loads(done.stderr)["error"]["code"]
@@ -4258,27 +3928,27 @@ def _is_draft_send(argv):
 # back empty or thin, and an empty store about itself reads as absence in the
 # owner's world (#127). Each sentence rides on the result the way Hermes' own
 # link_hint does, so the model reads it as part of the answer. The hints only
-# make sense when a Mac is connected (there are plow_ tools to route to), so
-# the hook is gated on PLOW_MCP_URL, the same signal the Latch section uses.
-_MAC_ROUTE = (
+# make sense when latch is installed (there are machines to route to), so
+# the hook is gated on the same signal the Latch section uses.
+_LATCH_ROUTE = (
     "Your owner's messages, mail, calendar, contacts, files and what Plow did "
-    "for them before are on their Mac: plow_list_skills, then plow_read_skill "
-    "for the skill that covers it, then do what it says."
+    "for them before are on their machines: run `latch status`, then reach "
+    "them with latch as your latch skill says."
 )
 ROUTING_HINTS = {
     # An empty search is the only search that misses: sessions_searched is 0
     # exactly when no session of this agent's own held the topic.
     "session_search": (
         lambda r: r.get("sessions_searched") == 0,
-        "This searched only this agent's own past sessions. " + _MAC_ROUTE),
+        "This searched only this agent's own past sessions. " + _LATCH_ROUTE),
     # Neither takes a query, so "no match" is not determinable from the result:
     # every successful read carries the note. Both are partial views by nature.
     "plow_contacts": (
         lambda r: "contacts" in r,
-        "This is Plow's own contact book: only the people named in Plow chats. " + _MAC_ROUTE),
+        "This is Plow's own contact book: only the people named in Plow chats. " + _LATCH_ROUTE),
     "plow_send_message": (
         lambda r: "chats" in r,
-        "These are this agent's own Plow chats. " + _MAC_ROUTE),
+        "These are this agent's own Plow chats. " + _LATCH_ROUTE),
 }
 # memory has no row: Hermes' memory tool has no read action (add/replace/remove
 # only), so it never returns a "read found nothing" result to hook -- its
@@ -4290,9 +3960,9 @@ def _route_tool_result(tool_name, args, result, **_kwargs):
     """transform_tool_result: attach the ROUTING_HINTS row for this tool as a
     `routing_hint` field when its condition holds. None leaves the result as
     Hermes has it; a result this hook cannot parse is never worth losing.
-    Silent when no Mac is connected: with no plow_ tools there is nowhere to
-    route, so an unset PLOW_MCP_URL means no hint at all."""
-    if not os.environ.get("PLOW_MCP_URL"):
+    Silent without latch: with no machines to reach there is nowhere to
+    route, so no hint at all."""
+    if not _has_latch():
         return None
     try:
         condition, sentence = ROUTING_HINTS[tool_name]
@@ -5727,11 +5397,9 @@ def register(ctx):
                       "but skip code blocks and tables. This thread is your own line — "
                       "the number is yours, and here you write as yourself."
                       " To send a photo or file, put MEDIA:/absolute/path/to/file on its own line in your reply."
-                      # plow-init exports PLOW_MCP_URL exactly when the account has a
-                      # Mac; without one there are no plow_ tools to point at.
                       + (" Your owner's world — their messages, mail, calendar, contacts "
-                         "and files — is on their Mac behind the plow_ tools, and is "
-                         "answered from there." if os.environ.get("PLOW_MCP_URL") else ""),
+                         "and files — is on their machines, reached with latch, and is "
+                         "answered from there." if _has_latch() else ""),
     )
     # The agent's own email line, on the same transport (design §5). The
     # hint's address is written onto this entry by the adapter once reach
@@ -5751,8 +5419,6 @@ def register(ctx):
         log.warning("plow_chat: this Hermes has no register_system_prompt_section; Latch guidance not injected")
     else:
         register_section("plow-latch", _latch_section)
-        register_section("plow-latch-skills", _mac_skills_section)
-        _kick_mac_skills_refresh()
     # Registered unconditionally, like the platform itself: reaching a person
     # (and the group it opens) is handled by default, so gating the one
     # messaging tool on a config nobody has to set would leave it permanently
