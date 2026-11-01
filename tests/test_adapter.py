@@ -96,7 +96,7 @@ class _SendResult:
     retryable: bool = False
 
 
-def _rendered(module: Any, prompt: str, name: Any, identity: Any) -> str:
+def _rendered(module: Any, prompt: str, name: Any, identity: Any, chat_uid: str = "cht_a") -> str:
     """A channel prompt as `_channel_prompt` renders it.
 
     Identity opens it and the answer-ordering rule closes it; the tests below
@@ -104,14 +104,27 @@ def _rendered(module: Any, prompt: str, name: Any, identity: Any) -> str:
     that rule follows the same opt-in production uses -- a prompt that never
     offered the sentinel must not end by reserving it.
     """
-    composed = module._with_identity(prompt, name, identity)
+    composed = module._with_identity(prompt, name, identity, chat_uid)
     tail = (f"{module._ANSWER_LAST}{module._ANSWER_LAST_SILENCE}"
             if module.NO_REPLY_SENTINEL in composed else module._ANSWER_LAST)
     return f"{composed} {tail}"
 
 
+def _install_latch(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> None:
+    """Put a `latch` command on PATH, as the base image installs one."""
+    bin_dir = tmp_path / "latch-bin"
+    bin_dir.mkdir(exist_ok=True)
+    latch = bin_dir / "latch"
+    latch.write_text("#!/bin/sh\nexit 0\n")
+    latch.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+
+
 def _load(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, *, deferred_questions: bool = True) -> Any:
-    """Import the plugin against stub `gateway` modules."""
+    """Import the plugin against stub `gateway` modules, on a PATH with no `latch`
+    (a test that wants one installs it with `_install_latch`)."""
+    monkeypatch.setenv("PATH", os.pathsep.join(
+        d for d in os.environ.get("PATH", "").split(os.pathsep) if not os.path.exists(os.path.join(d, "latch"))))
     config = types.ModuleType("gateway.config")
     config.Platform = lambda name: name  # type: ignore[attr-defined]
 
@@ -1492,6 +1505,7 @@ async def test_one_socket_demuxes_and_checkpoints_two_chats(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     module = _load(monkeypatch, tmp_path)
+    _install_latch(monkeypatch, tmp_path)
     config = SimpleNamespace(extra={})
     adapter = module.PlowChatAdapter(config)
     room = _chat("cht_b", name="Project room", group=True)
@@ -1532,14 +1546,20 @@ async def test_one_socket_demuxes_and_checkpoints_two_chats(
     owner_prompt = handled[1]["channel_prompt"]
     assert owner_prompt == _rendered(module,
         _voiced(module, _owned(module, module.GROUP_AUTHORITY_CHANNEL_PROMPT, room)),
-        None, adapter._identity)
+        None, adapter._identity, "cht_b")
     for block in (module._AUTHORITY, module._NO_RELAY):
         assert block in owner_prompt
     member_prompt = handled[2]["channel_prompt"]
     assert member_prompt == _rendered(module,
-        _voiced(module, _membered(module, module.EXTERNAL_CHANNEL_PROMPT)), None, adapter._identity)
+        _voiced(module, _membered(module, module.EXTERNAL_CHANNEL_PROMPT)), None, adapter._identity, "cht_b")
     for block in (module._SPEAKER_FACT, module._DISCLOSURE, module._NO_RELAY):
         assert block in member_prompt
+    # A latch host judges each call against the chat it names, so no turn may
+    # carry another chat's uid.
+    for event, uid, other in ((handled[0], "cht_a", "cht_b"), (handled[1], "cht_b", "cht_a"),
+                              (handled[2], "cht_b", "cht_a")):
+        assert f"pass `--plow-chat {uid}`" in event["channel_prompt"]
+        assert f"--plow-chat {other}" not in event["channel_prompt"]
     assert module._SPEAKER_FACT not in owner_prompt, "the owner is not a member"
     assert "first-user onboarding" not in owner_prompt.lower()
     assert config.extra["group_sessions_per_user"] is False
@@ -1819,13 +1839,14 @@ def test_the_identity_prefix_says_these_things_in_this_order(
     and which of them this is, skips unnamed lines, and is absent until a
     refresh has read it."""
     module = _load(monkeypatch, tmp_path)
-    prefix = module._with_identity("PROMPT", name, identity)
+    _install_latch(monkeypatch, tmp_path)
+    prefix = module._with_identity("PROMPT", name, identity, "cht_a")
 
     assert prefix.startswith(opening)
     _assert_in_order(prefix, opening, *filter(None, (offer,)), "call plow_offer_invite",
                      *filter(None, (roster, roster and "read from the Mac")),
-                     "The latch command is how you reach", "Reach for it yourself",
-                     module.LATCH_INSTALL, "start latch there", module.DASHBOARD_URL, *_CARDS, "PROMPT")
+                     "This chat's uid is cht_a: pass `--plow-chat cht_a`",
+                     module.DASHBOARD_URL, *_CARDS, "PROMPT")
     assert (_ROSTER in prefix) == (roster is not None)
     assert "+16505550199" not in prefix, "an unnamed line is not a persona"
 
@@ -2044,7 +2065,7 @@ async def test_collaboration_context_names_self_peers_and_current_human_speaker(
     # identity sentence, then the facts, then the collaboration paragraph. The
     # persona answers "what are you" from the prompt, not from memory.
     _assert_in_order(prompt, "You are Elm, a Plow assistant",
-                     module._plow_facts(adapter._identity),
+                     module._plow_facts(adapter._identity, "cht_a"),
                      "Collaboration context: Other Plow agents here: Ash.")
     assert prompt.count("You are ") == 1, "one identity sentence, not two"
     assert "do not impersonate another agent" in prompt.lower()
@@ -3089,137 +3110,6 @@ async def test_a_failing_classifier_writes_nothing(
     assert written == []
 
 
-_STORE_DIR = "/Users/sam/Library/Application Support/AddressBook"
-_STORES = [f"{_STORE_DIR}/AddressBook-v22.abcddb", f"{_STORE_DIR}/Sources/ABCD-1/AddressBook-v22.abcddb"]
-# The shape of Latch's real contacts skill: the resolved ROOT store, bare and
-# inside a recipe's argv; the sync-source stores are left to a find; and a
-# `~/…/` literal that is prose, not a path.
-_SKILL_BODY = ("# The owner's contacts are on this Mac\n\nThere is more than one store. The root one:\n\n"
-               f"    {_STORES[0]}\n\nplus one per sync source under `Sources/<UUID>/`. Sweep them all first:\n\n"
-               f'    plow_run_command {{ argv: ["/usr/bin/find", "{_STORE_DIR}", "-maxdepth", "4", "-name", '
-               '"AddressBook*.abcddb"] }\n\n'
-               f'    plow_run_command {{ argv: ["/usr/bin/sqlite3", "-readonly", "-header", "-csv", "{_STORES[0]}", '
-               '"select count(*) from ZABCDRECORD;"] }\n\n'
-               "a literal `~/…/AddressBook-v22.abcddb` argument would fail to open.")
-
-
-def test_the_store_directory_comes_from_the_contacts_skill(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> None:
-    module = _load(monkeypatch, tmp_path)
-    assert module._contacts_store_dir(_SKILL_BODY) == _STORE_DIR
-    with pytest.raises(ValueError):
-        module._contacts_store_dir("# a skill that names no store")
-
-
-@pytest.mark.parametrize("rows, expected", [
-    # Half the store is "(714) 393-3614"-shaped: digits decide, and a leading 1 is not a difference.
-    ([{"name": "Patrick Salyer", "phone": "(714) 393-3614", "email": None}],
-     {"+17143933614": "Patrick Salyer"}),
-    # Two records share a number: nobody is named.
-    ([{"name": "Patrick Salyer", "phone": "+17143933614", "email": None},
-      {"name": "P. Salyer", "phone": "+1 714 393 3614", "email": None}], {}),
-    # Emails match case-folded; one record with two rows is still one record.
-    ([{"name": "Chu", "phone": None, "email": "CMchu@x.com"},
-      {"name": "Chu", "phone": "+15550001111", "email": None}],
-     {"cmchu@x.com": "Chu"}),
-    # The same card in the root store and its iCloud source is one person; a nameless company card is nobody.
-    ([{"name": "Patrick Salyer", "phone": "+17143933614", "email": None},
-      {"name": "Patrick Salyer", "phone": "(714) 393-3614", "email": None},
-      {"name": "", "phone": "+17143933614", "email": None}],
-     {"+17143933614": "Patrick Salyer"}),
-    ([], {}),
-])
-def test_a_handle_resolves_only_to_exactly_one_card(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, rows: list[dict[str, Any]], expected: dict[str, str]
-) -> None:
-    module = _load(monkeypatch, tmp_path)
-    assert module._resolve_handles(rows, ["+17143933614", "cmchu@x.com"]) == expected
-
-
-async def test_bare_handles_are_named_from_the_owners_mac_after_a_reach_refresh(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
-) -> None:
-    """The listing showed a handle; the owner's own Contacts know the name;
-    nobody had to ask. Ambiguous and already-named rows are left alone, and
-    the Mac being unreachable costs nothing but a log line."""
-    module = _load(monkeypatch, tmp_path)
-    monkeypatch.setenv("PLOW_MCP_URL", "https://relay.example/mcp")
-    monkeypatch.setenv("PLOW_AGENT_TOKEN", "t")
-    relay_calls: list[tuple[str, dict[str, Any]]] = []
-    book = [{"provider_key": "+15550000001", "display_name": "Sam", "relationship": None, "role": "owner"}]
-
-    def relay(url: str, token: str, name: str, arguments: dict[str, Any], timeout: float) -> dict[str, Any]:
-        relay_calls.append((name, arguments))
-        if name == "plow_read_skill":
-            return {"body": _SKILL_BODY}
-        if arguments["argv"][0] == "/usr/bin/find":
-            return {"status": "completed", "exit_code": 0, "output": "\n".join(_STORES) + "\n"}
-        if arguments["argv"][3] == _STORES[1]:   # a sync source on another schema version: skipped, not fatal
-            return {"status": "completed", "exit_code": 1, "output": "Parse error: no such column: ZOWNER\n"}
-        # While the Mac answers, a turn's capture names Dana from her own words:
-        # the card fills an empty row only, so hers is left as she gave it.
-        book.append({"provider_key": "+15559990000", "display_name": "Dana", "relationship": None, "role": "member"})
-        rows = [{"name": "Patrick Salyer", "phone": "+17143933614", "email": None},
-                {"name": "Dana Quinn", "phone": "+15559990000", "email": None}]
-        return {"status": "completed", "exit_code": 0, "output": json.dumps(rows)}
-
-    monkeypatch.setattr(module, "_relay_call", relay)
-    adapter, written = _people_adapter(module, monkeypatch, [_chat("cht_a")], book)
-    chat = _chat("cht_b", group=True)
-    chat["participants"][2]["provider_key"] = "+17143933614"
-    chat["participants"].append({"type": "member", "uid": "mem_chu_cht_b", "role": "member",
-                                 "display_name": "Chu", "provider_key": "+15550000003"})
-    chat["participants"].append({"type": "member", "uid": "mem_dana_cht_b", "role": "member",
-                                 "provider_key": "+15559990000"})
-    done = threading.Event()
-    monkeypatch.setattr(module, "_backfill_done", done.set)   # test seam: fires after the thread finishes
-    monkeypatch.setattr(module, "_backfill", {"tried_at": 0.0, "lock": threading.Lock()})
-    adapter._set_reach([_chat("cht_a"), chat])
-    await asyncio.get_running_loop().run_in_executor(None, done.wait, 5)
-    assert written == [("+17143933614", {"display_name": "Patrick Salyer"})]
-    assert [name for name, _ in relay_calls] == ["plow_read_skill"] + ["plow_run_command"] * 3
-    sweep, *queries = (arguments for _, arguments in relay_calls[1:])
-    assert sweep["argv"][:2] == ["/usr/bin/find", _STORE_DIR]
-    assert [q["argv"][:4] for q in queries] == [["/usr/bin/sqlite3", "-readonly", "-json", s] for s in _STORES]
-    # The query carries the bare handle's digits -- not a wildcard sweep, and
-    # never the owner's or an already-named member's: empty names only.
-    sql = queries[0]["argv"][-1]
-    assert "3933614" in sql and "9990000" in sql and "0000001" not in sql and "0000003" not in sql
-    # What the owner's approval dialog, the adversarial reviewer and the audit log show.
-    assert all(a["read_paths"] == [_STORE_DIR] and a["goal"] == module.BACKFILL_GOAL for a in (sweep, *queries))
-    # The listing tool refreshes reach on every call; within BACKFILL_RETRY_S the Mac is not asked again.
-    tried_at = module._backfill["tried_at"]
-    adapter._set_reach([_chat("cht_a"), chat])
-    assert module._backfill["tried_at"] == tried_at and len(relay_calls) == 4
-
-
-def _mac_offline(*a: Any, **k: Any) -> dict[str, Any]:
-    raise OSError("mac offline")
-
-
-def _mac_without_stores(url: str, token: str, name: str, arguments: dict[str, Any], timeout: float) -> dict[str, Any]:
-    if name == "plow_read_skill":
-        return {"body": _SKILL_BODY}
-    return {"status": "completed", "exit_code": 1, "output": f"find: {_STORE_DIR}: No such file or directory\n"}
-
-
-@pytest.mark.parametrize("relay", [_mac_offline, _mac_without_stores])
-async def test_backfill_leaves_the_listing_alone_when_the_mac_cannot_answer(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, relay: Any
-) -> None:
-    module = _load(monkeypatch, tmp_path)
-    monkeypatch.setenv("PLOW_MCP_URL", "https://relay.example/mcp")
-    monkeypatch.setenv("PLOW_AGENT_TOKEN", "t")
-    monkeypatch.setattr(module, "_relay_call", relay)
-    adapter, written = _people_adapter(module, monkeypatch, [_chat("cht_a")], [])
-    done = threading.Event()
-    monkeypatch.setattr(module, "_backfill_done", done.set)
-    monkeypatch.setattr(module, "_backfill", {"tried_at": 0.0, "lock": threading.Lock()})
-    adapter._set_reach([_chat("cht_a"), _chat("cht_b", group=True)])
-    await asyncio.get_running_loop().run_in_executor(None, done.wait, 5)
-    assert written == []
-    assert set(adapter.chat_uids) == {"cht_a", "cht_b"}
-
-
 def _authority_case_read_the_book(module: Any, monkeypatch: pytest.MonkeyPatch, turn: dict[str, Any] | None, authorized: bool) -> None:
     """The mirror of naming's gate: a no-turn cron caller reads, where it refuses to write."""
     record: list[Any] = []
@@ -3520,7 +3410,6 @@ def test_platform_declaration_carries_the_facts_hermes_reads_off_it(
     which is where this channel says it is the agent's own line, the one place
     a per-channel identity fact has to live."""
     module = _load(monkeypatch, tmp_path)
-    monkeypatch.delenv("PLOW_MCP_URL", raising=False)
     ctx = mock.Mock()
     module.register(ctx)
     [kwargs] = [call.kwargs for call in ctx.register_platform.call_args_list if call.kwargs["name"] == "plow_chat"]
@@ -3529,15 +3418,15 @@ def test_platform_declaration_carries_the_facts_hermes_reads_off_it(
     # How a file reaches this chat (#156): Hermes intercepts MEDIA: tags, but a
     # plugin platform's hint is the only place the model learns that.
     assert "MEDIA:/absolute/path/to/file" in kwargs["platform_hint"]
-    # The owner's world is on the Mac (#129): the hint is in force from the
-    # first turn, before any section or skill is read -- and only when there
-    # is a Mac, which plow-init signals with PLOW_MCP_URL.
-    assert "on their Mac behind the plow_ tools" not in kwargs["platform_hint"]
-    monkeypatch.setenv("PLOW_MCP_URL", "https://api.plow.co/v1/relay/devices/u/mcp")
+    # The owner's world is on their machines (#129): the hint is in force from
+    # the first turn, before any section or skill is read -- and only when
+    # latch is installed to reach them.
+    assert "reached with latch" not in kwargs["platform_hint"]
+    _install_latch(monkeypatch, tmp_path)
     ctx = mock.Mock()
     module.register(ctx)
     [kwargs] = [call.kwargs for call in ctx.register_platform.call_args_list if call.kwargs["name"] == "plow_chat"]
-    assert "on their Mac behind the plow_ tools" in kwargs["platform_hint"]
+    assert "on their machines, reached with latch" in kwargs["platform_hint"]
 
 
 @pytest.mark.parametrize(
@@ -3557,16 +3446,16 @@ def test_platform_declaration_carries_the_facts_hermes_reads_off_it(
     ids=["no_sessions", "hits", "contacts", "contacts_refused", "chats",
          "memory_error_not_routed", "unknown_tool", "malformed", "not_a_string"],
 )
-def test_an_empty_own_store_result_routes_the_model_to_the_mac(
+def test_an_empty_own_store_result_routes_the_model_to_the_owners_machines(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, tool: str, result: Any, routed: bool,
 ) -> None:
     """A fresh agent's own stores answer "nothing", and the model reports that
-    as absence in the owner's world (#127). With a Mac connected, the result
-    the model reads carries the route to the Mac exactly when the store it came
+    as absence in the owner's world (#127). With latch installed, the result
+    the model reads carries the route to their machines exactly when the store it came
     from cannot answer for the owner; anything else -- hits, a memory error,
     other tools, unparseable -- is the result as Hermes had it."""
-    monkeypatch.setenv("PLOW_MCP_URL", "https://api.plow.co/v1/relay/devices/u/mcp")
     module = _load(monkeypatch, tmp_path)
+    _install_latch(monkeypatch, tmp_path)
     ctx = mock.Mock()
     module.register(ctx)
     assert ("transform_tool_result", module._route_tool_result) in [c.args for c in ctx.register_hook.call_args_list]
@@ -3578,15 +3467,14 @@ def test_an_empty_own_store_result_routes_the_model_to_the_mac(
         assert out is result
         return
     parsed = json.loads(out)
-    assert parsed["routing_hint"].endswith(module._MAC_ROUTE)
-    assert "plow_list_skills" in parsed["routing_hint"] and "plow_read_skill" in parsed["routing_hint"]
+    assert parsed["routing_hint"].endswith(module._LATCH_ROUTE)
+    assert "latch status" in parsed["routing_hint"]
     assert {k: v for k, v in parsed.items() if k != "routing_hint"} == json.loads(result)
 
 
-def test_no_mac_no_routing_hint(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> None:
-    """With no Mac (PLOW_MCP_URL unset) there are no plow_ tools to route to,
-    so an empty own-store result is left exactly as Hermes had it (#127/#130)."""
-    monkeypatch.delenv("PLOW_MCP_URL", raising=False)
+def test_no_latch_no_routing_hint(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> None:
+    """Without latch there are no machines to route to, so an empty own-store
+    result is left exactly as Hermes had it (#127/#130)."""
     module = _load(monkeypatch, tmp_path)
     empty = json.dumps({"success": True, "results": [], "count": 0, "sessions_searched": 0})
     assert module._route_tool_result(tool_name="session_search", args={}, result=empty) is None
@@ -6206,118 +6094,6 @@ async def test_turn_open_reads_the_sentinel_contract_off_the_prompt(
         await adapter.on_processing_complete(event, None)
 
 
-def _install_mcp_tools(monkeypatch, servers, signal):
-    core = types.ModuleType("tools.mcp_tool")
-    core._lock = threading.Lock()  # type: ignore[attr-defined]
-    core._servers = servers  # type: ignore[attr-defined]
-    loop_mod = types.ModuleType("tools.mcp_tool_loop")
-    loop_mod._signal_reconnect_and_wait = signal  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "tools", types.ModuleType("tools"))
-    monkeypatch.setitem(sys.modules, "tools.mcp_tool", core)
-    monkeypatch.setitem(sys.modules, "tools.mcp_tool_loop", loop_mod)
-
-
-@pytest.mark.parametrize(("mac", "parked", "session", "expected"), [
-    (True, True, None, ["plow"]),      # parked after a Plow deploy: reconnect now
-    (True, False, None, ["plow"]),     # mid-reconnect with no session yet: nudge it
-    (True, False, object(), []),       # healthy: leave it alone
-    (True, True, object(), []),        # revived, keepalive not yet passed: a reconnect would re-park it
-    (False, True, None, []),           # no Mac on this account: nothing to wake
-], ids=["parked", "dead-session", "healthy", "revived-unproven", "no-mac"])
-async def test_a_turn_schedules_a_background_latch_reconnect(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
-    mac: bool, parked: bool, session: Any, expected: list[str],
-) -> None:
-    """Turn start schedules a best-effort reconnect for a parked Latch link.
-    The current turn does not wait; a later turn can use the restored tools.
-    Healthy links and unrelated MCP servers are left alone."""
-    module = _load(monkeypatch, tmp_path)
-    url = "https://api.plow.co/v1/relay/devices/u/mcp"
-    if mac:
-        monkeypatch.setenv("PLOW_MCP_URL", url)
-    else:
-        monkeypatch.delenv("PLOW_MCP_URL", raising=False)
-    latch = SimpleNamespace(name="plow", _config={"url": url}, _was_parked=parked, session=session)
-    other = SimpleNamespace(name="gbrain", _config={"url": "https://gbrain.example/mcp"}, _was_parked=True,
-                            session=None)
-    woken: list[str] = []
-
-    def signal(server_name: str, srv: Any, *, op_description: str, timeout: float) -> bool:
-        assert srv is latch and timeout > 0 and op_description
-        woken.append(server_name)
-        srv.session = object()
-        return True
-
-    _install_mcp_tools(monkeypatch, {("plow", None): latch, ("gbrain", None): other}, signal)
-
-    adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
-    adapter._set_reach([_chat("cht_a")])
-    event = SimpleNamespace(
-        source=SimpleNamespace(chat_id="cht_a", chat_type="dm", user_id="u", role_authorized=True),
-        message_id="msg_1", channel_prompt=module.OWNER_CHANNEL_PROMPT, authority=True, recall_everywhere=True)
-    await adapter.on_processing_start(event)
-    try:
-        # The wake is scheduled, not awaited, so the assertion joins it here --
-        # the turn did not.
-        if adapter._mac_wake is not None:
-            await adapter._mac_wake
-        assert woken == expected
-        assert adapter._active_turn.get()["chat_uid"] == "cht_a"  # the turn still opened
-    finally:
-        await adapter.on_processing_complete(event, None)
-
-
-async def test_a_parked_mac_costs_the_turn_no_wall_clock(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
-) -> None:
-    """The turn opens while the wake is still blocked.
-
-    A Mac that is off keeps its server parked, and the wake polls for up to
-    15 s -- which used to be 15 s in front of every message from an owner who
-    has never paired one. The reconnect is still signalled; it just no longer
-    happens between the message and the model.
-    """
-    module = _load(monkeypatch, tmp_path)
-    url = "https://mac.example/mcp"
-    monkeypatch.setenv("PLOW_MCP_URL", url)
-    latch = SimpleNamespace(name="plow", _config={"url": url}, _was_parked=True, session=None)
-    entered, release, woken = threading.Event(), threading.Event(), []
-
-    def signal(server_name: str, srv: Any, *, op_description: str, timeout: float) -> bool:
-        entered.set()
-        release.wait(5)          # stands in for a parked server's poll
-        woken.append(server_name)
-        return True
-
-    _install_mcp_tools(monkeypatch, {("plow", None): latch}, signal)
-
-    adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
-    adapter._set_reach([_chat("cht_a")])
-    event = SimpleNamespace(
-        source=SimpleNamespace(chat_id="cht_a", chat_type="dm", user_id="u", role_authorized=True),
-        message_id="msg_1", channel_prompt=module.OWNER_CHANNEL_PROMPT, authority=True, recall_everywhere=True)
-
-    await adapter.on_processing_start(event)
-    try:
-        # Returned with the wake still inside `signal`: the turn is open and
-        # the reconnect has not finished.
-        assert adapter._active_turn.get()["chat_uid"] == "cht_a"
-        # Awaited, not `Event.wait`: the wake runs on the loop this test is
-        # also on, and blocking it would stop the very task being waited for.
-        for _ in range(500):
-            if entered.is_set():
-                break
-            await asyncio.sleep(0.01)
-        assert entered.is_set(), "the reconnect was never signalled"
-        assert woken == [], "the turn waited for the wake"
-    finally:
-        release.set()
-        if adapter._mac_wake is not None:
-            await adapter._mac_wake
-        await adapter.on_processing_complete(event, None)
-    assert woken == ["plow"], "the reconnect still happens, off the turn"
-
-
 @pytest.mark.parametrize(("chat_uid", "group", "trusted", "authority"),
                          [("cht_b", False, False, True), ("cht_b", True, False, False),
                           ("cht_b", True, True, False), ("cht_gone", True, True, False)],
@@ -7482,119 +7258,47 @@ def _registered_prompt_sections(module: Any) -> dict[str, Any]:
     return sections
 
 
-def test_latch_section_renders_only_when_a_mac_is_connected(
+def test_latch_section_renders_only_when_latch_is_installed(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: pathlib.Path,
 ) -> None:
-    """Hermes drops MCP `instructions`, so the plugin is what tells a Hermes
-    agent that the plow_ tools are the owner's Mac and the default for owner
-    work. plow-init exports PLOW_MCP_URL exactly when a Mac exists; without
-    it the section renders empty and Hermes skips it."""
+    """The section is how a Hermes agent learns to reach its owner's machines
+    with latch, which host to use, and what to do when one is asleep. Without
+    a latch command it renders empty and Hermes skips it."""
     module = _load(monkeypatch, tmp_path)
     render = _registered_prompt_sections(module)["plow-latch"]
-
-    monkeypatch.delenv("PLOW_MCP_URL", raising=False)
     assert render({}) == ""
 
-    monkeypatch.setenv("PLOW_MCP_URL", "https://api.plow.co/v1/relay/devices/u/mcp")
+    _install_latch(monkeypatch, tmp_path)
     text = render({})
     assert text == module.LATCH_PROMPT
-    assert len(text) <= module.HERMES_SECTION_MAX_CHARS, "Hermes skips a section over max_chars"
-    for must in ("Latch", "plow_list_skills", "plow_", "not connected",
-                 # One messaging tool now: it sends to a person and lists chats.
-                 "plow_send_message", "action=list",
-                 # The agent's lines are the default; owner-account email is
-                 # an explicit exception governed by the installed skill.
-                 "AS your owner",
-                 "defaults to your own lines", "only when explicitly requested",
-                 "in a chat with their authority", "Google Workspace skill",
-                 "An email turn cannot use that route",
-                 # A group the owner asks the agent to open begins trusted.
-                 "trusted=true",
-                 # 'Email John' leaves from the agent's own mailbox, through its
-                 # own tool, rather than the model going to the Mac for it.
-                 "'email John'", "plow_send_email", "from your own mailbox", "your owner copied",
-                 # A draft is shown where it was asked for and sent on the
-                 # owner's word, never sent because it was written.
-                 "show the draft", "only when your owner says so",
-                 # What the tools are for, in jobs rather than tool names, and
-                 # that earlier agents' work persists on the Mac: an agent that
-                 # knew only the possessive rule searched its own sessions for
-                 # "did Plow do X for me" and declared it out of reach.
-                 "end to end", "plow_history",
-                 # Hermes drops Latch's MCP instructions, so this fallback must
-                 # carry the browser-verification ownership rationale itself.
-                 "verifies the owner whose browser and account you are using",
-                 "not whether you are human",
-                 "Complete it and continue",
-                 # Measured on a real agent with the real Latch tool list
-                 # (2026-09-11): three prompt variants that stated the rule
-                 # mid-section went 0/4 on a first-turn Mac read; the same
-                 # rule as the section's opening sentence, phrased as the
-                 # turn's first tool call, went 3/3.
-                 "your first tool call is on their "
-                 "Mac",
-                 # A/B on the real tool list (2026-09-11): the deferral above got the
-                 # agent to call plow_list_skills and then answer "no" over the
-                 # manifest; the listing has to be read as a table of contents.
-                 "plow_read_skill it and do what it says this turn",
-                 "until a plow_ tool has looked",
-                 # A Plow deploy drops the Mac link for ~2 min several times a
-                 # day. The model must read a missing plow_ tool or a server
-                 # error as Plow restarting, retry next turn, and only send the
-                 # owner to Latch after two 'not connected' turns apart.
-                 "restarts several times a day", "retry in a minute", "two turns",
-                 ):
-        assert must in text
-    assert "mcp__plow__" not in text, "the server key differs between installs; name the tool prefix only"
-    assert "not your owner" in text
-    # Owned by the base persona now (plow-hermes-agent image/seed/SOUL.md
+    assert len(text) <= 4000, "Hermes drops a section over its 4000-char max"
+    for must in (
+        # Their world is on their machines: look there before answering from
+        # your own stores, and never deny it until latch has looked.
+        "before session_search or memory", "until latch has looked this turn",
+        "Texts an earlier agent sent", "read your latch skill",
+        # Choose the host by the task, falling back when one is asleep --
+        # except Messages and contacts, which are the Mac's alone.
+        "`latch status`", "any online host with `google` on", "the choice matters",
+        "only on their Mac", "try another online host", "do not try another host",
+        "pass `--host` on every command",
+        # Every call names the chat the host judges it against.
+        "`--plow-chat`", "`latch status` takes no `--plow-chat`",
+        "`no_host`", module.LATCH_INSTALL, "two turns a few minutes apart",
+        "Never do the task on your own server instead",
+        # The agent's lines are the default; owner-account mail is explicit.
+        "plow_send_message", "plow_send_email", "sends as your owner", "in a chat with their authority",
+        "CAPTCHA", "complete it and continue",
+    ):
+        assert must in text, must
+    for must_not in ("plow_list_skills", "plow_read_skill", "plow_history", "mcp__"):
+        assert must_not not in text, "the relay's tools are gone"
+    # Owned by the base persona (plow-hermes-agent image/seed/SOUL.md
     # § Your own lines, and your owner's accounts) — a second copy here would
     # be a second owner to drift.
     for must_not in ("authorship as well as authority", "as yourself"):
         assert must_not not in text
-
-
-def test_mac_skills_section_renders_the_manifest_as_prompt_text(monkeypatch, tmp_path):
-    """The Mac's skill descriptions are the routing instructions for its
-    stores; read through the tool they arrive as untrusted data, so the
-    plugin renders them into the trusted prompt. No Mac, no section; a fetch
-    that fails renders nothing and never raises into the prompt builder."""
-    module = _load(monkeypatch, tmp_path)
-    monkeypatch.delenv("PLOW_MCP_URL", raising=False)
-    render = _registered_prompt_sections(module)["plow-latch-skills"]
-    assert render({}) == ""
-
-    manifest = [
-        {"name": "imessage", "description": "Read and send the owner's iMessages rather than answering that you cannot see their messages."},
-        {"name": "google-workspace", "description": "Read and act on the owner's Gmail and Google Calendar."},
-    ]
-    text = module._render_mac_skills(manifest)
-    assert text.startswith(module.MAC_SKILLS_HEAD)
-    assert "- imessage: Read and send the owner's iMessages" in text
-    assert "- google-workspace:" in text
-    assert "plow_read_skill" in text and "before session_search" in text
-    assert module._render_mac_skills([]) == ""
-    # A manifest that would push the two sections past Hermes' aggregate
-    # budget is cut, never skipped whole: Hermes renders the sections sorted
-    # by id, latch first, and drops whichever section crosses the total.
-    big = [{"name": f"skill{i}", "description": "x" * 900} for i in range(30)]
-    trimmed = module._render_mac_skills(big)
-    assert "- skill0: " in trimmed
-    assert (module._hermes_sections_overhead()
-            + module._hermes_section_chars("plow-latch", module.LATCH_PROMPT)
-            + module._hermes_section_chars("plow-latch-skills", trimmed)
-            <= module.HERMES_SECTIONS_TOTAL_CHARS)
-
-    # The section serves the cache; a refresh that fails leaves it empty.
-    monkeypatch.setenv("PLOW_MCP_URL", "https://api.plow.co/v1/relay/devices/u/mcp")
-    monkeypatch.setenv("PLOW_AGENT_TOKEN", "t")
-    monkeypatch.setattr(module, "_fetch_mac_skills", lambda url, token, timeout=8.0: (_ for _ in ()).throw(OSError("off")))
-    module._refresh_mac_skills()
-    assert render({}) == ""
-    monkeypatch.setattr(module, "_fetch_mac_skills", lambda url, token, timeout=8.0: manifest)
-    module._refresh_mac_skills()
-    assert render({}) == text
 
 
 @contextlib.contextmanager
@@ -7607,108 +7311,6 @@ def _serve(handler: type[http.server.BaseHTTPRequestHandler]) -> Iterator[str]:
     finally:
         server.shutdown()
         server.server_close()
-
-
-@pytest.mark.parametrize(("result", "expected"), [
-    ({"content": [{"type": "text", "text": json.dumps({"status": "completed", "path": "/p", "content": "hi"})}]},
-     {"status": "completed", "path": "/p", "content": "hi"}),
-    ({"structuredContent": {"skills": []}, "content": [{"type": "text", "text": "ignored"}]}, {"skills": []}),
-    ({"isError": True, "content": [{"type": "text", "text": json.dumps({"diagnosis": {"cause": "not_found"}})}]},
-     "not_found"),
-    ({"content": [{"type": "text", "text": json.dumps({"status": "pending", "handle": "h"})}]}, "pending"),
-], ids=["completed", "structured", "not-found", "pending"])
-def test_relay_call_returns_a_completed_payload_and_raises_with_the_cause_otherwise(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, result: dict[str, Any], expected: Any
-) -> None:
-    module = _load(monkeypatch, tmp_path)
-    seen: list[dict[str, Any]] = []
-
-    class _Handler(http.server.BaseHTTPRequestHandler):
-        def do_POST(self) -> None:
-            seen.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
-            body = f"event: message\ndata: {json.dumps({'jsonrpc': '2.0', 'id': 1, 'result': result})}\n\n".encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "text/event-stream")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-
-        def log_message(self, *_a: Any) -> None: ...
-
-    with _serve(_Handler) as base_url:
-        url = f"{base_url}/mcp"
-        if isinstance(expected, str):
-            with pytest.raises(module._RelayToolError) as excinfo:
-                module._relay_call(url, "t", "plow_read_file", {"path": "~/x"}, 5.0)
-            assert excinfo.value.args[0] == expected
-        else:
-            assert module._relay_call(url, "t", "plow_read_file", {"path": "~/x"}, 5.0) == expected
-    assert seen[0]["params"] == {"name": "plow_read_file", "arguments": {"path": "~/x"}}
-
-
-def test_fetch_mac_skills_refuses_a_redirect(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> None:
-    """The manifest fetch carries the agent's line-scoped bearer token, and the
-    relay is transparent: a compromised owner Mac answering with a cross-host
-    302 would hand that token to the attacker's host if urllib followed it. The
-    fetch refuses every redirect -- it raises, and never re-requests the
-    target."""
-    module = _load(monkeypatch, tmp_path)
-    hits: list[str] = []
-
-    class _Handler(http.server.BaseHTTPRequestHandler):
-        def do_POST(self) -> None:
-            hits.append(self.path)
-            self.send_response(302)
-            self.send_header("Location", "http://attacker.example/steal?t=line-scoped-token")
-            self.end_headers()
-
-        def log_message(self, *_a: Any) -> None:
-            ...
-
-    with _serve(_Handler) as base_url:
-        url = f"{base_url}/mcp"
-        with pytest.raises(urllib.error.HTTPError) as excinfo:
-            module._fetch_mac_skills(url, "line-scoped-token", timeout=5.0)
-        # The refusal must not carry the attacker-controlled Location, which
-        # can reflect the bearer token, into the error that gets logged.
-        assert "attacker.example" not in str(excinfo.value)
-        assert "line-scoped-token" not in str(excinfo.value)
-        # Nothing from the Mac's response headers reaches the error, either.
-        assert excinfo.value.headers.get("Location") is None
-        assert "attacker.example" not in str(dict(excinfo.value.headers))
-
-    assert hits == ["/mcp"], "followed the redirect instead of refusing it at the first host"
-
-
-
-def test_refresh_mac_skills_logs_no_mac_controlled_content(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture
-) -> None:
-    """A failed fetch is logged by exception TYPE only. A compromised Mac's
-    response — here a redirect reflecting the token into its Location — must
-    never reach the persisted log line, by the error message or the arg."""
-    module = _load(monkeypatch, tmp_path)
-
-    class _Handler(http.server.BaseHTTPRequestHandler):
-        def do_POST(self) -> None:
-            self.send_response(302)
-            self.send_header("Location", "http://attacker.example/steal?t=line-scoped-token")
-            self.end_headers()
-
-        def log_message(self, *_a: Any) -> None:
-            ...
-
-    with _serve(_Handler) as base_url:
-        monkeypatch.setenv("PLOW_MCP_URL", f"{base_url}/mcp")
-        monkeypatch.setenv("PLOW_AGENT_TOKEN", "line-scoped-token")
-        with caplog.at_level("INFO"):
-            module._refresh_mac_skills()
-
-    logged = "\n".join(r.getMessage() for r in caplog.records)
-    assert "not fetched" in logged
-    assert "HTTPError" in logged  # the type name, our fixed diagnostic
-    assert "attacker.example" not in logged
-    assert "line-scoped-token" not in logged
 
 
 def _stub_mirror(
@@ -7993,15 +7595,17 @@ _CHUNKS_PATH = "~/Plow/wiki/.wiki/chunks.json"
 
 @pytest.fixture
 def mac_wiki(monkeypatch: pytest.MonkeyPatch, embed_server: Any) -> Iterator[dict[str, str]]:
-    """The owner's ~/Plow/wiki on a machine latch reaches: `latch file get` / `latch file put` over
-    this dict, each run acting for the owner's home chat."""
+    """The owner's ~/Plow/wiki on the wiki host: `latch file get` / `latch file put` over
+    this dict, each run on PLOW_WIKI_HOST and acting for the owner's home chat."""
     files = {_CHUNKS_PATH: json.dumps(_WIKI_CHUNKS)}
     # The folders the owner's machine has; like `latch file put`, a write into any other fails.
     folders = {"~/Plow", "~/Plow/wiki", "~/Plow/wiki/.wiki"}
 
-    def latch(argv: list[str], *, env: dict[str, str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
-        assert argv[:2] == ["latch", "file"] and env["LATCH_PLOW_CHAT"] == env["PLOW_HOME_CHANNEL"]
-        verb, source, dest = argv[2:]
+    def latch(argv: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        assert argv[:2] == ["latch", "file"]
+        verb, source, dest, *flags = argv[2:]
+        assert dict(zip(flags[::2], flags[1::2])) == {
+            "--plow-chat": os.environ["PLOW_HOME_CHANNEL"], "--host": "mba"}
         if verb == "put" and dest.rsplit("/", 1)[0] in folders:
             files[dest] = pathlib.Path(source).read_text()
         elif verb == "get" and source in files:
@@ -8012,7 +7616,7 @@ def mac_wiki(monkeypatch: pytest.MonkeyPatch, embed_server: Any) -> Iterator[dic
         return subprocess.CompletedProcess(argv, 0, "", "")
 
     monkeypatch.setattr(subprocess, "run", latch)
-    monkeypatch.delenv("LATCH_PLOW_CHAT", raising=False)
+    monkeypatch.setenv("PLOW_WIKI_HOST", "mba")
     monkeypatch.setenv("PLOW_WIKI_EMBED_URL", embed_server.url)
     yield files
 
@@ -8192,12 +7796,12 @@ def test_wiki_recall_reaches_for_the_agents_own_last_words_when_the_reply_is_thi
 
 @pytest.mark.parametrize(("env", "registered"), [
     ({"PLOW_WIKI_EMBED_URL": "http://e"}, True),
-    ({"PLOW_MCP_URL": "https://m"}, False),
+    ({}, False),
 ], ids=["embedder", "no-embedder"])
 def test_wiki_recall_is_registered_only_with_an_embedder(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, env: dict[str, str], registered: bool
 ) -> None:
-    for name in ("PLOW_WIKI_EMBED_URL", "PLOW_MCP_URL"):
+    for name in ("PLOW_WIKI_EMBED_URL",):
         monkeypatch.delenv(name, raising=False)
     for name, value in env.items():
         monkeypatch.setenv(name, value)

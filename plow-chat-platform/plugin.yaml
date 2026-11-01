@@ -31,9 +31,9 @@ optional_env:
     prompt: "Plow API base URL"
     secret: false
     password: false
-  - name: PLOW_MCP_URL
-    description: "Mac relay MCP URL; plow-init exports it when the account has a Mac. When set, the plugin adds the Latch routing section to the system prompt"
-    prompt: "Plow Mac relay URL"
+  - name: PLOW_WIKI_HOST
+    description: "The latch host that holds ~/Plow/wiki; wiki recall reaches it with --host. Unset: latch's default host"
+    prompt: "Wiki latch host"
     secret: false
     password: false
   - name: PLOW_WIKI_EMBED_URL

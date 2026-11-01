@@ -1,7 +1,7 @@
 ---
 name: owners-mac
 description: "Any question about your owner's life or history — their messages, mail, calendar, contacts, files, browser, or what Plow or an earlier agent did for them — is answered from their own machines through latch, not from your own sessions, memory or contacts. Use this before saying you have no record of something."
-version: 2.0.0
+version: 2.1.0
 ---
 
 # The owner's machines — where their world is
@@ -32,15 +32,18 @@ each request.
    machine (`latch file`, `latch exec`), the web in a browser on their
    machine (`latch browser`). That browser is a fresh session, not one
    already signed in: sign in with the login saved in their vault
-   (`latch browser fill`), or hand the session to the owner.
-3. Do what the latch skill says, in the same turn, before you reply. Read
+   (`latch browser fill`), or hand the session to the owner. If the
+   machine you picked is offline, use another that can do it; texts and
+   contacts are the exception, only on their Mac.
+3. Do what the latch skill says, in the same turn, before you reply,
+   naming this chat with `--plow-chat` on every call but `latch status`. Read
    the result back to the owner; the answer comes first, any caveat
    after.
 
 Take the route whenever the question is about the owner's life or
 history, and before saying "I don't see it", "no record of that" or
 "we've only just met" about anything in their world. First contact is
-not an exception. If latch cannot reach the machine, say so plainly.
+not an exception. If no machine that can do it is reachable, say so plainly.
 Never do the task on your server instead, and never answer from your
 own stores as if they were the owner's.
 
