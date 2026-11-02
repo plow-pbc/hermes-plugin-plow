@@ -7282,21 +7282,22 @@ def _registered_prompt_sections(module: Any) -> dict[str, Any]:
     return sections
 
 
-def test_latch_section_renders_only_when_latch_is_installed(
+def test_every_turn_carries_the_latch_guidance_only_when_latch_is_installed(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: pathlib.Path,
 ) -> None:
-    """The section is how a Hermes agent learns to reach its owner's machines
-    with latch, which host to use, and what to do when one is asleep. Without
-    a latch command it renders empty and Hermes skips it."""
+    """The guidance is how a Hermes agent learns to reach its owner's machines
+    with latch, which host to use, and what to do when one is asleep. It rides
+    on every turn rather than the session's frozen system prompt, so a session
+    opened before a revision still gets the current rules; without a latch
+    command there is nothing to route to and no turn carries it."""
     module = _load(monkeypatch, tmp_path)
-    render = _registered_prompt_sections(module)["plow-latch"]
-    assert render({}) == ""
+    assert module.LATCH_PROMPT not in module._plow_facts({"lines": []}, "cht_a")
+    assert _registered_prompt_sections(module) == {}, "no frozen copy in the session prompt"
 
     _install_latch(monkeypatch, tmp_path)
-    text = render({})
-    assert text == module.LATCH_PROMPT
-    assert len(text) <= 4000, "Hermes drops a section over its 4000-char max"
+    assert module.LATCH_PROMPT in module._plow_facts({"lines": []}, "cht_a")
+    text = module.LATCH_PROMPT
     for must in (
         # Their world is on their machines: look there before answering from
         # your own stores, and never deny it until latch has looked.
