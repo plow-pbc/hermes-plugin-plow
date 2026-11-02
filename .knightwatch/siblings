@@ -10,7 +10,7 @@
 # tree into the image and pins it; `agent-mgr` pins and installs it by SHA for
 # the Docker fleet. Both decide where these files land, so a change to the
 # installed set has to be read against them. `latch` owns the gog grammar and
-# the tool copy this plugin's Latch section restates.
+# the tool copy this plugin's latch guidance (LATCH_PROMPT) restates.
 
 plow-pbc/plow
 plow-pbc/plow-hermes-agent

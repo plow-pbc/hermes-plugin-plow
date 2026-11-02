@@ -30,7 +30,7 @@ import urllib.request
 import uuid
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
-from typing import Any, Callable, Mapping
+from typing import Any, Callable
 
 import aiohttp
 import agent.redact as _hermes_redact
@@ -906,12 +906,12 @@ _ANSWER_LAST_SILENCE = (
     "And when this turn is not yours to answer at all, open with "
     f"{NO_REPLY_SENTINEL} on its own line; what follows it is never posted. "
 )
-# How the agent reaches its owner's machines, in force from the first turn.
-# Rendered whenever the latch command is installed; the binary's own guide
+# How the agent reaches its owner's machines. Carried in every turn prompt
+# (_plow_facts) whenever the latch command is installed, never in the session's
+# system prompt: Hermes freezes that per session, so a revision here would
+# never reach a session opened before it. The binary's own guide
 # (`latch skill`) owns command syntax, error codes and the default host, so
-# this says only what to reach for and when. The chat uid each call names
-# changes per turn, so the turn prompt carries it (_plow_facts) and this
-# section, frozen per session, does not.
+# this says only what to reach for and when.
 LATCH_PROMPT = (
     "Your owner's machines reach you through latch, a command-line tool you run in your terminal. "
     "A machine your owner set up as a latch host (their Mac, or the cloud computer, the host named "
@@ -947,10 +947,6 @@ LATCH_PROMPT = (
 
 def _has_latch() -> bool:
     return shutil.which("latch") is not None
-
-
-def _latch_section(_session_info: Mapping[str, Any]) -> str:
-    return LATCH_PROMPT if _has_latch() else ""
 
 
 REFRESH_TTL_S = 600
@@ -1134,8 +1130,8 @@ def _plow_facts(identity, chat_uid):
     roster = _lines_fact(identity)
     if roster:
         facts.append(roster)
-    # The rules are the plow-latch section's; only the chat changes per turn.
     if _has_latch():
+        facts.append(LATCH_PROMPT)
         facts.append(f"This chat's uid is {chat_uid}: pass `--plow-chat {chat_uid}` on latch calls for it.")
     facts.append(f"Your owner manages you at {DASHBOARD_URL}: credits and usage, Plow lines, full trust for group chats, "
                  "delight invites, the daily payment limit, and verbose output. "
@@ -3928,7 +3924,7 @@ def _is_draft_send(argv):
 # owner's world (#127). Each sentence rides on the result the way Hermes' own
 # link_hint does, so the model reads it as part of the answer. The hints only
 # make sense when latch is installed (there are machines to route to), so
-# the hook is gated on the same signal the Latch section uses.
+# the hook is gated on the same signal the turn's latch guidance uses.
 _LATCH_ROUTE = (
     "Your owner's messages, mail, calendar, contacts, files and what Plow did "
     "for them before are on their machines: run `latch status`, then reach "
@@ -5411,13 +5407,6 @@ def register(ctx):
         check_fn=plow_email.check_requirements,
         platform_hint=plow_email.hint(),
     )
-    # A Hermes without this API (older fleet pins) must still get its phone
-    # line: the section is guidance, the platform is the product.
-    register_section = getattr(ctx, "register_system_prompt_section", None)
-    if register_section is None:
-        log.warning("plow_chat: this Hermes has no register_system_prompt_section; Latch guidance not injected")
-    else:
-        register_section("plow-latch", _latch_section)
     # Registered unconditionally, like the platform itself: reaching a person
     # (and the group it opens) is handled by default, so gating the one
     # messaging tool on a config nobody has to set would leave it permanently
