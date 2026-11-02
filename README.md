@@ -149,7 +149,10 @@ turning the toggle off is obeyed on the next line rather than a minute later) is
 running. Hermes gives them no metadata of their own, so they are recognised by
 the text they open with, and the room rule below deliberately does not reach
 them: they are the runtime describing itself, never the turn's answer, so
-withholding one can never withhold the message the owner wanted.
+withholding one can never withhold the message the owner wanted. The ⚠️
+turn-stop warning is the exception: a failed turn has no other output, so
+where it would be dropped the room gets a neutral "Sorry, I couldn't answer
+that just now. Please try again." instead.
 
 The model's own **mid-turn prose** is gated by the same setting, but only
 where someone else is listening. What counts as mid-turn is a metadata test,
@@ -261,7 +264,8 @@ was started from while it is the owner's own or a trusted group they sit in
 opening with a plain header containing the subject and the turn's sender
 address. The copy recorded in that chat's session wraps the header as untrusted data
 and includes the thread's uid. A bare `NO_REPLY`, mid-turn prose and the runtime's
-diagnostics go nowhere. A closing `NO_REPLY` after text is stripped, and the
+diagnostics go nowhere, except a failed turn's ⚠️ turn-stop warning, which
+reaches the owner the same way as the retry line above. A closing `NO_REPLY` after text is stripped, and the
 preceding text still reaches the owner. No cron home
 (`PLOW_HOME_CHANNEL` stays the phone line's), no roster policy on
 multi-address threads, no backfill across a socket gap, and no delivered

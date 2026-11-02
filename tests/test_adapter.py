@@ -5773,9 +5773,8 @@ async def test_quiet_withholds_the_working_out_only_where_someone_else_is_listen
 @pytest.mark.parametrize(
     "body",
     ["💾 Self-improvement review: memory updated",
-     "⏳ Working — 6 min",
-     "⚠️ No reply: the model returned empty content after retries."],
-    ids=["background-review", "heartbeat", "turn-stop"],
+     "⏳ Working — 6 min"],
+    ids=["background-review", "heartbeat"],
 )
 async def test_hermes_diagnostics_stay_gated_in_the_owners_own_dm(
     monkeypatch: pytest.MonkeyPatch,
@@ -5807,6 +5806,31 @@ async def test_hermes_diagnostics_stay_gated_in_the_owners_own_dm(
     )
     delivered = await verbose.send("cht_a", body)
     assert delivered.success and loud.posts, "verbose delivers the same diagnostic"
+
+
+@pytest.mark.parametrize("chat_id", ["cht_a", "cht_g"], ids=["owner-dm", "group"])
+@pytest.mark.parametrize("verbose", [False, True], ids=["quiet", "verbose"])
+async def test_a_failed_turn_tells_the_room_to_try_again(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+    chat_id: str,
+    verbose: bool,
+) -> None:
+    """On a failed turn Hermes' turn-stop explainer is the turn's only output,
+    so withholding it leaves the sender in silence (#257). Quiet rooms get a
+    neutral retry line instead -- no model or provider names -- and a verbose
+    owner still gets the explainer itself."""
+    module = _load(monkeypatch, tmp_path)
+    http = _SettingsHTTP(_me(verbose=verbose))
+    adapter = _verbose_adapter(module, http, monkeypatch)
+    adapter._active_turn.set(
+        {"chat_uid": chat_id, "owner": True, "dm": chat_id == "cht_a", "authority": True, "no_reply_ok": False}
+    )
+    explainer = "⚠️ No reply: the model returned empty content after retries."
+
+    assert (await adapter.send(chat_id, explainer, metadata={"notify": True})).success
+    assert http.posts == [(f"{module.BASE}/v1/chats/{chat_id}/messages",
+                           {"body": explainer if verbose else module.NO_REPLY_RETRY})]
 
 
 @pytest.mark.parametrize(
@@ -5852,7 +5876,7 @@ async def test_a_settings_outage_is_quiet_and_never_raises(
     assert http.posts == [(f"{module.BASE}/v1/chats/cht_a/messages",
                            {"body": "Dinner is at 7."})]
 
-    diagnostic = await adapter.send("cht_a", "⚠️ No reply: empty content")
+    diagnostic = await adapter.send("cht_a", "⏳ Working — 6 min")
     status = await adapter.send_or_update_status("cht_a", "compacted", "✓ done")
     assert diagnostic.success and status.success
     assert len(http.posts) == 1, "an unreadable setting withholds, it does not deliver"
@@ -5901,7 +5925,7 @@ async def test_a_malformed_settings_body_is_quiet_not_an_exception(
     http = _SettingsHTTP(body)
     adapter = _verbose_adapter(module, http, monkeypatch)
 
-    first = await adapter.send("cht_a", "⚠️ No reply: empty content")
+    first = await adapter.send("cht_a", "⏳ Working — 6 min")
     second = await adapter.send_or_update_status("cht_a", "compacted", "✓ done")
 
     assert first.success and second.success
@@ -5962,9 +5986,9 @@ async def test_a_quiet_answer_landing_mid_read_beats_an_older_true(
     http = _RacingHTTP()
     adapter = _verbose_adapter(module, http, monkeypatch)
 
-    stale = asyncio.create_task(adapter.send("cht_g", "⚠️ No reply: empty content"))
+    stale = asyncio.create_task(adapter.send("cht_g", "⏳ Working — 6 min"))
     await verbose_read_started
-    fresh = await adapter.send("cht_g", "⚠️ No reply: empty content")
+    fresh = await adapter.send("cht_g", "⏳ Working — 6 min")
 
     assert (await stale).success and fresh.success
     assert http.posts == [], "the owner's newer quiet answer governs both sends"
@@ -5992,7 +6016,7 @@ async def test_only_a_quiet_answer_is_cached(
     monkeypatch.setattr(module.time, "monotonic", lambda: clock[0])
 
     for _ in range(3):
-        assert (await adapter.send("cht_a", "⚠️ No reply: empty content")).success
+        assert (await adapter.send("cht_a", "⏳ Working — 6 min")).success
     assert http.gets == [f"{module.BASE}/v1/agents/me"], "one quiet read serves the whole TTL"
     assert http.posts == []
 
@@ -6000,25 +6024,25 @@ async def test_only_a_quiet_answer_is_cached(
     # owner waits. Withholding is the safe direction to be stale in.
     http._body = _me(verbose=True)
     clock[0] += module.SETTINGS_TTL_SECONDS - 1
-    assert (await adapter.send("cht_a", "⚠️ No reply: empty content")).success
+    assert (await adapter.send("cht_a", "⏳ Working — 6 min")).success
     assert http.posts == [], "inside the TTL the cached quiet answer still governs"
 
     clock[0] += 2
-    assert (await adapter.send("cht_a", "⚠️ No reply: empty content")).success
+    assert (await adapter.send("cht_a", "⏳ Working — 6 min")).success
     assert len(http.gets) == 2
     assert http.posts == [(f"{module.BASE}/v1/chats/cht_a/messages",
-                           {"body": "⚠️ No reply: empty content"})]
+                           {"body": "⏳ Working — 6 min"})]
 
     # Switched OFF again: no entry authorised the delivery above, so there is
     # none to go stale, and the very next line is withheld -- no TTL to wait
     # out, which is the whole point of caching one answer and not the other.
     http._body = _me(verbose=False)
-    assert (await adapter.send("cht_a", "⚠️ No reply: empty content")).success
+    assert (await adapter.send("cht_a", "⏳ Working — 6 min")).success
     assert len(http.posts) == 1, "a disabled toggle withholds immediately, not a minute later"
     assert len(http.gets) == 3, "the true was re-read, never cached"
 
     # And that fresh quiet answer is cached like any other.
-    assert (await adapter.send("cht_a", "⚠️ No reply: empty content")).success
+    assert (await adapter.send("cht_a", "⏳ Working — 6 min")).success
     assert len(http.gets) == 3
     assert len(http.posts) == 1
 

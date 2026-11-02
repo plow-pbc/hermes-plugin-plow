@@ -25,9 +25,11 @@ from gateway.platforms.base import BasePlatformAdapter, MessageEvent, SendResult
 
 from ._transport import (
     BASE,
+    NO_REPLY_RETRY,
     NO_REPLY_SENTINEL,
     _ACTIVE_TURN,
     _DIAGNOSTIC_PREFIXES,
+    _NO_REPLY_PREFIX,
     _agent_name,
     _bearer,
     _chat_type,
@@ -269,6 +271,8 @@ class PlowEmailAdapter(BasePlatformAdapter):
         # for nobody. A closing sentinel strips only itself, not the owner's text.
         if _ends_silent(body):
             body = "\n".join(body.splitlines()[:-1]).rstrip()
+        if body.startswith(_NO_REPLY_PREFIX):
+            body = NO_REPLY_RETRY
         diagnostic = body.startswith(_DIAGNOSTIC_PREFIXES)
         if diagnostic or _is_chatter(turn, chat_id, metadata) or not body:
             log.info("[plow_email] dropped %s for %s", "diagnostic" if diagnostic

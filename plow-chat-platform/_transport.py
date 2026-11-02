@@ -469,6 +469,11 @@ _WORKING_PREFIX = "⏳ Working —"
 # final-response shim is dead code.
 _NO_REPLY_PREFIX = "⚠️ No reply: "
 _DIAGNOSTIC_PREFIXES = (BACKGROUND_REVIEW_PREFIX, _WORKING_PREFIX, _NO_REPLY_PREFIX)
+# Except the turn-stop explainer, which on a failed turn IS the turn's only
+# output: withholding it leaves the sender in silence. Where the explainer
+# would be withheld, this goes instead -- the room learns to ask again
+# without reading which model or provider failed.
+NO_REPLY_RETRY = "Sorry, I couldn't answer that just now. Please try again."
 
 # The open turn, as every tool handler and send guard reads it. Both
 # platforms set it in on_processing_start and clear it in
