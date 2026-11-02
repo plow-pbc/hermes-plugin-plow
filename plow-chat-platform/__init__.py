@@ -54,10 +54,12 @@ from hermes_constants import get_hermes_home
 
 from ._transport import (
     BASE,
+    NO_REPLY_RETRY,
     NO_REPLY_SENTINEL,
     _ACTIVE_TURN,
     _DIAGNOSTIC_PREFIXES,
     _NEVER_GUESS,
+    _NO_REPLY_PREFIX,
     _PlowAuthError,
     _UNTRUSTED_MARK,
     _agent_name,
@@ -2169,6 +2171,8 @@ class PlowChatAdapter(BasePlatformAdapter):
         # the answer. Letting them ride the carve-out would hand a quiet owner
         # the heartbeat and the memory notice in their own DM -- the two the
         # base image's seed deliberately produces for this gate to decide.
+        # The turn-stop explainer is the one exception: a failed turn has no
+        # other output, so a withheld one is swapped for NO_REPLY_RETRY.
         #
         # .get, not indexing: a chat can be inside the grant without its
         # resource cached -- a cross-chat send reaches one this adapter
@@ -2178,11 +2182,13 @@ class PlowChatAdapter(BasePlatformAdapter):
         withhold = diagnostic or (chatter and not _owner_dm(self._chats.get(chat_id, {})))
         async with aiohttp.ClientSession() as http:
             if withhold and not await self._verbose_enabled(http):
-                # Before typing is touched: a message the owner never sees must
-                # not eat the "working" signal either.
-                log.info("[plow_chat] dropped %s for %s",
-                         "diagnostic" if diagnostic else "mid-turn chatter", chat_id)
-                return SendResult(success=True)
+                if not body.startswith(_NO_REPLY_PREFIX):
+                    # Before typing is touched: a message the owner never sees
+                    # must not eat the "working" signal either.
+                    log.info("[plow_chat] dropped %s for %s",
+                             "diagnostic" if diagnostic else "mid-turn chatter", chat_id)
+                    return SendResult(success=True)
+                body = NO_REPLY_RETRY
             result = await self._post_message(http, chat_id, {"body": body}, metadata)
         if result.success:
             # Only once it lands: text that never reached the thread is not
