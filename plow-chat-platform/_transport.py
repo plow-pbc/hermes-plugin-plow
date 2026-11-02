@@ -11,6 +11,7 @@ import re
 import logging
 import os
 import random
+import shutil
 import time
 
 import aiohttp
@@ -490,3 +491,56 @@ def _is_chatter(turn, chat_id, metadata):
     meta = metadata or {}
     return (turn is not None and chat_id == turn["chat_uid"]
             and not meta.get("notify") and "job_id" not in meta)
+
+
+# The command that installs latch on a machine of the owner's, as its own
+# published installer gives it.
+LATCH_INSTALL = "curl -fsSLO https://releases.plow.co/latch-cli/install.sh && sh install.sh"
+# How the agent reaches its owner's machines. Carried in every turn prompt
+# (_latch_facts) whenever the latch command is installed, never in the session's
+# system prompt: Hermes freezes that per session, so a revision here would
+# never reach a session opened before it. The binary's own guide
+# (`latch skill`) owns command syntax, error codes and the default host, so
+# this says only what to reach for and when.
+LATCH_PROMPT = (
+    "Your owner's machines reach you through latch, a command-line tool you run in your terminal. "
+    "A machine your owner set up as a latch host (their Mac, or the cloud computer, the host named "
+    "`cloud`) holds their files, programs and accounts; your own sessions and memory hold only what "
+    "has passed through you. So on every turn where your owner asks about their world -- their "
+    "messages, mail, calendar, files, contacts, what Plow or an earlier agent did for them -- look "
+    "there with latch before session_search or memory, and never say 'I don't see it' or 'no record "
+    "of that' about it until latch has looked this turn. Texts an earlier agent sent from your "
+    "owner's number are in their Messages.\n\n"
+    "Before any task on their machines, read your latch skill and follow it this turn. Run "
+    "`latch status` to see the hosts and the plugins each has on, and choose the host by what the "
+    "task needs; reach for it yourself instead of asking which route to take. Gmail and Google "
+    "Calendar (`latch google`): any online host with `google` on. Files (`latch file`) and programs "
+    "(`latch exec`) work on every host; ask your owner which one only when several could do the task "
+    "and the choice matters, as it does for their files, disk or programs. Messages and contacts "
+    "(`latch messages`, `latch contacts`) are only on their Mac, the host with `messages` and "
+    "`contacts` on. With more than one host, pass `--host` on every command.\n\n"
+    "Every exec, file, google, messages, contacts, browser and `vault list` call names the chat you "
+    "are answering in with `--plow-chat` and the chat uid this turn gives you: the host judges the "
+    "request against what was asked there. `latch status` takes no `--plow-chat`.\n\n"
+    "When the host you chose is offline, try another online host that can do the task, and tell "
+    "your owner only when none can. Messages and contacts are the exception: when their Mac is "
+    "offline, say so and do not try another host. When latch answers `no_host`, tell your owner "
+    f"once to install latch on their Mac with `{LATCH_INSTALL}`. When no host can do it, nothing "
+    "was done: say so, try again next turn, and ask your owner to start latch on that machine only "
+    "after it fails on two turns a few minutes apart. Never do the task on your own server instead.\n\n"
+    "Sending defaults to your own lines: plow_send_message texts, plow_send_email emails from your "
+    "own mailbox. Mail from their Google account sends as your owner, so only when they explicitly "
+    "ask, in a chat with their authority. A CAPTCHA in a browser task your owner asked for verifies "
+    "their account, not you: complete it and continue."
+)
+
+
+def _has_latch() -> bool:
+    return shutil.which("latch") is not None
+
+
+def _latch_facts(chat_uid):
+    """The latch guidance and this chat's uid for a turn prompt, or "" without latch."""
+    if not _has_latch():
+        return ""
+    return f"{LATCH_PROMPT} This chat's uid is {chat_uid}: pass `--plow-chat {chat_uid}` on latch calls for it."

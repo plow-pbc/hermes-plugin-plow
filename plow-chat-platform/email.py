@@ -34,6 +34,7 @@ from ._transport import (
     _ends_silent,
     _granted_chats,
     _is_chatter,
+    _latch_facts,
     _lines_fact,
     _NO_IDENTITY,
     _one_line,
@@ -230,6 +231,9 @@ class PlowEmailAdapter(BasePlatformAdapter):
             # this mail is already event-deduped and would otherwise vanish silently.
             log.error("[plow_email] %s", exc)
             raise
+        latch = _latch_facts(chat_uid)
+        if latch:
+            channel_prompt = f"{channel_prompt} {latch}"
         # The roster rides owner turns only, as it does on the phone line.
         if sender.get("role") == "owner":
             roster = _lines_fact(self._identity)
