@@ -2234,6 +2234,7 @@ _BEARER_REFUSAL = aiohttp.ClientResponseError(
     ({"addressed": False}, {"reply_to": _OUR_MESSAGE}, True, False, False),
     ({"addressed": False}, {"chat": _solo_member_dm()}, True, False, False),
     ({"addressed": False}, {"chat": _human_group_chat()}, True, False, False),
+    ({"addressed": False}, {"chat": _collaboration_chat()}, False, True, False),
     ({"addressed": False}, {"body": "/restart"}, True, False, False),
     ({"addressed": False}, {"goal": True}, True, False, False),
     ({"addressed": False}, {"busy": "before"}, True, False, False),
@@ -2242,7 +2243,7 @@ _BEARER_REFUSAL = aiohttp.ClientResponseError(
     (None, {}, True, True, True),
     ({"addressed": False}, {"history": _BEARER_REFUSAL}, True, False, True),
     ({"addressed": False}, {"recorded": False}, True, True, False),
-], ids=["not-addressed", "addressed", "reply-to-ours", "solo-dm", "two-person-room", "slash-command", "goal",
+], ids=["not-addressed", "addressed", "reply-to-ours", "solo-dm", "two-person-room", "two-people-and-a-peer", "slash-command", "goal",
         "busy-session", "busy-during-the-call", "model-raises", "malformed", "history-refused",
         "record-fails"])
 async def test_a_group_message_not_for_this_agent_never_starts_a_turn(
