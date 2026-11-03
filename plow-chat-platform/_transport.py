@@ -284,9 +284,13 @@ def _is_solo_dm(chat):
     the model needs to tell apart, even with no other agent in the room.
     """
     participants = chat.get("participants") or []
-    if any(p.get("type") == "agent" and p.get("relationship") == "peer" for p in participants):
-        return False
-    return sum(1 for p in participants if p.get("type") == "member") <= 1
+    return not _has_peer(chat) and sum(1 for p in participants if p.get("type") == "member") <= 1
+
+
+def _has_peer(chat):
+    """Another agent is in the room."""
+    return any(p.get("type") == "agent" and p.get("relationship") == "peer"
+               for p in chat.get("participants") or [])
 
 
 def _chat_type(chat):
