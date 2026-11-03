@@ -158,7 +158,9 @@ The model's own **mid-turn prose** is gated by the same setting, but only
 where someone else is listening. What counts as mid-turn is a metadata test,
 not a prefix one: Hermes marks the turn-final reply `notify` and a cron
 delivery `job_id`, and anything carrying neither, sent while a turn is open, is
-the model working out loud.
+the model working out loud. A `plow_send_message` call is never mid-turn prose,
+even into the turn's own group, so a message that must land goes through it; it
+returns a `message_id` only for a body that reached the thread.
 
 **The answer goes last, and that is still a prompt rule, because the delivery
 seam can withhold prose but cannot recognise an answer.** Hermes reads whatever
