@@ -3320,11 +3320,13 @@ class PlowChatAdapter(BasePlatformAdapter):
         )
         # A shared room's message that may go unanswered is asked "is this
         # yours?" before the turn: a reply to us or an active goal already is.
+        # Not in a room of two people: there an unnamed ask is usually ours,
+        # and a silent miss costs more than the speak rule's occasional leak.
         # Not while this chat's session is busy, before the call or after it:
         # Hermes queues that message, and a row written mid-run could land
         # between a tool call and its result.
         session_key = self._event_session_key(event)
-        if (not _is_solo_dm(roster) and NO_REPLY_SENTINEL in channel_prompt
+        if (_head_count(roster) > 2 and NO_REPLY_SENTINEL in channel_prompt
                 and not burst[0].starts_slash_command and not _goal_active(goal)
                 and session_key not in self._active_sessions
                 and not any(m.reply_to and _from_self(m.reply_to["message"]["sender"], roster)

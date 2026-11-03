@@ -2158,11 +2158,11 @@ async def _gate_turn(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, pa
                      chat: dict[str, Any] | None = None, body: str = "Did the cleaners come today?",
                      history: Any = (), reply_to: dict[str, Any] | None = None,
                      goal: bool = False, busy: str = "", recorded: bool = True) -> tuple[Any, list[Any], _GateLlm, list[dict[str, Any]]]:
-    """Daniel speaks in a human group (or `chat`); the gate's model answers `parsed`."""
+    """Daniel speaks in a three-person group (or `chat`); the gate's model answers `parsed`."""
     module = _load(monkeypatch, tmp_path)
     module._plugin_llm = llm = _GateLlm(parsed)
     adapter = module.PlowChatAdapter(SimpleNamespace(extra={}))
-    adapter._set_reach([chat or _human_group_chat()])
+    adapter._set_reach([chat or _three_person_group_chat()])
     _mark_anchored(adapter, "cht_a")
     adapter._session_store = SimpleNamespace(
         get_or_create_session=lambda source, **kw: SimpleNamespace(session_id="s1"))
@@ -2201,6 +2201,16 @@ class _ThreadHTTP(_ChatResourceHTTP):
                       "has_more": False})
 
 
+def _three_person_group_chat() -> dict[str, Any]:
+    """Big enough for the gate: a room of two people skips it."""
+    chat = _human_group_chat()
+    chat["participants"].append(
+        {"type": "member", "uid": "mem_abby_cht_a", "display_name": "Abby", "role": "member",
+         "provider_key": "+15550000003"}
+    )
+    return chat
+
+
 def _solo_member_dm() -> dict[str, Any]:
     chat = _dm_chat()
     chat["participants"][1].update(uid="mem_daniel_cht_a", display_name="Daniel", role="member")
@@ -2223,6 +2233,7 @@ _BEARER_REFUSAL = aiohttp.ClientResponseError(
     ({"addressed": True}, {}, True, True, False),
     ({"addressed": False}, {"reply_to": _OUR_MESSAGE}, True, False, False),
     ({"addressed": False}, {"chat": _solo_member_dm()}, True, False, False),
+    ({"addressed": False}, {"chat": _human_group_chat()}, True, False, False),
     ({"addressed": False}, {"body": "/restart"}, True, False, False),
     ({"addressed": False}, {"goal": True}, True, False, False),
     ({"addressed": False}, {"busy": "before"}, True, False, False),
@@ -2231,7 +2242,7 @@ _BEARER_REFUSAL = aiohttp.ClientResponseError(
     (None, {}, True, True, True),
     ({"addressed": False}, {"history": _BEARER_REFUSAL}, True, False, True),
     ({"addressed": False}, {"recorded": False}, True, True, False),
-], ids=["not-addressed", "addressed", "reply-to-ours", "solo-dm", "slash-command", "goal",
+], ids=["not-addressed", "addressed", "reply-to-ours", "solo-dm", "two-person-room", "slash-command", "goal",
         "busy-session", "busy-during-the-call", "model-raises", "malformed", "history-refused",
         "record-fails"])
 async def test_a_group_message_not_for_this_agent_never_starts_a_turn(
@@ -2261,7 +2272,7 @@ async def test_the_gate_reads_the_thread_as_this_line(
 ) -> None:
     """Any line, by its own name, with the recent thread oldest-first and its
     own messages marked -- all as data, never instructions."""
-    chat = _human_group_chat()
+    chat = _three_person_group_chat()
     chat["participants"][0]["line"]["display_name"] = name
     history = [  # newest-first, as Plow serves it: the burst and one message after it too
         {"uid": "msg_2", "direction": "inbound", "body": "Who's picking up the keys?",

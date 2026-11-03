@@ -440,7 +440,9 @@ and the ten messages before this one as untrusted data, so someone else's
 errand never reaches a tool that could move the owner's mail, calendar or Mac.
 It is skipped where the message is already the agent's or the session cannot
 take a side write: a DM, a slash command, an active goal, a reply to one of the
-agent's own messages, and a chat whose session is mid-turn. A "no" records the
+agent's own messages, and a chat whose session is mid-turn. It is also skipped in
+a room of two people, where an unnamed ask is usually the agent's and a silent
+miss costs more; the speak rule alone decides there. A "no" records the
 message in the chat's session as a user turn, acks it and starts nothing, so
 the next turn still reads the room. Any failure — the model, the history read,
 the record — runs the turn as before and logs a warning. Praise of this agent,
