@@ -4393,11 +4393,19 @@ def _plow_send_message(args, **_kwargs):
                                         "use action=list and pass a cht_ id"})
         target = matches[0]
 
+    # A tool send is the model's deliberate message, never its working-out, so
+    # the room's chatter rule must not withhold it -- not even into the turn's
+    # own group, where a woken turn posts its ask. Not `notify`: the turn goes
+    # on after a tool call, and its typing refresh must too.
     try:
         result = asyncio.run_coroutine_threadsafe(
-            adapter.send(target, body), loop).result(timeout=45)
+            adapter.send(target, body, metadata={"tool_send": True}), loop).result(timeout=45)
     except Exception as exc:  # noqa: BLE001 - no answer is not a failure to retry
         return _lost_answer(exc)
+    if result.success and not result.message_id:
+        # send() withholds by succeeding with no id; a caller recording that it
+        # sent must not read a withheld body as delivered.
+        return json.dumps({"success": False, "error": "withheld, nothing was sent"})
     if not result.success:
         out = {"success": False, "error": result.error}
         if result.raw_response and result.raw_response.get("delivery_unknown"):

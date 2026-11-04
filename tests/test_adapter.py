@@ -5668,8 +5668,9 @@ async def test_send_typing_posts_once_per_cooldown_window(
         ({"notify": True}, True, False),
         ({"job_id": "j1"}, False, False),
         (None, True, True),
+        ({"tool_send": True}, True, True),  # plow_send_message: the turn goes on
     ],
-    ids=["mid-turn", "the-answer", "cron", "no-metadata"],
+    ids=["mid-turn", "the-answer", "cron", "no-metadata", "tool-send"],
 )
 async def test_a_delivered_message_re_raises_the_bubble_unless_it_is_the_answer(
     monkeypatch: pytest.MonkeyPatch,
@@ -7883,18 +7884,6 @@ def test_mirror_sent_reports_a_failure_loudly(
     assert "cht_target" in caplog.text and "not mirrored" in caplog.text
 
 
-def test_plow_send_message_sends_through_the_live_adapter(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
-) -> None:
-    module = _load(monkeypatch, tmp_path)
-    sent: list[Any] = []
-    _live_tool(module, monkeypatch, "send",
-               result=_SendResult(success=True, message_id="msg_1"), record=sent)
-    out = json.loads(module._plow_send_message({"to": "cht_other", "body": " 1. A\n2. B "}))
-    assert out == {"success": True, "chat_id": "cht_other", "message_id": "msg_1"}
-    assert sent == [("cht_other", "1. A\n2. B")]
-
-
 @pytest.mark.parametrize("turn, target, mirrored", [
     (_OWNER_DM, "cht_b", ["cht_b"]),
     (_OWNER_DM, "cht_a", []),
@@ -8082,6 +8071,32 @@ def test_person_targeting_reuses_an_existing_group(
     module._ACTIVE_TURN.set(_OWNER_DM)
     out = json.loads(module._plow_send_message({"to": "+15550001111", "body": "hi again"}))
     assert out["success"] is True and out["created"] is False and out["chat_id"] == "cht_old"
+
+
+@pytest.mark.parametrize("body, out, posted", [
+    (" 1. Is it clean?\n2. When? ", {"success": True, "chat_id": "cht_g", "message_id": "msg_sent"},
+     [{"body": "1. Is it clean?\n2. When?"}]),
+    ("⏳ Working — 6 min", {"success": False, "error": "withheld, nothing was sent"}, []),
+], ids=["lands", "withheld"])
+def test_plow_send_message_into_the_turns_own_group_succeeds_only_with_a_message_id(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
+    body: str, out: dict[str, Any], posted: list[dict[str, str]],
+) -> None:
+    """A tool send is the model's deliberate message, never its working-out:
+    on a woken turn in a group, a send into the turn's own chat with verbose
+    off reaches Plow, and its message id is what proves it landed (#262). A
+    body the room still withholds reports a failure, so nothing records it
+    as sent. Driven through the real send() and a real loop thread."""
+    module = _load(monkeypatch, tmp_path)
+    adapter = _live_tool(module, monkeypatch, None)
+    adapter._set_reach([_chat("cht_a"), _chat("cht_g", group=True)])
+    http = _SettingsHTTP(_me(verbose=False))
+    monkeypatch.setattr(module.aiohttp, "ClientSession", lambda *a, **k: http)
+    module._ACTIVE_TURN.set({"chat_uid": "cht_g", "owner": True, "dm": False,
+                             "authority": True, "no_reply_ok": True})
+
+    assert json.loads(module._plow_send_message({"to": "cht_g", "body": body})) == out
+    assert [sent for _, sent in http.posts] == posted
 
 
 @pytest.mark.parametrize("turn", [_OWNER_DM, None],
