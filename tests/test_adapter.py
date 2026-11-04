@@ -5668,8 +5668,9 @@ async def test_send_typing_posts_once_per_cooldown_window(
         ({"notify": True}, True, False),
         ({"job_id": "j1"}, False, False),
         (None, True, True),
+        ({"tool_send": True}, True, True),  # plow_send_message: the turn goes on
     ],
-    ids=["mid-turn", "the-answer", "cron", "no-metadata"],
+    ids=["mid-turn", "the-answer", "cron", "no-metadata", "tool-send"],
 )
 async def test_a_delivered_message_re_raises_the_bubble_unless_it_is_the_answer(
     monkeypatch: pytest.MonkeyPatch,
