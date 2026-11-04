@@ -492,14 +492,14 @@ def _is_chatter(turn, chat_id, metadata):
     is open, into that turn's own chat, is its working-out. Hermes marks the
     turn-final reply `notify` -- the key telegram, discord, mattermost and a2a
     already read for the same distinction -- and the scheduler marks a cron
-    delivery `job_id`. Everything an adapter itself sends (a goal notice, the
-    send_message tool) runs turn-less or cross-chat, so it falls
-    out as not-chatter without needing to say so. Both platforms read an
-    outbound message this way; what they do with the verdict is theirs.
+    delivery `job_id`. A goal notice runs turn-less, so it falls out as
+    not-chatter without needing to say so; plow_send_message marks itself
+    `tool_send`, since it can post into the turn's own chat. Both platforms
+    read an outbound message this way; what they do with the verdict is theirs.
     """
     meta = metadata or {}
     return (turn is not None and chat_id == turn["chat_uid"]
-            and not meta.get("notify") and "job_id" not in meta)
+            and not meta.get("notify") and not meta.get("tool_send") and "job_id" not in meta)
 
 
 # The command that installs latch on a machine of the owner's, as its own
