@@ -15,7 +15,7 @@
 plow-pbc/plow
 plow-pbc/plow-hermes-agent
 plow-pbc/agent-mgr
-plow-pbc/latch
+plow-pbc/latch-cli
 
 # Upstream. `plow_chat` is a Hermes platform adapter — it subclasses
 # `BasePlatformAdapter` and is the only repo here that imports upstream
