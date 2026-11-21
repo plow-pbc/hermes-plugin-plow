@@ -32,7 +32,7 @@ optional_env:
     secret: false
     password: false
   - name: PLOW_WIKI_HOST
-    description: "The latch host that holds ~/Plow/wiki; wiki recall reaches it with --host. Unset: latch's default host"
+    description: "The latch host that holds the owner's wiki, ~/Plow/wiki/personal; wiki recall reaches it with --host. Unset: latch's default host"
     prompt: "Wiki latch host"
     secret: false
     password: false

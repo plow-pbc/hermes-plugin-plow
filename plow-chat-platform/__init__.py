@@ -3523,10 +3523,11 @@ WIKI_EMBED_MODEL = "embeddinggemma"
 WIKI_EMBED_DIMS = 256  # trained to truncate; keeps embeddings.json small
 WIKI_EMBED_BATCH = 64
 WIKI_EMBED_TIMEOUT_S = 20.0  # under Hermes' 30 s bounded-hook timeout
-WIKI_ROOT = "~/Plow/wiki"
+# The owner's own vault; ~/Plow/wiki holds one folder per vault (personal, company...).
+WIKI_ROOT = "~/Plow/wiki/personal"
 WIKI_CHUNKS_PATH = f"{WIKI_ROOT}/.wiki/chunks.json"
-# A sibling of the wiki, so never snapshotted, in the folder that holds the wiki
-# and so always exists: `latch file put` makes no folders.
+# A sibling of the vault, so never snapshotted, in ~/Plow/wiki, which holds the
+# vault and so always exists: `latch file put` makes no folders.
 WIKI_EMBEDDINGS_PATH = f"{WIKI_ROOT}.recall.json"
 WIKI_LATCH_TIMEOUT_S = 20.0
 _wiki: dict[str, Any] = {"corpus": None, "fetched_at": 0.0, "tried_at": 0.0, "lock": threading.Lock()}
