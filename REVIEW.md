@@ -1,5 +1,9 @@
 # Review instructions — hermes-plugin-plow
 
+## Cause-first bug fixes
+
+Fix a bug at its cause so the class can't recur. Never fix it with a layer, guard, link, workaround or hand-edit of data around it. A fix that adds net complexity must state why in the PR. When the bug comes from a duplicated source or identity, remove the duplicate rather than bridging the two.
+
 Repo-specific reviewer policy. The universal voice posture (Broken-Glass,
 pro-simplification, and the don't-propose list) is supplied by the reviewers
 themselves and is deliberately not restated here.
